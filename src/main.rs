@@ -2,6 +2,7 @@ mod config;
 mod db;
 mod discord;
 mod entries;
+mod followups;
 mod init;
 mod members;
 mod reminders;

@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use serenity::all::{ChannelId, ChannelType, CreateMessage, CreateThread, Http};
 
 use crate::config::Config;
-use crate::{members, reminders};
+use crate::{followups, members, reminders};
 
 /// Pure time comparison - testable without a live clock or Discord types.
 fn is_due(now: NaiveTime, trigger: NaiveTime) -> bool {
@@ -60,6 +60,34 @@ async fn tick(
             &date,
             "meeting_reminder",
             "🗓️ Optional meeting time - whether it happens today is the tech lead's call.",
+        )
+        .await;
+    }
+
+    let todo_followup_trigger =
+        config.todo_time + chrono::Duration::minutes(config.todo_followup_delay_minutes.into());
+    let update_followup_trigger =
+        config.update_time + chrono::Duration::minutes(config.update_followup_delay_minutes.into());
+
+    if is_due(now_time, todo_followup_trigger) {
+        maybe_fire_followups(
+            http,
+            db,
+            &date,
+            "todo_followup",
+            followups::members_missing_todo,
+            "📋 don't forget to submit your `/todo` for today!",
+        )
+        .await;
+    }
+    if is_due(now_time, update_followup_trigger) {
+        maybe_fire_followups(
+            http,
+            db,
+            &date,
+            "update_followup",
+            followups::members_missing_update,
+            "⏰ don't forget to submit an `/update` for today's todo(s)!",
         )
         .await;
     }
@@ -185,6 +213,82 @@ async fn maybe_fire_simple_reminder(
 fn already_sent(db: &Arc<Mutex<Connection>>, date: &str, kind: &str) -> anyhow::Result<bool> {
     let conn = db.lock().expect("db mutex poisoned");
     reminders::already_sent(&conn, date, kind)
+}
+
+/// Nags each member `query` returns as missing something for `date`, one
+/// in-thread `@mention` per person, skipping anyone already nagged today
+/// (per the doc's "at most once" framing - a restart mid-way through
+/// nagging several people won't re-nag the ones already done).
+async fn maybe_fire_followups(
+    http: &Arc<Http>,
+    db: &Arc<Mutex<Connection>>,
+    date: &str,
+    kind: &str,
+    query: fn(&Connection, &str) -> anyhow::Result<Vec<String>>,
+    message: &str,
+) {
+    let missing = {
+        let conn = db.lock().expect("db mutex poisoned");
+        query(&conn, date)
+    };
+    let missing = match missing {
+        Ok(ids) if ids.is_empty() => return,
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("failed to list members missing {kind}: {e}");
+            return;
+        }
+    };
+
+    let thread_id = {
+        let conn = db.lock().expect("db mutex poisoned");
+        reminders::thread_for(&conn, date)
+    };
+    let thread_id = match thread_id {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            eprintln!("no standup thread yet for {date}, skipping {kind}");
+            return;
+        }
+        Err(e) => {
+            eprintln!("failed to look up standup thread for {kind}: {e}");
+            return;
+        }
+    };
+    let Ok(raw_id) = thread_id.parse::<u64>() else {
+        eprintln!("invalid stored thread_id {thread_id:?} for {date}");
+        return;
+    };
+    let channel_id = ChannelId::new(raw_id);
+
+    for discord_user_id in missing {
+        let already = {
+            let conn = db.lock().expect("db mutex poisoned");
+            followups::already_sent(&conn, date, &discord_user_id, kind)
+        };
+        match already {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("failed to check {kind} status for {discord_user_id}: {e}");
+                continue;
+            }
+        }
+
+        let content = format!("<@{discord_user_id}> {message}");
+        if let Err(e) = channel_id
+            .send_message(http, CreateMessage::new().content(content))
+            .await
+        {
+            eprintln!("failed to post {kind} to {discord_user_id}: {e}");
+            continue;
+        }
+
+        let conn = db.lock().expect("db mutex poisoned");
+        if let Err(e) = followups::mark_sent(&conn, date, &discord_user_id, kind) {
+            eprintln!("failed to mark {kind} sent for {discord_user_id}: {e}");
+        }
+    }
 }
 
 #[cfg(test)]

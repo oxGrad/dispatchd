@@ -104,6 +104,7 @@ src/
   members.rs     roster seeding + is_lead check + all_member_ids
   status.rs      /team-status DB queries + formatting
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
+  followups.rs   followups_sent DB logic (missing-todo/update nags)
   init.rs        `dispatchd init` subcommand
   discord/       serenity Handler, one file per slash command
     mod.rs         EventHandler impl, interaction dispatch, shared helpers,
