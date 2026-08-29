@@ -1,0 +1,44 @@
+# dispatchd team roster.
+#
+# Located by default at $XDG_CONFIG_HOME/dispatchd/members.toml (typically
+# ~/.config/dispatchd/members.toml). Set DISPATCHD_MEMBERS_PATH to point at
+# a specific file instead.
+#
+# Uncomment and edit the entries below with your team's real Discord user
+# IDs, then restart dispatchd to seed the roster - editing this file and
+# restarting again later updates existing rows in place (matched by
+# discord_user_id), it won't create duplicates.
+#
+# name is just a display label used in bot output (e.g. /team-status lines) -
+# it doesn't need to match the person's actual Discord username.
+# role must be one of: lead | designer | senior | medior | junior
+
+# [[members]]
+# discord_user_id = "000000000000000001"
+# name = "Tech Lead's Name"
+# role = "lead"
+
+# [[members]]
+# discord_user_id = "000000000000000002"
+# name = "Designer's Name"
+# role = "designer"
+
+# [[members]]
+# discord_user_id = "000000000000000003"
+# name = "Senior Engineer's Name"
+# role = "senior"
+
+# [[members]]
+# discord_user_id = "000000000000000004"
+# name = "Senior Engineer's Name"
+# role = "senior"
+
+# [[members]]
+# discord_user_id = "000000000000000005"
+# name = "Medior Engineer's Name"
+# role = "medior"
+
+# [[members]]
+# discord_user_id = "000000000000000006"
+# name = "Junior Engineer's Name"
+# role = "junior"

@@ -9,25 +9,32 @@ use serde::Deserialize;
 /// Env var that, when set, points directly at the config file to load,
 /// bypassing XDG lookup. Useful under systemd where HOME/XDG_CONFIG_HOME
 /// may not be populated for a service account.
-const CONFIG_PATH_OVERRIDE_ENV: &str = "DISPATCHD_CONFIG_PATH";
+pub const CONFIG_PATH_OVERRIDE_ENV: &str = "DISPATCHD_CONFIG_PATH";
+/// Env var that, when set, points directly at the SQLite DB file to open,
+/// bypassing the XDG data-dir default.
+const DB_PATH_OVERRIDE_ENV: &str = "DISPATCHD_DB_PATH";
 
 const DEFAULT_TODO_TIME: &str = "09:00";
 const DEFAULT_UPDATE_TIME: &str = "15:00";
 const DEFAULT_MEETING_REMINDER_TIME: &str = "16:00";
 const DEFAULT_TODO_FOLLOWUP_DELAY_MINUTES: u32 = 30;
+const DEFAULT_UPDATE_FOLLOWUP_DELAY_MINUTES: u32 = 30;
 const DEFAULT_TICKER_INTERVAL_SECONDS: u64 = 60;
 const DEFAULT_TIMEZONE: &str = "UTC";
+const DEFAULT_DB_FILE_NAME: &str = "dispatchd.sqlite3";
 
-/// The resolved, fully-typed schedule config actually used by the rest of
-/// the program. Every field is guaranteed valid.
+/// The resolved, fully-typed, flat config actually used by the rest of the
+/// program. Every field is guaranteed valid.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub todo_time: NaiveTime,
     pub update_time: NaiveTime,
     pub meeting_reminder_time: NaiveTime,
     pub todo_followup_delay_minutes: u32,
+    pub update_followup_delay_minutes: u32,
     pub ticker_interval_seconds: u64,
     pub timezone: Tz,
+    pub db_path: PathBuf,
 }
 
 impl Default for Config {
@@ -38,8 +45,10 @@ impl Default for Config {
             meeting_reminder_time: parse_time(DEFAULT_MEETING_REMINDER_TIME)
                 .expect("default meeting_reminder_time is valid"),
             todo_followup_delay_minutes: DEFAULT_TODO_FOLLOWUP_DELAY_MINUTES,
+            update_followup_delay_minutes: DEFAULT_UPDATE_FOLLOWUP_DELAY_MINUTES,
             ticker_interval_seconds: DEFAULT_TICKER_INTERVAL_SECONDS,
             timezone: parse_timezone(DEFAULT_TIMEZONE).expect("default timezone is valid"),
+            db_path: xdg_default_db_path().expect("default db_path is resolvable"),
         }
     }
 }
@@ -48,12 +57,26 @@ impl Default for Config {
 /// file deserializes to all-`None`, which is a valid state (defaults only).
 #[derive(Debug, Default, Deserialize)]
 struct RawConfig {
+    #[serde(default)]
+    schedule: RawSchedule,
+    #[serde(default)]
+    followup: RawFollowup,
+    timezone: Option<String>,
+    db_path: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawSchedule {
     todo_time: Option<String>,
     update_time: Option<String>,
     meeting_reminder_time: Option<String>,
-    todo_followup_delay_minutes: Option<u32>,
     ticker_interval_seconds: Option<u64>,
-    timezone: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawFollowup {
+    todo_delay_minutes: Option<u32>,
+    update_delay_minutes: Option<u32>,
 }
 
 impl Config {
@@ -61,32 +84,47 @@ impl Config {
     /// overrides found in the XDG-located (or explicitly pointed-at) config
     /// file. A missing file is not an error - it just means "use defaults".
     pub fn load() -> Result<Config> {
-        let raw = match find_config_path()? {
+        let raw = match config_file_path()? {
             Some(path) => read_raw_config(&path)?,
             None => RawConfig::default(),
         };
-        Config::from_raw(raw)
+        let mut config = Config::from_raw(raw)?;
+        // Highest-precedence override, applied once here rather than inside
+        // `from_raw`/`Default` - keeps those two env-var-free and safe to
+        // call from concurrent tests.
+        if let Ok(path) = env::var(DB_PATH_OVERRIDE_ENV) {
+            config.db_path = PathBuf::from(path);
+        }
+        Ok(config)
     }
 
     fn from_raw(raw: RawConfig) -> Result<Config> {
         let defaults = Config::default();
 
-        let todo_time = match raw.todo_time {
-            Some(s) => parse_time(&s).with_context(|| format!("invalid todo_time: {s:?}"))?,
+        let todo_time = match raw.schedule.todo_time {
+            Some(s) => {
+                parse_time(&s).with_context(|| format!("invalid schedule.todo_time: {s:?}"))?
+            }
             None => defaults.todo_time,
         };
-        let update_time = match raw.update_time {
-            Some(s) => parse_time(&s).with_context(|| format!("invalid update_time: {s:?}"))?,
+        let update_time = match raw.schedule.update_time {
+            Some(s) => {
+                parse_time(&s).with_context(|| format!("invalid schedule.update_time: {s:?}"))?
+            }
             None => defaults.update_time,
         };
-        let meeting_reminder_time = match raw.meeting_reminder_time {
+        let meeting_reminder_time = match raw.schedule.meeting_reminder_time {
             Some(s) => parse_time(&s)
-                .with_context(|| format!("invalid meeting_reminder_time: {s:?}"))?,
+                .with_context(|| format!("invalid schedule.meeting_reminder_time: {s:?}"))?,
             None => defaults.meeting_reminder_time,
         };
         let timezone = match raw.timezone {
             Some(s) => parse_timezone(&s).with_context(|| format!("invalid timezone: {s:?}"))?,
             None => defaults.timezone,
+        };
+        let db_path = match raw.db_path {
+            Some(s) => PathBuf::from(s),
+            None => defaults.db_path,
         };
 
         Ok(Config {
@@ -94,12 +132,19 @@ impl Config {
             update_time,
             meeting_reminder_time,
             todo_followup_delay_minutes: raw
-                .todo_followup_delay_minutes
+                .followup
+                .todo_delay_minutes
                 .unwrap_or(defaults.todo_followup_delay_minutes),
+            update_followup_delay_minutes: raw
+                .followup
+                .update_delay_minutes
+                .unwrap_or(defaults.update_followup_delay_minutes),
             ticker_interval_seconds: raw
+                .schedule
                 .ticker_interval_seconds
                 .unwrap_or(defaults.ticker_interval_seconds),
             timezone,
+            db_path,
         })
     }
 }
@@ -113,15 +158,44 @@ fn parse_timezone(s: &str) -> Result<Tz> {
         .map_err(|e| anyhow::anyhow!("unknown IANA timezone {s:?}: {e}"))
 }
 
+pub(crate) fn xdg_dirs() -> xdg::BaseDirectories {
+    xdg::BaseDirectories::with_prefix("dispatchd")
+}
+
 /// Resolves the config file path to load, without reading it. Returns
 /// `None` when no override env var is set and no XDG config file exists.
-fn find_config_path() -> Result<Option<PathBuf>> {
+pub fn config_file_path() -> Result<Option<PathBuf>> {
     if let Ok(path) = env::var(CONFIG_PATH_OVERRIDE_ENV) {
         return Ok(Some(PathBuf::from(path)));
     }
+    Ok(xdg_dirs().find_config_file("config.toml"))
+}
 
-    let xdg_dirs = xdg::BaseDirectories::with_prefix("dispatchd");
-    Ok(xdg_dirs.find_config_file("config.toml"))
+/// Resolves the config file's *target* path for `dispatchd init` - i.e.
+/// where a new file should be created, as opposed to `config_file_path`
+/// which only locates one that already exists.
+pub fn config_target_path() -> Result<PathBuf> {
+    if let Ok(path) = env::var(CONFIG_PATH_OVERRIDE_ENV) {
+        let path = PathBuf::from(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        return Ok(path);
+    }
+    xdg_dirs()
+        .place_config_file("config.toml")
+        .context("failed to resolve config.toml target path (is $HOME set?)")
+}
+
+/// Resolves the DB file's default location: $XDG_DATA_HOME/dispatchd/dispatchd.sqlite3,
+/// without creating any directories (that's `db::open`'s job, at the point
+/// it actually opens the file) and without consulting `DISPATCHD_DB_PATH`
+/// (that's `Config::load`'s job, applied once at the very end).
+fn xdg_default_db_path() -> Result<PathBuf> {
+    xdg_dirs()
+        .get_data_file(DEFAULT_DB_FILE_NAME)
+        .context("could not determine data directory (is $HOME set?); set DISPATCHD_DB_PATH")
 }
 
 fn read_raw_config(path: &Path) -> Result<RawConfig> {
@@ -134,6 +208,7 @@ fn read_raw_config(path: &Path) -> Result<RawConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
     use std::io::Write;
 
     fn write_config(contents: &str) -> (tempfile::TempDir, PathBuf) {
@@ -151,52 +226,90 @@ mod tests {
     }
 
     #[test]
-    fn partial_override_changes_only_that_field() {
-        let (_dir, path) = write_config("update_time = \"18:30\"\n");
+    fn partial_schedule_override_changes_only_that_field() {
+        let (_dir, path) = write_config("[schedule]\nupdate_time = \"18:30\"\n");
         let raw = read_raw_config(&path).unwrap();
         let config = Config::from_raw(raw).unwrap();
 
         let defaults = Config::default();
-        assert_eq!(config.update_time, NaiveTime::from_hms_opt(18, 30, 0).unwrap());
+        assert_eq!(
+            config.update_time,
+            NaiveTime::from_hms_opt(18, 30, 0).unwrap()
+        );
         assert_eq!(config.todo_time, defaults.todo_time);
         assert_eq!(config.meeting_reminder_time, defaults.meeting_reminder_time);
         assert_eq!(
             config.todo_followup_delay_minutes,
             defaults.todo_followup_delay_minutes
         );
-        assert_eq!(config.ticker_interval_seconds, defaults.ticker_interval_seconds);
+        assert_eq!(
+            config.update_followup_delay_minutes,
+            defaults.update_followup_delay_minutes
+        );
+        assert_eq!(
+            config.ticker_interval_seconds,
+            defaults.ticker_interval_seconds
+        );
         assert_eq!(config.timezone, defaults.timezone);
+        assert_eq!(config.db_path, defaults.db_path);
     }
 
     #[test]
     fn full_override_changes_every_field() {
         let (_dir, path) = write_config(
             r#"
+            timezone = "Asia/Jakarta"
+            db_path = "/tmp/custom/dispatchd.sqlite3"
+
+            [schedule]
             todo_time = "08:15"
             update_time = "14:45"
             meeting_reminder_time = "17:00"
-            todo_followup_delay_minutes = 45
             ticker_interval_seconds = 120
-            timezone = "Asia/Jakarta"
+
+            [followup]
+            todo_delay_minutes = 45
+            update_delay_minutes = 20
             "#,
         );
         let raw = read_raw_config(&path).unwrap();
         let config = Config::from_raw(raw).unwrap();
 
         assert_eq!(config.todo_time, NaiveTime::from_hms_opt(8, 15, 0).unwrap());
-        assert_eq!(config.update_time, NaiveTime::from_hms_opt(14, 45, 0).unwrap());
+        assert_eq!(
+            config.update_time,
+            NaiveTime::from_hms_opt(14, 45, 0).unwrap()
+        );
         assert_eq!(
             config.meeting_reminder_time,
             NaiveTime::from_hms_opt(17, 0, 0).unwrap()
         );
         assert_eq!(config.todo_followup_delay_minutes, 45);
+        assert_eq!(config.update_followup_delay_minutes, 20);
         assert_eq!(config.ticker_interval_seconds, 120);
         assert_eq!(config.timezone, Tz::Asia__Jakarta);
+        assert_eq!(
+            config.db_path,
+            PathBuf::from("/tmp/custom/dispatchd.sqlite3")
+        );
+    }
+
+    #[test]
+    fn followup_delays_resolve_independently() {
+        let (_dir, path) = write_config("[followup]\ntodo_delay_minutes = 99\n");
+        let raw = read_raw_config(&path).unwrap();
+        let config = Config::from_raw(raw).unwrap();
+
+        assert_eq!(config.todo_followup_delay_minutes, 99);
+        assert_eq!(
+            config.update_followup_delay_minutes,
+            Config::default().update_followup_delay_minutes
+        );
     }
 
     #[test]
     fn invalid_time_string_is_an_error() {
-        let (_dir, path) = write_config("todo_time = \"25:00\"\n");
+        let (_dir, path) = write_config("[schedule]\ntodo_time = \"25:00\"\n");
         let raw = read_raw_config(&path).unwrap();
         let err = Config::from_raw(raw).unwrap_err();
         assert!(err.to_string().contains("todo_time"), "{err}");
@@ -212,17 +325,49 @@ mod tests {
 
     #[test]
     fn config_path_override_env_var_is_honored() {
-        let (_dir, path) = write_config("update_time = \"20:00\"\n");
-        // SAFETY: tests run single-threaded within this process for env var
-        // mutation purposes is not guaranteed by cargo test, but this test
-        // is self-contained: it only reads back its own value immediately.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let (_dir, path) = write_config("[schedule]\nupdate_time = \"20:00\"\n");
+        // SAFETY: held under ENV_LOCK, so no concurrent test observes or
+        // mutates this env var while it's set.
         unsafe {
             env::set_var(CONFIG_PATH_OVERRIDE_ENV, &path);
         }
-        let resolved = find_config_path().unwrap();
+        let resolved = config_file_path().unwrap();
         unsafe {
             env::remove_var(CONFIG_PATH_OVERRIDE_ENV);
         }
         assert_eq!(resolved, Some(path));
+    }
+
+    #[test]
+    fn db_path_override_env_var_wins_over_config_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let (_dir, config_path) = write_config("db_path = \"/from/config/file.sqlite3\"\n");
+        // SAFETY: held under ENV_LOCK; both vars removed before returning.
+        unsafe {
+            env::set_var(CONFIG_PATH_OVERRIDE_ENV, &config_path);
+            env::set_var(DB_PATH_OVERRIDE_ENV, "/from/env/file.sqlite3");
+        }
+        let config = Config::load().unwrap();
+        unsafe {
+            env::remove_var(CONFIG_PATH_OVERRIDE_ENV);
+            env::remove_var(DB_PATH_OVERRIDE_ENV);
+        }
+        assert_eq!(config.db_path, PathBuf::from("/from/env/file.sqlite3"));
+    }
+
+    #[test]
+    fn config_file_db_path_used_when_env_var_absent() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let (_dir, config_path) = write_config("db_path = \"/from/config/file.sqlite3\"\n");
+        // SAFETY: held under ENV_LOCK; removed before returning.
+        unsafe {
+            env::set_var(CONFIG_PATH_OVERRIDE_ENV, &config_path);
+        }
+        let config = Config::load().unwrap();
+        unsafe {
+            env::remove_var(CONFIG_PATH_OVERRIDE_ENV);
+        }
+        assert_eq!(config.db_path, PathBuf::from("/from/config/file.sqlite3"));
     }
 }

@@ -1,16 +1,25 @@
-# Example dispatchd config.
+# dispatchd config file.
 #
-# By default dispatchd looks for this file at
-# $XDG_CONFIG_HOME/dispatchd/config.toml (typically ~/.config/dispatchd/config.toml).
-# Set DISPATCHD_CONFIG_PATH to point at a specific file instead (e.g. under
-# systemd, where HOME/XDG_CONFIG_HOME may not be set for a service account).
+# Located by default at $XDG_CONFIG_HOME/dispatchd/config.toml (typically
+# ~/.config/dispatchd/config.toml). Set DISPATCHD_CONFIG_PATH to point at a
+# specific file instead (e.g. under systemd, where HOME/XDG_CONFIG_HOME may
+# not be set for a service account).
 #
-# All fields are optional - anything left out keeps its built-in default
-# (shown here).
+# Every key below is optional and shown commented-out with its built-in
+# default - uncomment and edit to override. NOTE: top-level keys (timezone,
+# db_path) must come before any [table] header in TOML, or they'd be parsed
+# as belonging to that table instead of the root - keep that ordering if you
+# reorder this file.
 
-todo_time = "09:00"
-update_time = "15:00"
-meeting_reminder_time = "16:00"
-todo_followup_delay_minutes = 30
-ticker_interval_seconds = 60
-timezone = "UTC"
+# timezone = "UTC"
+# db_path = "/home/pi/.local/share/dispatchd/dispatchd.sqlite3"
+
+[schedule]
+# todo_time = "09:00"
+# update_time = "15:00"
+# meeting_reminder_time = "16:00"
+# ticker_interval_seconds = 60
+
+[followup]
+# todo_delay_minutes = 30
+# update_delay_minutes = 30
