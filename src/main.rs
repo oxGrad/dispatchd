@@ -1,10 +1,12 @@
 mod config;
 mod db;
 mod discord;
+mod entries;
 mod init;
 mod members;
 
 use std::env;
+use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand};
 use config::Config;
@@ -53,7 +55,6 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load()?;
     let conn = db::open(&config.db_path)?;
     let seeded = members::seed(&conn)?;
-    drop(conn);
 
     println!("dispatchd effective schedule:");
     println!("  todo_time:                    {}", config.todo_time);
@@ -92,7 +93,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match discord_credentials(&config) {
-        Some((token, guild_id)) => discord::run(token, guild_id).await?,
+        Some((token, guild_id)) => {
+            let db = Arc::new(Mutex::new(conn));
+            discord::run(token, guild_id, config.timezone, db).await?
+        }
         None => println!(
             "Discord not configured — see docs/discord-setup.md to set DISPATCHD_DISCORD_TOKEN and discord_guild_id"
         ),
