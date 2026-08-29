@@ -35,6 +35,8 @@ pub struct Config {
     pub ticker_interval_seconds: u64,
     pub timezone: Tz,
     pub db_path: PathBuf,
+    pub discord_guild_id: Option<u64>,
+    pub discord_standup_channel_id: Option<u64>,
 }
 
 impl Default for Config {
@@ -49,6 +51,8 @@ impl Default for Config {
             ticker_interval_seconds: DEFAULT_TICKER_INTERVAL_SECONDS,
             timezone: parse_timezone(DEFAULT_TIMEZONE).expect("default timezone is valid"),
             db_path: xdg_default_db_path().expect("default db_path is resolvable"),
+            discord_guild_id: None,
+            discord_standup_channel_id: None,
         }
     }
 }
@@ -63,6 +67,8 @@ struct RawConfig {
     followup: RawFollowup,
     timezone: Option<String>,
     db_path: Option<String>,
+    discord_guild_id: Option<u64>,
+    discord_standup_channel_id: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -145,6 +151,8 @@ impl Config {
                 .unwrap_or(defaults.ticker_interval_seconds),
             timezone,
             db_path,
+            discord_guild_id: raw.discord_guild_id,
+            discord_standup_channel_id: raw.discord_standup_channel_id,
         })
     }
 }
@@ -260,6 +268,8 @@ mod tests {
             r#"
             timezone = "Asia/Jakarta"
             db_path = "/tmp/custom/dispatchd.sqlite3"
+            discord_guild_id = 111111111111111111
+            discord_standup_channel_id = 222222222222222222
 
             [schedule]
             todo_time = "08:15"
@@ -292,6 +302,15 @@ mod tests {
             config.db_path,
             PathBuf::from("/tmp/custom/dispatchd.sqlite3")
         );
+        assert_eq!(config.discord_guild_id, Some(111111111111111111));
+        assert_eq!(config.discord_standup_channel_id, Some(222222222222222222));
+    }
+
+    #[test]
+    fn discord_ids_default_to_none() {
+        let config = Config::from_raw(RawConfig::default()).unwrap();
+        assert_eq!(config.discord_guild_id, None);
+        assert_eq!(config.discord_standup_channel_id, None);
     }
 
     #[test]

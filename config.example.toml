@@ -6,13 +6,17 @@
 # not be set for a service account).
 #
 # Every key below is optional and shown commented-out with its built-in
-# default - uncomment and edit to override. NOTE: top-level keys (timezone,
-# db_path) must come before any [table] header in TOML, or they'd be parsed
-# as belonging to that table instead of the root - keep that ordering if you
+# default (discord_guild_id/discord_standup_channel_id have no default -
+# uncommenting them is required before dispatchd will connect to Discord;
+# see docs/discord-setup.md for how to get these IDs). NOTE: top-level keys
+# must come before any [table] header in TOML, or they'd be parsed as
+# belonging to that table instead of the root - keep that ordering if you
 # reorder this file.
 
 # timezone = "UTC"
 # db_path = "/home/pi/.local/share/dispatchd/dispatchd.sqlite3"
+# discord_guild_id = 123456789012345678
+# discord_standup_channel_id = 123456789012345679
 
 [schedule]
 # todo_time = "09:00"
