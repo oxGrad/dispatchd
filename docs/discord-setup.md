@@ -68,10 +68,26 @@ If everything's wired up correctly, you'll see:
 dispatchd connected to Discord as <your bot's name>
 ```
 
-and the `/ping` command will show up in your server within seconds
-(guild-scoped commands take effect immediately, unlike global ones). Run
-`/ping` in the server — dispatchd should reply "pong! dispatchd is alive."
+and `/ping`, `/todo`, `/update`, and `/team-status` will show up in your
+server within seconds (guild-scoped commands take effect immediately,
+unlike global ones). Run `/ping` in the server — dispatchd should reply
+"pong! dispatchd is alive."
 
 If `discord_guild_id` or `DISPATCHD_DISCORD_TOKEN` aren't set, dispatchd
 still runs its config/database checks and prints "Discord not configured"
 instead of connecting — that's expected until you complete the steps above.
+
+## 6. `/team-status` permissions
+
+`/team-status` is meant for the tech lead only. The bot always checks this
+itself (looking up the caller in `members.toml`'s `is_lead` flag) no matter
+what — that check can't be bypassed from Discord's side. On top of that,
+the command is registered with Discord's `Manage Server` permission
+requirement, so it's hidden from the command picker for anyone without
+that permission by default.
+
+If you want it restricted to a specific "Tech Lead" role instead of
+everyone with `Manage Server`, that's a one-time manual step: **Server
+Settings → Integrations → dispatchd → team-status**, then set it to only
+the role(s) you want. This is optional — the bot-side check is the real
+gate either way.

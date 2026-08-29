@@ -1,3 +1,4 @@
+mod team_status;
 mod todo;
 mod update;
 
@@ -27,6 +28,7 @@ impl EventHandler for Handler {
             CreateCommand::new("ping").description("Check that dispatchd is alive"),
             todo::command(),
             update::command(),
+            team_status::command(),
         ];
         if let Err(e) = self.guild_id.set_commands(&ctx.http, commands).await {
             eprintln!("failed to register guild commands: {e}");
@@ -48,6 +50,9 @@ impl EventHandler for Handler {
                 }
                 "todo" => todo::handle_command(&ctx, &command).await,
                 "update" => update::handle_command(&ctx, &command).await,
+                "team-status" => {
+                    team_status::handle_command(&ctx, &command, &self.db, &self.timezone).await
+                }
                 _ => {}
             },
             Interaction::Autocomplete(autocomplete) => {

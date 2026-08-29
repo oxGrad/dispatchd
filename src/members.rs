@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 
 use crate::config::xdg_dirs;
@@ -89,6 +89,19 @@ pub fn seed(conn: &Connection) -> Result<usize> {
     }
 
     Ok(file.members.len())
+}
+
+/// `false` for an unknown `discord_user_id`, not an error - the bot-side
+/// source-of-truth check for `/team-status`.
+pub fn is_lead(conn: &Connection, discord_user_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT is_lead FROM members WHERE discord_user_id = ?1",
+            [discord_user_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ mod discord;
 mod entries;
 mod init;
 mod members;
+mod status;
 
 use std::env;
 use std::sync::{Arc, Mutex};
