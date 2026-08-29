@@ -1,4 +1,5 @@
 mod team_status;
+mod ticker;
 mod todo;
 mod update;
 
@@ -8,11 +9,13 @@ use anyhow::{Context, Result};
 use chrono_tz::Tz;
 use rusqlite::Connection;
 use serenity::all::{
-    ActionRowComponent, Client, Context as SerenityContext, CreateCommand,
+    ActionRowComponent, ChannelId, Client, Context as SerenityContext, CreateCommand,
     CreateInteractionResponse, CreateInteractionResponseMessage, EventHandler, GatewayIntents,
     GuildId, Interaction, ModalInteraction, Ready,
 };
 use serenity::async_trait;
+
+use crate::config::Config;
 
 pub struct Handler {
     guild_id: GuildId,
@@ -91,7 +94,7 @@ pub(crate) fn modal_value(modal: &ModalInteraction, custom_id: &str) -> Option<S
 pub async fn run(
     token: String,
     guild_id: u64,
-    timezone: Tz,
+    config: Config,
     db: Arc<Mutex<Connection>>,
 ) -> Result<()> {
     // GUILDS + GUILD_MESSAGES only - MESSAGE_CONTENT isn't needed since
@@ -100,11 +103,22 @@ pub async fn run(
     let mut client = Client::builder(token, intents)
         .event_handler(Handler {
             guild_id: GuildId::new(guild_id),
-            db,
-            timezone,
+            db: db.clone(),
+            timezone: config.timezone,
         })
         .await
         .context("failed to build Discord client")?;
+
+    match config.discord_standup_channel_id {
+        Some(channel_id) => {
+            let http = client.http.clone();
+            tokio::spawn(ticker::run(http, db, ChannelId::new(channel_id), config));
+        }
+        None => println!(
+            "reminders disabled - set discord_standup_channel_id in config.toml to enable the daily standup ticker"
+        ),
+    }
+
     client.start().await.context("Discord client error")?;
     Ok(())
 }

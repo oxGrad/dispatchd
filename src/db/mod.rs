@@ -5,7 +5,10 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("migrations/0001_initial.sql"))])
+    Migrations::new(vec![
+        M::up(include_str!("migrations/0001_initial.sql")),
+        M::up(include_str!("migrations/0002_daily_threads.sql")),
+    ])
 }
 
 /// Opens (creating if needed) the SQLite DB at `path`, sets the pragmas the
@@ -59,7 +62,13 @@ mod tests {
         let conn = open(&dir.path().join("dispatchd.sqlite3")).unwrap();
         assert_eq!(
             table_names(&conn),
-            vec!["entries", "followups_sent", "members", "reminders_sent"]
+            vec![
+                "daily_threads",
+                "entries",
+                "followups_sent",
+                "members",
+                "reminders_sent"
+            ]
         );
     }
 
@@ -90,7 +99,13 @@ mod tests {
 
         assert_eq!(
             table_names(&conn2),
-            vec!["entries", "followups_sent", "members", "reminders_sent"]
+            vec![
+                "daily_threads",
+                "entries",
+                "followups_sent",
+                "members",
+                "reminders_sent"
+            ]
         );
     }
 }

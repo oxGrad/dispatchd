@@ -101,12 +101,15 @@ src/
   config.rs      Config struct, XDG lookup + env-var overrides, TOML merge
   db/            SQLite connection + embedded migrations
   entries.rs     todo/update row DB logic
-  members.rs     roster seeding + is_lead check
+  members.rs     roster seeding + is_lead check + all_member_ids
   status.rs      /team-status DB queries + formatting
+  reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
   init.rs        `dispatchd init` subcommand
   discord/       serenity Handler, one file per slash command
-    mod.rs         EventHandler impl, interaction dispatch, shared helpers
+    mod.rs         EventHandler impl, interaction dispatch, shared helpers,
+                    spawns the ticker alongside the client
     todo.rs        /todo
     update.rs      /update (autocomplete + modal custom_id encoding)
     team_status.rs /team-status
+    ticker.rs      daily standup thread creation + 9am/3pm/4pm reminders
 ```

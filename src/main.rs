@@ -4,6 +4,7 @@ mod discord;
 mod entries;
 mod init;
 mod members;
+mod reminders;
 mod status;
 
 use std::env;
@@ -96,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
     match discord_credentials(&config) {
         Some((token, guild_id)) => {
             let db = Arc::new(Mutex::new(conn));
-            discord::run(token, guild_id, config.timezone, db).await?
+            discord::run(token, guild_id, config.clone(), db).await?
         }
         None => println!(
             "Discord not configured — see docs/discord-setup.md to set DISPATCHD_DISCORD_TOKEN and discord_guild_id"

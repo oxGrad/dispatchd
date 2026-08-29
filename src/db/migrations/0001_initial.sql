@@ -22,11 +22,11 @@ CREATE TABLE entries (
     FOREIGN KEY (todo_id) REFERENCES entries(id)
 );
 
--- Tracks whether the 9am/3pm reminder already fired for a given date,
+-- Tracks whether the 9am/3pm/4pm reminder already fired for a given date,
 -- so a bot restart never causes a double-post
 CREATE TABLE reminders_sent (
     date TEXT NOT NULL,
-    type TEXT NOT NULL,   -- 'todo_reminder' | 'update_reminder'
+    type TEXT NOT NULL,   -- 'todo_reminder' | 'update_reminder' | 'meeting_reminder'
     PRIMARY KEY (date, type)
 );
 

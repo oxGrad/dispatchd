@@ -104,6 +104,16 @@ pub fn is_lead(conn: &Connection, discord_user_id: &str) -> Result<bool> {
         .unwrap_or(false))
 }
 
+/// Every team member's Discord user id - used to build the `<@id> ...`
+/// mention text for the 9am standup ping. Order doesn't matter.
+pub fn all_member_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT discord_user_id FROM members")?;
+    let ids = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,5 +271,31 @@ mod tests {
         assert!(err.to_string().contains("intern"), "{err}");
         assert!(err.to_string().contains("Alice"), "{err}");
         assert_eq!(row_count(&conn), 0);
+    }
+
+    #[test]
+    fn all_member_ids_returns_every_seeded_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("d.sqlite3")).unwrap();
+
+        seed_from(
+            &conn,
+            r#"
+            [[members]]
+            discord_user_id = "1"
+            name = "Alice"
+            role = "lead"
+
+            [[members]]
+            discord_user_id = "2"
+            name = "Budi"
+            role = "designer"
+            "#,
+        )
+        .unwrap();
+
+        let mut ids = all_member_ids(&conn).unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["1".to_string(), "2".to_string()]);
     }
 }
