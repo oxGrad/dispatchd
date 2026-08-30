@@ -23,6 +23,7 @@
 # update_time = "15:00"
 # meeting_reminder_time = "16:00"
 # ticker_interval_seconds = 60
+# run_on_weekends = false
 
 [followup]
 # todo_delay_minutes = 30

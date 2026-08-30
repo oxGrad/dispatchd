@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::NaiveTime;
+use chrono::{Datelike, NaiveTime, Weekday};
 use rusqlite::Connection;
 use serenity::all::{
     ChannelId, ChannelType, CreateMessage, CreateThread, Error as SerenityError, Http, HttpError,
@@ -13,6 +13,11 @@ use crate::{followups, members, reminders};
 /// Pure time comparison - testable without a live clock or Discord types.
 fn is_due(now: NaiveTime, trigger: NaiveTime) -> bool {
     now >= trigger
+}
+
+/// Pure weekday check - testable without a live clock or Discord types.
+fn is_weekend(day: Weekday) -> bool {
+    matches!(day, Weekday::Sat | Weekday::Sun)
 }
 
 /// Discord's JSON error code for "Unknown Channel" - returned when a
@@ -64,6 +69,9 @@ async fn tick(
     config: &Config,
 ) {
     let now = chrono::Utc::now().with_timezone(&config.timezone);
+    if !config.run_on_weekends && is_weekend(now.weekday()) {
+        return;
+    }
     let date = now.format("%Y-%m-%d").to_string();
     let now_time = now.time();
 
@@ -365,5 +373,16 @@ mod tests {
         assert!(is_due(trigger, trigger));
         assert!(is_due(NaiveTime::from_hms_opt(9, 0, 1).unwrap(), trigger));
         assert!(is_due(NaiveTime::from_hms_opt(15, 0, 0).unwrap(), trigger));
+    }
+
+    #[test]
+    fn is_weekend_is_true_only_for_saturday_and_sunday() {
+        assert!(is_weekend(Weekday::Sat));
+        assert!(is_weekend(Weekday::Sun));
+        assert!(!is_weekend(Weekday::Mon));
+        assert!(!is_weekend(Weekday::Tue));
+        assert!(!is_weekend(Weekday::Wed));
+        assert!(!is_weekend(Weekday::Thu));
+        assert!(!is_weekend(Weekday::Fri));
     }
 }

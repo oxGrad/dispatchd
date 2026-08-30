@@ -20,6 +20,7 @@ const DEFAULT_MEETING_REMINDER_TIME: &str = "16:00";
 const DEFAULT_TODO_FOLLOWUP_DELAY_MINUTES: u32 = 30;
 const DEFAULT_UPDATE_FOLLOWUP_DELAY_MINUTES: u32 = 30;
 const DEFAULT_TICKER_INTERVAL_SECONDS: u64 = 60;
+const DEFAULT_RUN_ON_WEEKENDS: bool = false;
 const DEFAULT_TIMEZONE: &str = "UTC";
 const DEFAULT_DB_FILE_NAME: &str = "dispatchd.sqlite3";
 
@@ -33,6 +34,7 @@ pub struct Config {
     pub todo_followup_delay_minutes: u32,
     pub update_followup_delay_minutes: u32,
     pub ticker_interval_seconds: u64,
+    pub run_on_weekends: bool,
     pub timezone: Tz,
     pub db_path: PathBuf,
     pub discord_guild_id: Option<u64>,
@@ -49,6 +51,7 @@ impl Default for Config {
             todo_followup_delay_minutes: DEFAULT_TODO_FOLLOWUP_DELAY_MINUTES,
             update_followup_delay_minutes: DEFAULT_UPDATE_FOLLOWUP_DELAY_MINUTES,
             ticker_interval_seconds: DEFAULT_TICKER_INTERVAL_SECONDS,
+            run_on_weekends: DEFAULT_RUN_ON_WEEKENDS,
             timezone: parse_timezone(DEFAULT_TIMEZONE).expect("default timezone is valid"),
             db_path: xdg_default_db_path().expect("default db_path is resolvable"),
             discord_guild_id: None,
@@ -77,6 +80,7 @@ struct RawSchedule {
     update_time: Option<String>,
     meeting_reminder_time: Option<String>,
     ticker_interval_seconds: Option<u64>,
+    run_on_weekends: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -149,6 +153,10 @@ impl Config {
                 .schedule
                 .ticker_interval_seconds
                 .unwrap_or(defaults.ticker_interval_seconds),
+            run_on_weekends: raw
+                .schedule
+                .run_on_weekends
+                .unwrap_or(defaults.run_on_weekends),
             timezone,
             db_path,
             discord_guild_id: raw.discord_guild_id,
@@ -258,8 +266,23 @@ mod tests {
             config.ticker_interval_seconds,
             defaults.ticker_interval_seconds
         );
+        assert_eq!(config.run_on_weekends, defaults.run_on_weekends);
         assert_eq!(config.timezone, defaults.timezone);
         assert_eq!(config.db_path, defaults.db_path);
+    }
+
+    #[test]
+    fn ritual_does_not_run_on_weekends_by_default() {
+        assert!(!Config::default().run_on_weekends);
+    }
+
+    #[test]
+    fn run_on_weekends_is_overridable() {
+        let (_dir, path) = write_config("[schedule]\nrun_on_weekends = true\n");
+        let raw = read_raw_config(&path).unwrap();
+        let config = Config::from_raw(raw).unwrap();
+
+        assert!(config.run_on_weekends);
     }
 
     #[test]
@@ -276,6 +299,7 @@ mod tests {
             update_time = "14:45"
             meeting_reminder_time = "17:00"
             ticker_interval_seconds = 120
+            run_on_weekends = true
 
             [followup]
             todo_delay_minutes = 45
@@ -297,6 +321,7 @@ mod tests {
         assert_eq!(config.todo_followup_delay_minutes, 45);
         assert_eq!(config.update_followup_delay_minutes, 20);
         assert_eq!(config.ticker_interval_seconds, 120);
+        assert!(config.run_on_weekends);
         assert_eq!(config.timezone, Tz::Asia__Jakarta);
         assert_eq!(
             config.db_path,
