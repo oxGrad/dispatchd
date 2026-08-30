@@ -316,7 +316,8 @@ pub async fn handle_delete(
             "⚠️ Couldn't find that todo (already deleted, or not from today?).".to_string()
         }
         Ok(DeleteTodoOutcome::StillReferenced) => {
-            "⚠️ Can't delete - you've already posted an /update against this todo.".to_string()
+            "⚠️ Can't delete - you've already posted a /progress report against this todo."
+                .to_string()
         }
         Err(e) => {
             eprintln!("failed to delete todo: {e}");

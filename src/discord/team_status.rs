@@ -11,7 +11,7 @@ use crate::{entries, members, status};
 
 pub fn command() -> CreateCommand {
     CreateCommand::new("team-status")
-        .description("Show today's todo/update status for the team")
+        .description("Show today's todo/progress status for the team")
         .default_member_permissions(Permissions::MANAGE_GUILD)
 }
 

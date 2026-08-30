@@ -1,8 +1,8 @@
 mod help;
+mod progress;
 mod team_status;
 mod ticker;
 mod todo;
-mod update;
 
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +33,7 @@ impl EventHandler for Handler {
             CreateCommand::new("ping").description("Check that dispatchd is alive"),
             help::command(),
             todo::command(),
-            update::command(),
+            progress::command(),
             team_status::command(),
         ];
         if let Err(e) = self.guild_id.set_commands(&ctx.http, commands).await {
@@ -69,7 +69,7 @@ impl EventHandler for Handler {
                     Some(("help", _)) => todo::handle_help(&ctx, &command).await,
                     _ => {}
                 },
-                "update" => update::handle_command(&ctx, &command).await,
+                "progress" => progress::handle_command(&ctx, &command).await,
                 "team-status" => {
                     team_status::handle_command(&ctx, &command, &self.db, &self.timezone).await
                 }
@@ -79,8 +79,9 @@ impl EventHandler for Handler {
                 "todo" => {
                     todo::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone).await
                 }
-                "update" => {
-                    update::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone).await
+                "progress" => {
+                    progress::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone)
+                        .await
                 }
                 _ => {}
             },
@@ -92,8 +93,10 @@ impl EventHandler for Handler {
             {
                 todo::handle_edit_modal_submission(&ctx, &modal, &self.db, &self.timezone).await;
             }
-            Interaction::Modal(modal) if modal.data.custom_id.starts_with(update::MODAL_PREFIX) => {
-                update::handle_modal_submission(&ctx, &modal, &self.db, &self.timezone).await;
+            Interaction::Modal(modal)
+                if modal.data.custom_id.starts_with(progress::MODAL_PREFIX) =>
+            {
+                progress::handle_modal_submission(&ctx, &modal, &self.db, &self.timezone).await;
             }
             _ => {}
         }
@@ -113,7 +116,7 @@ pub(crate) fn modal_value(modal: &ModalInteraction, custom_id: &str) -> Option<S
 }
 
 /// Reads a resolved string-valued command option by name, unwrapping an
-/// in-progress autocomplete value too. Shared by `update.rs` (the `task`
+/// in-progress autocomplete value too. Shared by `progress.rs` (the `task`
 /// option) and `todo.rs` (the `id` option on `edit`/`delete`).
 pub(crate) fn get_option_string(options: &[CommandDataOption], name: &str) -> Option<String> {
     options

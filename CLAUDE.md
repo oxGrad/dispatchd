@@ -1,7 +1,7 @@
 # dispatchd
 
 A Discord bot that automates a 6-person team's daily standup ritual
-(`/todo`, `/update`, `/team-status`) and stores submissions in SQLite for
+(`/todo`, `/progress`, `/team-status`) and stores submissions in SQLite for
 a later biweekly recap. Rust, `serenity` + `tokio` for Discord, `rusqlite`
 for storage. Full requirements live in the original handover doc (ask the
 user for it if you need the "why" behind a design choice — it's not
@@ -76,7 +76,7 @@ it here.
 
 ## A note on live Discord testing
 
-Every Discord-facing feature so far (`/ping`, `/todo`, `/update`,
+Every Discord-facing feature so far (`/ping`, `/todo`, `/progress`,
 `/team-status`) has been written without ever exercising a live gateway
 connection or a real interaction - the sandbox this was originally built
 in has its egress proxy configured to block `discord.com` outright
@@ -89,7 +89,7 @@ before treating a Discord-facing change as verified.
 
 Everything DB-layer (`src/db.rs`, `src/entries.rs`, `src/members.rs`,
 `src/status.rs`) and the pure encode/decode helpers in
-`src/discord/update.rs` (`status_code`, `encode_task_for_modal`,
+`src/discord/progress.rs` (`status_code`, `encode_task_for_modal`,
 `parse_custom_id`, etc.) are fully unit-tested and don't have this
 limitation.
 
@@ -160,9 +160,13 @@ src/
                     today's todos (not just open ones - see
                     entries::list_todos vs list_open_todos); delete is
                     blocked by entries.todo_id's FOREIGN KEY (surfaced as
-                    a friendly reply, not a raw DB error) if an /update
-                    already references the todo
-    update.rs      /update (autocomplete + modal custom_id encoding)
+                    a friendly reply, not a raw DB error) if a /progress
+                    report already references the todo
+    progress.rs    /progress (autocomplete + modal custom_id encoding) -
+                    named for the report it submits, not the underlying
+                    'update' DB row type (entries.type/reminders_sent.type/
+                    etc. keep that name - it's the data concept, not the
+                    command surface)
     team_status.rs /team-status
     ticker.rs      daily standup thread creation + 9am/3pm/4pm reminders;
                     gives up (marks sent, doesn't retry) on a deleted

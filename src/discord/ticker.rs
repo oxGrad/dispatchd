@@ -84,7 +84,7 @@ async fn tick(
             db,
             &date,
             "update_reminder",
-            "⏰ Time for your afternoon update! Submit via `/update`.",
+            "⏰ Time for your afternoon progress report! Submit via `/progress`.",
         )
         .await;
     }
@@ -122,7 +122,7 @@ async fn tick(
             &date,
             "update_followup",
             followups::members_missing_update,
-            "⏰ don't forget to submit an `/update` for today's todo(s)!",
+            "⏰ don't forget to submit a `/progress` report for today's todo(s)!",
         )
         .await;
     }

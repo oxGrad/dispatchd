@@ -10,7 +10,7 @@ const HELP_TEXT: &str = "\
 `/todo delete` - delete one of today's todos
 `/todo list` - list today's todos with their ids
 `/todo help` - todo-specific help
-`/update` - submit an update against one of today's todos (or free-typed unplanned work)
+`/progress` - submit a progress report against one of today's todos (or free-typed unplanned work)
 `/team-status` - (tech lead only) see who's updated today
 `/ping` - check that dispatchd is alive";
 
@@ -42,7 +42,7 @@ mod tests {
             "/todo delete",
             "/todo list",
             "/todo help",
-            "/update",
+            "/progress",
             "/team-status",
             "/ping",
         ] {

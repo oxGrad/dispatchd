@@ -102,7 +102,7 @@ see:
 dispatchd connected to Discord as <your bot's name>
 ```
 
-and `/ping`, `/todo`, `/update`, and `/team-status` will show up in your
+and `/ping`, `/todo`, `/progress`, and `/team-status` will show up in your
 server within seconds (guild-scoped commands take effect immediately,
 unlike global ones). Run `/ping` in the server — dispatchd should reply
 "pong! dispatchd is alive."

@@ -13,14 +13,14 @@ use crate::entries;
 
 use super::{get_option_string, modal_value};
 
-pub const MODAL_PREFIX: &str = "update_modal:";
+pub const MODAL_PREFIX: &str = "progress_modal:";
 const PROGRESS_INPUT_ID: &str = "progress";
 const BLOCKER_INPUT_ID: &str = "blocker";
 const TASK_ENCODE_MAX_LEN: usize = 60;
 
 pub fn command() -> CreateCommand {
-    CreateCommand::new("update")
-        .description("Submit an update against today's todos")
+    CreateCommand::new("progress")
+        .description("Submit a progress report against today's todos")
         .add_option(
             CreateCommandOption::new(
                 CommandOptionType::String,
@@ -82,7 +82,7 @@ fn encode_task_for_modal(task_value: &str) -> (String, bool) {
     }
 }
 
-/// Parses `"update_modal:<status_code>:<task_encoded>"` into
+/// Parses `"progress_modal:<status_code>:<task_encoded>"` into
 /// `(status_code, task_encoded)`. `None` if malformed.
 fn parse_custom_id(custom_id: &str) -> Option<(&str, &str)> {
     let rest = custom_id.strip_prefix(MODAL_PREFIX)?;
@@ -122,7 +122,7 @@ pub async fn handle_autocomplete(
         .create_response(&ctx.http, CreateInteractionResponse::Autocomplete(response))
         .await
     {
-        eprintln!("failed to respond to /update autocomplete: {e}");
+        eprintln!("failed to respond to /progress autocomplete: {e}");
     }
 }
 
@@ -136,7 +136,7 @@ pub async fn handle_command(ctx: &SerenityContext, command: &CommandInteraction)
         status_code(&status_value)
     );
 
-    let modal = CreateModal::new(custom_id, "Submit update").components(vec![
+    let modal = CreateModal::new(custom_id, "Submit progress").components(vec![
         CreateActionRow::InputText(
             CreateInputText::new(InputTextStyle::Paragraph, "Progress", PROGRESS_INPUT_ID)
                 .required(true),
@@ -155,7 +155,7 @@ pub async fn handle_command(ctx: &SerenityContext, command: &CommandInteraction)
         .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
         .await
     {
-        eprintln!("failed to open /update modal: {e}");
+        eprintln!("failed to open /progress modal: {e}");
     }
 }
 
@@ -169,7 +169,7 @@ pub async fn handle_modal_submission(
 
     let Some((status_code_str, task_encoded)) = parse_custom_id(&modal.data.custom_id) else {
         eprintln!(
-            "malformed /update modal custom_id: {}",
+            "malformed /progress modal custom_id: {}",
             modal.data.custom_id
         );
         return;
@@ -213,10 +213,10 @@ pub async fn handle_modal_submission(
     };
 
     let reply_text = match insert_result {
-        Ok(task) => format!("✅ Update saved: {task} — {}", status_label(status)),
+        Ok(task) => format!("✅ Progress saved: {task} — {}", status_label(status)),
         Err(e) => {
             eprintln!("failed to insert update: {e}");
-            "⚠️ Something went wrong saving your update - please try again.".to_string()
+            "⚠️ Something went wrong saving your progress - please try again.".to_string()
         }
     };
 
@@ -227,7 +227,7 @@ pub async fn handle_modal_submission(
         .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
         .await
     {
-        eprintln!("failed to respond to /update modal submission: {e}");
+        eprintln!("failed to respond to /progress modal submission: {e}");
     }
 }
 
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn parse_custom_id_splits_valid_input() {
         assert_eq!(
-            parse_custom_id("update_modal:D:id:42"),
+            parse_custom_id("progress_modal:D:id:42"),
             Some(("D", "id:42"))
         );
     }
@@ -276,6 +276,6 @@ mod tests {
     #[test]
     fn parse_custom_id_rejects_malformed_input() {
         assert_eq!(parse_custom_id("something_else:D:id:42"), None);
-        assert_eq!(parse_custom_id("update_modal:D"), None);
+        assert_eq!(parse_custom_id("progress_modal:D"), None);
     }
 }

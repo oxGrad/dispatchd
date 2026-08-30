@@ -164,7 +164,7 @@ pub enum DeleteTodoOutcome {
     Deleted(String),
     /// No such todo today, or not owned by this user.
     NotFound,
-    /// An `/update` already references this todo via `todo_id`.
+    /// A `/progress` report already references this todo via `todo_id`.
     StillReferenced,
 }
 
