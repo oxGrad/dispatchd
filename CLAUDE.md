@@ -53,11 +53,7 @@ Env vars (all `DISPATCHD_*`, overriding the XDG-resolved path/value):
 - `DISPATCHD_CONFIG_PATH`, `DISPATCHD_DB_PATH`, `DISPATCHD_MEMBERS_PATH`
 - `DISPATCHD_DISCORD_TOKEN` - the bot token, never put in `config.toml`
   (it's a secret; `discord_guild_id`/`discord_standup_channel_id` in
-  `config.toml` are not secrets and live there instead). This is the
-  local/dev fallback; under `dispatchd service install`'s systemd unit the
-  token is read instead from `$CREDENTIALS_DIRECTORY/discord_token`,
-  decrypted by systemd from a `systemd-creds`-encrypted credential file -
-  see `src/service.rs` and `docs/discord-setup.md`.
+  `config.toml` are not secrets and live there instead)
 
 Discord application/bot setup (creating the app, intents, invite link,
 getting guild/channel IDs) is in `docs/discord-setup.md` - don't duplicate
