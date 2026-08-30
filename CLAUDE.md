@@ -170,7 +170,13 @@ src/
                     etc. keep that name - it's the data concept, not the
                     command surface)
     team_status.rs /team-status
-    ticker.rs      daily standup thread creation + 9am/3pm/4pm reminders;
-                    gives up (marks sent, doesn't retry) on a deleted
-                    standup thread instead of retrying every tick
+    ticker.rs      creates today's thread early (thread_creation_time,
+                    default 08:30) ahead of the 9am/3pm/4pm reminders, then
+                    every tick posts any new /todo|/progress submission
+                    into it (entries::entries_since + a per-thread sync
+                    cursor on daily_threads) since those commands' own
+                    replies are ephemeral - the only way the team sees
+                    each other's activity; gives up (marks sent/advances
+                    the cursor, doesn't retry) on a deleted standup thread
+                    instead of retrying every tick
 ```

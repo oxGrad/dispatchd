@@ -8,7 +8,7 @@ use serenity::all::{
 };
 
 use crate::config::Config;
-use crate::{followups, members, reminders};
+use crate::{entries, followups, members, reminders};
 
 /// Pure time comparison - testable without a live clock or Discord types.
 fn is_due(now: NaiveTime, trigger: NaiveTime) -> bool {
@@ -75,8 +75,11 @@ async fn tick(
     let date = now.format("%Y-%m-%d").to_string();
     let now_time = now.time();
 
+    if is_due(now_time, config.thread_creation_time) {
+        maybe_create_thread(http, db, channel_id, &date).await;
+    }
     if is_due(now_time, config.todo_time) {
-        maybe_fire_todo_reminder(http, db, channel_id, &date).await;
+        maybe_fire_todo_reminder(http, db, &date).await;
     }
     if is_due(now_time, config.update_time) {
         maybe_fire_simple_reminder(
@@ -126,14 +129,60 @@ async fn tick(
         )
         .await;
     }
+
+    maybe_sync_thread(http, db, &date).await;
 }
 
-async fn maybe_fire_todo_reminder(
+/// Creates today's standup thread ahead of the actual todo prompt (see
+/// `maybe_fire_todo_reminder` below), so early submissions have somewhere
+/// to sync into even before the 9am ping fires. No message is posted here -
+/// Discord's own "X started a thread: Standup — <date>" system line is
+/// enough; the todo prompt still does the @mention/ping once it fires.
+async fn maybe_create_thread(
     http: &Arc<Http>,
     db: &Arc<Mutex<Connection>>,
     channel_id: ChannelId,
     date: &str,
 ) {
+    match already_sent(db, date, "thread_creation") {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("failed to check thread_creation status: {e}");
+            return;
+        }
+    }
+
+    let thread = match channel_id
+        .create_thread(
+            http,
+            CreateThread::new(format!("Standup — {date}")).kind(ChannelType::PublicThread),
+        )
+        .await
+    {
+        Ok(thread) => thread,
+        Err(e) => {
+            eprintln!("failed to create standup thread: {e}");
+            return;
+        }
+    };
+
+    let conn = db.lock().expect("db mutex poisoned");
+    if let Err(e) = reminders::save_thread(&conn, date, &thread.id.to_string()) {
+        eprintln!("failed to save standup thread id: {e}");
+    }
+    if let Err(e) = reminders::mark_sent(&conn, date, "thread_creation") {
+        eprintln!("failed to mark thread_creation sent: {e}");
+    }
+}
+
+/// Pings the team in today's thread with the `/todo create` prompt. The
+/// thread itself is created separately by `maybe_create_thread` above (at
+/// the earlier, independently configurable `thread_creation_time`) - this
+/// only looks one up, skipping with a log line if none exists yet (bot was
+/// down at both trigger times, or the channel was only just configured),
+/// same as the 3pm/4pm reminders below.
+async fn maybe_fire_todo_reminder(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, date: &str) {
     match already_sent(db, date, "todo_reminder") {
         Ok(true) => return,
         Ok(false) => {}
@@ -158,37 +207,9 @@ async fn maybe_fire_todo_reminder(
         }
     };
 
-    let thread = match channel_id
-        .create_thread(
-            http,
-            CreateThread::new(format!("Standup — {date}")).kind(ChannelType::PublicThread),
-        )
-        .await
-    {
-        Ok(thread) => thread,
-        Err(e) => {
-            eprintln!("failed to create standup thread: {e}");
-            return;
-        }
-    };
-
-    let content =
-        format!("{mentions}\n📋 Time for today's standup! Submit your todo with `/todo`.");
-    if let Err(e) = thread
-        .id
-        .send_message(http, CreateMessage::new().content(content))
-        .await
-    {
-        eprintln!("failed to post todo prompt: {e}");
-    }
-
-    let conn = db.lock().expect("db mutex poisoned");
-    if let Err(e) = reminders::save_thread(&conn, date, &thread.id.to_string()) {
-        eprintln!("failed to save standup thread id: {e}");
-    }
-    if let Err(e) = reminders::mark_sent(&conn, date, "todo_reminder") {
-        eprintln!("failed to mark todo_reminder sent: {e}");
-    }
+    let message =
+        format!("{mentions}\n📋 Time for today's standup! Submit your todo with `/todo create`.");
+    maybe_fire_simple_reminder(http, db, date, "todo_reminder", &message).await;
 }
 
 async fn maybe_fire_simple_reminder(
@@ -214,7 +235,7 @@ async fn maybe_fire_simple_reminder(
     let thread_id = match thread_id {
         Ok(Some(id)) => id,
         Ok(None) => {
-            // The todo reminder never fired today (bot was down, or the
+            // Today's thread hasn't been created yet (bot was down, or the
             // standup channel was only just configured) - skip rather
             // than inventing a late thread.
             eprintln!("no standup thread yet for {date}, skipping {kind}");
@@ -261,6 +282,121 @@ async fn maybe_fire_simple_reminder(
 fn already_sent(db: &Arc<Mutex<Connection>>, date: &str, kind: &str) -> anyhow::Result<bool> {
     let conn = db.lock().expect("db mutex poisoned");
     reminders::already_sent(&conn, date, kind)
+}
+
+/// Posts every `/todo`/`/progress` submission since the last tick into
+/// today's thread, so the team actually sees each other's activity (the
+/// bot's replies to those commands are otherwise ephemeral - private to the
+/// submitter). Runs every tick unconditionally; a no-op when there's no
+/// thread yet or nothing new to post.
+async fn maybe_sync_thread(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, date: &str) {
+    let thread_id = {
+        let conn = db.lock().expect("db mutex poisoned");
+        reminders::thread_for(&conn, date)
+    };
+    let thread_id = match thread_id {
+        Ok(Some(id)) => id,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("failed to look up standup thread for sync: {e}");
+            return;
+        }
+    };
+    let Ok(raw_id) = thread_id.parse::<u64>() else {
+        eprintln!("invalid stored thread_id {thread_id:?} for {date}");
+        return;
+    };
+    let channel_id = ChannelId::new(raw_id);
+
+    let cursor = {
+        let conn = db.lock().expect("db mutex poisoned");
+        reminders::sync_cursor(&conn, date)
+    };
+    let cursor = match cursor {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("failed to read sync cursor for {date}: {e}");
+            return;
+        }
+    };
+
+    let new_entries = {
+        let conn = db.lock().expect("db mutex poisoned");
+        entries::entries_since(&conn, date, cursor)
+    };
+    let new_entries = match new_entries {
+        Ok(rows) if rows.is_empty() => return,
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("failed to list new entries to sync for {date}: {e}");
+            return;
+        }
+    };
+
+    // Best-effort, at-most-once, same stance as the reminders above: every
+    // entry gets exactly one send attempt, then the cursor moves past it
+    // regardless of outcome - a transient failure (or a deleted thread)
+    // just drops that one entry from the thread rather than retrying it
+    // forever.
+    let mut synced_through = cursor;
+    for entry in &new_entries {
+        let content = format_sync_message(entry);
+        if let Err(e) = channel_id
+            .send_message(http, CreateMessage::new().content(content))
+            .await
+        {
+            if is_unknown_channel_error(&e) {
+                eprintln!(
+                    "standup thread for {date} no longer exists (deleted?) - skipping sync for entry {}: {e}",
+                    entry.id
+                );
+            } else {
+                eprintln!("failed to sync entry {} to thread: {e}", entry.id);
+            }
+        }
+        synced_through = entry.id;
+    }
+
+    if synced_through > cursor {
+        let conn = db.lock().expect("db mutex poisoned");
+        if let Err(e) = reminders::advance_sync_cursor(&conn, date, synced_through) {
+            eprintln!("failed to advance sync cursor for {date}: {e}");
+        }
+    }
+}
+
+/// Pure, unit-testable without any serenity types - same style as
+/// `is_due`/`is_weekend` above.
+fn format_sync_message(entry: &entries::SyncEntry) -> String {
+    match entry.entry_type.as_str() {
+        "todo" => match &entry.notes {
+            Some(notes) => format!(
+                "📋 <@{}> added a todo: **{}** — _{notes}_",
+                entry.discord_user_id, entry.task
+            ),
+            None => format!(
+                "📋 <@{}> added a todo: **{}**",
+                entry.discord_user_id, entry.task
+            ),
+        },
+        _ => {
+            let (emoji, label) = match entry.status.as_deref() {
+                Some("done") => ("✅", "Done"),
+                Some("blocked") => ("⚠️", "Blocked"),
+                _ => ("🔧", "In Progress"),
+            };
+            match &entry.blocker {
+                Some(blocker) => format!(
+                    "{emoji} <@{}> progress on **{}**: {label} — blocked on: {blocker}",
+                    entry.discord_user_id, entry.task
+                ),
+                None => format!(
+                    "{emoji} <@{}> progress on **{}**: {label}",
+                    entry.discord_user_id, entry.task
+                ),
+            }
+        }
+    }
 }
 
 /// Nags each member `query` returns as missing something for `date`, one
@@ -384,5 +520,83 @@ mod tests {
         assert!(!is_weekend(Weekday::Wed));
         assert!(!is_weekend(Weekday::Thu));
         assert!(!is_weekend(Weekday::Fri));
+    }
+
+    fn sync_entry(
+        entry_type: &str,
+        task: &str,
+        notes: Option<&str>,
+        status: Option<&str>,
+        blocker: Option<&str>,
+    ) -> entries::SyncEntry {
+        entries::SyncEntry {
+            id: 1,
+            discord_user_id: "42".to_string(),
+            entry_type: entry_type.to_string(),
+            task: task.to_string(),
+            notes: notes.map(str::to_string),
+            status: status.map(str::to_string),
+            blocker: blocker.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn format_sync_message_for_todo_without_notes() {
+        let entry = sync_entry("todo", "Write tests", None, None, None);
+        assert_eq!(
+            format_sync_message(&entry),
+            "📋 <@42> added a todo: **Write tests**"
+        );
+    }
+
+    #[test]
+    fn format_sync_message_for_todo_with_notes() {
+        let entry = sync_entry("todo", "Write tests", Some("keep it simple"), None, None);
+        assert_eq!(
+            format_sync_message(&entry),
+            "📋 <@42> added a todo: **Write tests** — _keep it simple_"
+        );
+    }
+
+    #[test]
+    fn format_sync_message_for_progress_done() {
+        let entry = sync_entry("update", "Write tests", None, Some("done"), None);
+        assert_eq!(
+            format_sync_message(&entry),
+            "✅ <@42> progress on **Write tests**: Done"
+        );
+    }
+
+    #[test]
+    fn format_sync_message_for_progress_in_progress() {
+        let entry = sync_entry("update", "Ship release", None, Some("in_progress"), None);
+        assert_eq!(
+            format_sync_message(&entry),
+            "🔧 <@42> progress on **Ship release**: In Progress"
+        );
+    }
+
+    #[test]
+    fn format_sync_message_for_progress_blocked_with_blocker() {
+        let entry = sync_entry(
+            "update",
+            "Fix bug",
+            None,
+            Some("blocked"),
+            Some("waiting on ops"),
+        );
+        assert_eq!(
+            format_sync_message(&entry),
+            "⚠️ <@42> progress on **Fix bug**: Blocked — blocked on: waiting on ops"
+        );
+    }
+
+    #[test]
+    fn format_sync_message_for_progress_blocked_without_blocker() {
+        let entry = sync_entry("update", "Fix bug", None, Some("blocked"), None);
+        assert_eq!(
+            format_sync_message(&entry),
+            "⚠️ <@42> progress on **Fix bug**: Blocked"
+        );
     }
 }

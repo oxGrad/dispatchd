@@ -8,6 +8,7 @@ fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(include_str!("migrations/0001_initial.sql")),
         M::up(include_str!("migrations/0002_daily_threads.sql")),
+        M::up(include_str!("migrations/0003_thread_sync_cursor.sql")),
     ])
 }
 

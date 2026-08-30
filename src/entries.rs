@@ -203,6 +203,45 @@ pub fn delete_todo(
     }
 }
 
+/// One row for the ticker's periodic thread-sync pass.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SyncEntry {
+    pub id: i64,
+    pub discord_user_id: String,
+    pub entry_type: String,
+    pub task: String,
+    pub notes: Option<String>,
+    pub status: Option<String>,
+    pub blocker: Option<String>,
+}
+
+/// Todo and update rows for `date` with `id > after_id`, ordered by id -
+/// whatever's new since the ticker's last sync pass. No row-count cap: a
+/// 6-person team can't realistically queue up enough entries between ticks
+/// to matter.
+pub fn entries_since(conn: &Connection, date: &str, after_id: i64) -> Result<Vec<SyncEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, discord_user_id, type, task, notes, status, blocker
+         FROM entries
+         WHERE date = ?1 AND id > ?2
+         ORDER BY id",
+    )?;
+    let rows = stmt
+        .query_map(params![date, after_id], |row| {
+            Ok(SyncEntry {
+                id: row.get(0)?,
+                discord_user_id: row.get(1)?,
+                entry_type: row.get(2)?,
+                task: row.get(3)?,
+                notes: row.get(4)?,
+                status: row.get(5)?,
+                blocker: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +612,59 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn entries_since_returns_only_rows_after_cursor_for_that_date() {
+        let conn = open_test_db();
+        let todo_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", Some("notes")).unwrap();
+        let update_id = insert_update(
+            &conn,
+            "42",
+            "2026-08-29",
+            "Write tests",
+            Some(todo_id),
+            "done",
+            "Finished",
+            None,
+        )
+        .unwrap();
+        // A row on a different date must never leak into "today"'s sync.
+        insert_todo(&conn, "42", "2026-08-30", "Tomorrow's task", None).unwrap();
+
+        let since_zero = entries_since(&conn, "2026-08-29", 0).unwrap();
+        assert_eq!(
+            since_zero,
+            vec![
+                SyncEntry {
+                    id: todo_id,
+                    discord_user_id: "42".to_string(),
+                    entry_type: "todo".to_string(),
+                    task: "Write tests".to_string(),
+                    notes: Some("notes".to_string()),
+                    status: None,
+                    blocker: None,
+                },
+                SyncEntry {
+                    id: update_id,
+                    discord_user_id: "42".to_string(),
+                    entry_type: "update".to_string(),
+                    task: "Write tests".to_string(),
+                    notes: None,
+                    status: Some("done".to_string()),
+                    blocker: None,
+                },
+            ]
+        );
+
+        let since_todo = entries_since(&conn, "2026-08-29", todo_id).unwrap();
+        assert_eq!(since_todo.len(), 1);
+        assert_eq!(since_todo[0].id, update_id);
+
+        assert!(
+            entries_since(&conn, "2026-08-29", update_id)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

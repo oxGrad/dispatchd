@@ -19,6 +19,7 @@
 # discord_standup_channel_id = 123456789012345679
 
 [schedule]
+# thread_creation_time = "08:30"
 # todo_time = "09:00"
 # update_time = "15:00"
 # meeting_reminder_time = "16:00"

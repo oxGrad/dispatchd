@@ -14,6 +14,7 @@ pub const CONFIG_PATH_OVERRIDE_ENV: &str = "DISPATCHD_CONFIG_PATH";
 /// bypassing the XDG data-dir default.
 const DB_PATH_OVERRIDE_ENV: &str = "DISPATCHD_DB_PATH";
 
+const DEFAULT_THREAD_CREATION_TIME: &str = "08:30";
 const DEFAULT_TODO_TIME: &str = "09:00";
 const DEFAULT_UPDATE_TIME: &str = "15:00";
 const DEFAULT_MEETING_REMINDER_TIME: &str = "16:00";
@@ -28,6 +29,7 @@ const DEFAULT_DB_FILE_NAME: &str = "dispatchd.sqlite3";
 /// program. Every field is guaranteed valid.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
+    pub thread_creation_time: NaiveTime,
     pub todo_time: NaiveTime,
     pub update_time: NaiveTime,
     pub meeting_reminder_time: NaiveTime,
@@ -44,6 +46,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            thread_creation_time: parse_time(DEFAULT_THREAD_CREATION_TIME)
+                .expect("default thread_creation_time is valid"),
             todo_time: parse_time(DEFAULT_TODO_TIME).expect("default todo_time is valid"),
             update_time: parse_time(DEFAULT_UPDATE_TIME).expect("default update_time is valid"),
             meeting_reminder_time: parse_time(DEFAULT_MEETING_REMINDER_TIME)
@@ -76,6 +80,7 @@ struct RawConfig {
 
 #[derive(Debug, Default, Deserialize)]
 struct RawSchedule {
+    thread_creation_time: Option<String>,
     todo_time: Option<String>,
     update_time: Option<String>,
     meeting_reminder_time: Option<String>,
@@ -111,6 +116,11 @@ impl Config {
     fn from_raw(raw: RawConfig) -> Result<Config> {
         let defaults = Config::default();
 
+        let thread_creation_time = match raw.schedule.thread_creation_time {
+            Some(s) => parse_time(&s)
+                .with_context(|| format!("invalid schedule.thread_creation_time: {s:?}"))?,
+            None => defaults.thread_creation_time,
+        };
         let todo_time = match raw.schedule.todo_time {
             Some(s) => {
                 parse_time(&s).with_context(|| format!("invalid schedule.todo_time: {s:?}"))?
@@ -138,6 +148,7 @@ impl Config {
         };
 
         Ok(Config {
+            thread_creation_time,
             todo_time,
             update_time,
             meeting_reminder_time,
@@ -252,6 +263,7 @@ mod tests {
             config.update_time,
             NaiveTime::from_hms_opt(18, 30, 0).unwrap()
         );
+        assert_eq!(config.thread_creation_time, defaults.thread_creation_time);
         assert_eq!(config.todo_time, defaults.todo_time);
         assert_eq!(config.meeting_reminder_time, defaults.meeting_reminder_time);
         assert_eq!(
@@ -286,6 +298,20 @@ mod tests {
     }
 
     #[test]
+    fn thread_creation_time_is_overridable_independently() {
+        let (_dir, path) = write_config("[schedule]\nthread_creation_time = \"07:45\"\n");
+        let raw = read_raw_config(&path).unwrap();
+        let config = Config::from_raw(raw).unwrap();
+
+        let defaults = Config::default();
+        assert_eq!(
+            config.thread_creation_time,
+            NaiveTime::from_hms_opt(7, 45, 0).unwrap()
+        );
+        assert_eq!(config.todo_time, defaults.todo_time);
+    }
+
+    #[test]
     fn full_override_changes_every_field() {
         let (_dir, path) = write_config(
             r#"
@@ -295,6 +321,7 @@ mod tests {
             discord_standup_channel_id = 222222222222222222
 
             [schedule]
+            thread_creation_time = "08:00"
             todo_time = "08:15"
             update_time = "14:45"
             meeting_reminder_time = "17:00"
@@ -309,6 +336,10 @@ mod tests {
         let raw = read_raw_config(&path).unwrap();
         let config = Config::from_raw(raw).unwrap();
 
+        assert_eq!(
+            config.thread_creation_time,
+            NaiveTime::from_hms_opt(8, 0, 0).unwrap()
+        );
         assert_eq!(config.todo_time, NaiveTime::from_hms_opt(8, 15, 0).unwrap());
         assert_eq!(
             config.update_time,

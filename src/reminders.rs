@@ -44,6 +44,29 @@ pub fn thread_for(conn: &Connection, date: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
+/// The highest `entries.id` already synced into `date`'s thread. `0`
+/// (nothing synced yet) if there's no thread row - callers are expected to
+/// have already checked `thread_for` before calling this.
+pub fn sync_cursor(conn: &Connection, date: &str) -> Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT last_synced_entry_id FROM daily_threads WHERE date = ?1",
+            params![date],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+/// Advances `date`'s sync cursor to `entry_id`.
+pub fn advance_sync_cursor(conn: &Connection, date: &str, entry_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE daily_threads SET last_synced_entry_id = ?1 WHERE date = ?2",
+        params![entry_id, date],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +110,36 @@ mod tests {
             thread_for(&conn, "2026-08-29").unwrap(),
             Some("111222333".to_string())
         );
+    }
+
+    #[test]
+    fn sync_cursor_defaults_to_zero_after_save_thread() {
+        let conn = open_test_db();
+        save_thread(&conn, "2026-08-29", "111222333").unwrap();
+        assert_eq!(sync_cursor(&conn, "2026-08-29").unwrap(), 0);
+    }
+
+    #[test]
+    fn sync_cursor_defaults_to_zero_with_no_thread_row() {
+        let conn = open_test_db();
+        assert_eq!(sync_cursor(&conn, "2026-08-29").unwrap(), 0);
+    }
+
+    #[test]
+    fn advance_sync_cursor_persists_and_is_read_back() {
+        let conn = open_test_db();
+        save_thread(&conn, "2026-08-29", "111222333").unwrap();
+        advance_sync_cursor(&conn, "2026-08-29", 42).unwrap();
+        assert_eq!(sync_cursor(&conn, "2026-08-29").unwrap(), 42);
+    }
+
+    #[test]
+    fn sync_cursor_is_independent_per_date() {
+        let conn = open_test_db();
+        save_thread(&conn, "2026-08-29", "111222333").unwrap();
+        save_thread(&conn, "2026-08-30", "444555666").unwrap();
+        advance_sync_cursor(&conn, "2026-08-29", 42).unwrap();
+        assert_eq!(sync_cursor(&conn, "2026-08-29").unwrap(), 42);
+        assert_eq!(sync_cursor(&conn, "2026-08-30").unwrap(), 0);
     }
 }

@@ -9,11 +9,14 @@ it, see `docs/discord-setup.md` instead.)
 Every weekday (unless the tech lead has enabled weekend runs), dispatchd
 posts into a "Standup — YYYY-MM-DD" thread in the team's standup channel:
 
-1. **Morning** (9:00 by default) - a new thread is created, everyone gets
-   pinged, and you're prompted to submit your todo(s) for the day.
-2. **Afternoon** (15:00 by default) - a reminder to post progress against
+1. **Thread opens** (8:30 by default) - the day's thread is created
+   quietly, before the morning ping. You can already submit `/todo` at
+   this point; see "Your submissions show up in the thread" below.
+2. **Morning** (9:00 by default) - everyone gets pinged in that thread and
+   prompted to submit their todo(s) for the day.
+3. **Afternoon** (15:00 by default) - a reminder to post progress against
    what you said you'd do.
-3. **Meeting reminder** (16:00 by default) - a plain heads-up about the
+4. **Meeting reminder** (16:00 by default) - a plain heads-up about the
    optional daily meeting; whether it actually happens is the tech lead's
    call.
 
@@ -25,6 +28,24 @@ configurable per team, so treat the above as defaults, not guarantees.
 All of this happens automatically - you don't run any command to make the
 thread or reminders appear. You only need the commands below to actually
 submit your own todos and progress.
+
+### Your submissions show up in the thread
+
+`/todo`'s and `/progress`'s own replies are private (see "ephemeral" below)
+- but what you submitted still shows up for everyone, because dispatchd
+separately posts it into today's thread on its own, usually within a
+minute or two (however often the ticker checks, which is configurable).
+So after you run `/todo create`, expect to see something like:
+```
+📋 <@you> added a todo: **Write tests**
+```
+show up publicly a little after your private confirmation. Same idea for
+`/progress`:
+```
+✅ <@you> progress on **Write tests**: Done
+```
+This is a one-way sync, not a live view - editing or deleting a todo after
+it's already been posted to the thread doesn't change or remove that post.
 
 ## `/todo` - your task list for the day
 
@@ -99,7 +120,8 @@ is online and responding.
 
 - Every reply from dispatchd is **ephemeral** - only you see it, even in
   a busy thread. Nobody else sees your `/todo` or `/progress` confirmations
-  (or your mistakes).
+  (or your mistakes) - what they do see is the separate public post
+  dispatchd makes into the thread shortly after (see above).
 - Todos and progress reports are scoped to **today** (in the team's
   configured timezone) - you can't edit or list yesterday's todos, and a
   fresh thread starts each day.
