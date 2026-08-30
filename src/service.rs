@@ -2,11 +2,18 @@ const UNIT_PATH: &str = "/etc/systemd/system/dispatchd.service";
 const MAINTENANCE_SERVICE_PATH: &str = "/etc/systemd/system/dispatchd-maintenance.service";
 const MAINTENANCE_TIMER_PATH: &str = "/etc/systemd/system/dispatchd-maintenance.timer";
 const ENV_DIR: &str = "/etc/dispatchd";
-const ENV_FILE: &str = "/etc/dispatchd/dispatchd.env";
 const INSTALL_LOCK_PATH: &str = "/etc/dispatchd/service-install.lock";
-const ENV_TEMPLATE: &str = "# dispatchd secrets - fill in and (re)start the service.\n\
-# mode 600, root-owned; never commit this file.\n\
-DISPATCHD_DISCORD_TOKEN=\n";
+/// Where the systemd-creds-encrypted Discord token lives. Referenced from
+/// the unit via `LoadCredentialEncrypted=`, which decrypts it into
+/// `$CREDENTIALS_DIRECTORY/discord_token` (tmpfs, root-only) for the
+/// duration of the service's run - dispatchd itself never sees the
+/// plaintext token touch disk. See `main.rs::discord_token`.
+const CRED_PATH: &str = "/etc/dispatchd/discord_token.cred";
+/// `LoadCredentialEncrypted=` (and `systemd-creds` itself) landed in this
+/// release - there's no plaintext fallback for older systemd, so
+/// `install()` refuses to proceed rather than silently writing the token
+/// unencrypted.
+const MIN_SYSTEMD_VERSION: u32 = 250;
 
 /// Pure string rendering, no I/O - compiles and is unit-tested on any
 /// platform even though what it produces is Linux/systemd-specific.
@@ -21,13 +28,39 @@ fn render_unit(exe_path: &str, user: &str) -> String {
          Type=simple\n\
          User={user}\n\
          ExecStart={exe_path}\n\
-         EnvironmentFile=-{ENV_FILE}\n\
+         LoadCredentialEncrypted=discord_token:{CRED_PATH}\n\
          Restart=on-failure\n\
          RestartSec=5\n\
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n"
     )
+}
+
+/// Parses the version number out of `systemctl --version`'s first line,
+/// e.g. `"systemd 252 (252.22-1~deb12u1)\n+PAM +AUDIT ..."` -> `252`. Split
+/// out from `systemd_version` so the parsing logic is unit-tested without
+/// actually shelling out.
+fn parse_systemd_version(version_output: &str) -> anyhow::Result<u32> {
+    use anyhow::Context;
+
+    let first_line = version_output.lines().next().unwrap_or("");
+    first_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u32>().ok())
+        .with_context(|| format!("could not parse systemd version from: {first_line:?}"))
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_version() -> anyhow::Result<u32> {
+    use anyhow::Context;
+
+    let output = std::process::Command::new("systemctl")
+        .arg("--version")
+        .output()
+        .context("failed to run `systemctl --version` - is systemd installed?")?;
+    parse_systemd_version(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// The oneshot service the maintenance timer below actually triggers -
@@ -75,6 +108,16 @@ pub fn install() -> anyhow::Result<()> {
         .or_else(|_| std::env::var("USER"))
         .context("could not determine which user to run the service as (set $USER)")?;
 
+    let version = systemd_version()?;
+    if version < MIN_SYSTEMD_VERSION {
+        anyhow::bail!(
+            "dispatchd service install requires systemd >= {MIN_SYSTEMD_VERSION} \
+             (LoadCredentialEncrypted=/systemd-creds, for encrypting the Discord token \
+             at rest) but found systemd {version} - there is no plaintext fallback. \
+             Upgrade the OS (e.g. Raspberry Pi OS Bookworm or newer) and retry."
+        );
+    }
+
     std::fs::create_dir_all(ENV_DIR).with_context(|| {
         format!("failed to create {ENV_DIR} (are you root? try: sudo dispatchd service install)")
     })?;
@@ -83,18 +126,17 @@ pub fn install() -> anyhow::Result<()> {
     // their writes to the same unit files.
     let _singleton = crate::lock::acquire(std::path::Path::new(INSTALL_LOCK_PATH))?;
 
-    if std::path::Path::new(ENV_FILE).exists() {
-        println!("{ENV_FILE} already exists, leaving it untouched");
+    if std::path::Path::new(CRED_PATH).exists() {
+        println!("{CRED_PATH} already exists, leaving it untouched");
     } else {
-        std::fs::write(ENV_FILE, ENV_TEMPLATE)
-            .with_context(|| format!("failed to write {ENV_FILE}"))?;
-        let mut perms = std::fs::metadata(ENV_FILE)?.permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o600);
-        std::fs::set_permissions(ENV_FILE, perms)
-            .with_context(|| format!("failed to set permissions on {ENV_FILE}"))?;
-        println!(
-            "created {ENV_FILE} (mode 600) - fill in DISPATCHD_DISCORD_TOKEN before starting the service"
-        );
+        println!("no encrypted Discord token found at {CRED_PATH} - dispatchd never handles the");
+        println!("raw token itself, so encrypt it yourself, then (re)start the service:");
+        println!();
+        println!("  sudo systemd-creds encrypt --name=discord_token --with-key=host - {CRED_PATH}");
+        println!();
+        println!("  (paste the bot token from docs/discord-setup.md, then press Ctrl-D;");
+        println!("   --with-key=host is used because Raspberry Pi boards have no TPM2 - this");
+        println!("   protects an offline copy of the SD card, not root on the live Pi.)");
     }
 
     let unit = render_unit(exe, &user);
@@ -120,7 +162,7 @@ pub fn install() -> anyhow::Result<()> {
     println!("dispatchd.service installed and enabled to start at boot.");
     println!("dispatchd-maintenance.timer installed and started (runs weekly).");
     println!(
-        "Once {ENV_FILE} and config.toml/members.toml (see `dispatchd init`) are set up, start the bot with:"
+        "Once {CRED_PATH} and config.toml/members.toml (see `dispatchd init`) are set up, start the bot with:"
     );
     println!("  sudo systemctl start dispatchd");
     Ok(())
@@ -154,9 +196,37 @@ mod tests {
         let unit = render_unit("/usr/local/bin/dispatchd", "pi");
         assert!(unit.contains("ExecStart=/usr/local/bin/dispatchd"));
         assert!(unit.contains("User=pi"));
-        assert!(unit.contains("EnvironmentFile=-/etc/dispatchd/dispatchd.env"));
+        assert!(
+            unit.contains(
+                "LoadCredentialEncrypted=discord_token:/etc/dispatchd/discord_token.cred"
+            )
+        );
         assert!(unit.contains("WantedBy=multi-user.target"));
         assert!(unit.contains("Restart=on-failure"));
+    }
+
+    #[test]
+    fn parse_systemd_version_reads_the_number_from_the_first_line() {
+        // Debian Bookworm's actual `systemctl --version` output shape.
+        assert_eq!(
+            parse_systemd_version("systemd 252 (252.22-1~deb12u1)\n+PAM +AUDIT +SELINUX +APPARMOR")
+                .unwrap(),
+            252
+        );
+    }
+
+    #[test]
+    fn parse_systemd_version_rejects_unparseable_output() {
+        assert!(parse_systemd_version("not systemd output at all").is_err());
+        assert!(parse_systemd_version("").is_err());
+    }
+
+    #[test]
+    fn min_systemd_version_matches_the_todo_confirmed_requirement() {
+        // LoadCredentialEncrypted=/systemd-creds landed in systemd 250 -
+        // regression guard against silently loosening this without also
+        // updating the bail-out message and docs.
+        assert_eq!(MIN_SYSTEMD_VERSION, 250);
     }
 
     #[test]

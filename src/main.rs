@@ -21,8 +21,8 @@ use config::Config;
 pub(crate) mod test_support {
     /// Shared across every module's tests that mutate process env vars
     /// (`DISPATCHD_CONFIG_PATH`, `DISPATCHD_DB_PATH`, `DISPATCHD_MEMBERS_PATH`,
-    /// `DISPATCHD_DISCORD_TOKEN`). `cargo test` runs tests in parallel
-    /// within one process, and these vars overlap across
+    /// `DISPATCHD_DISCORD_TOKEN`, `CREDENTIALS_DIRECTORY`). `cargo test` runs
+    /// tests in parallel within one process, and these vars overlap across
     /// config.rs/members.rs/init.rs/main.rs tests, so a single crate-wide
     /// lock is required rather than one lock per file.
     pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -68,9 +68,29 @@ enum MaintenanceCommand {
 /// not an error, so `dispatchd` stays useful for config/DB setup before a
 /// token exists.
 fn discord_credentials(config: &Config) -> Option<(String, u64)> {
-    let token = env::var("DISPATCHD_DISCORD_TOKEN").ok()?;
+    let token = discord_token()?;
     let guild_id = config.discord_guild_id?;
     Some((token, guild_id))
+}
+
+/// Resolves the Discord bot token. Prefers the systemd-decrypted
+/// credential at `$CREDENTIALS_DIRECTORY/discord_token` - set for units
+/// using `LoadCredentialEncrypted=discord_token:...` (see
+/// `service::install`), which is how `dispatchd service install` wires the
+/// token up encrypted-at-rest via `systemd-creds` rather than as plaintext.
+/// Falls back to `DISPATCHD_DISCORD_TOKEN` for local/dev runs outside
+/// systemd, where there's no credentials directory to read from.
+fn discord_token() -> Option<String> {
+    if let Ok(dir) = env::var("CREDENTIALS_DIRECTORY") {
+        let path = std::path::Path::new(&dir).join("discord_token");
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            let trimmed = contents.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    env::var("DISPATCHD_DISCORD_TOKEN").ok()
 }
 
 fn run_maintenance() -> anyhow::Result<()> {
@@ -215,5 +235,51 @@ mod tests {
             env::remove_var("DISPATCHD_DISCORD_TOKEN");
         }
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn credentials_directory_token_wins_over_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("discord_token"), "creds-token\n").unwrap();
+        // SAFETY: held under ENV_LOCK; both vars removed before returning.
+        unsafe {
+            env::set_var("CREDENTIALS_DIRECTORY", dir.path());
+            env::set_var("DISPATCHD_DISCORD_TOKEN", "env-token");
+        }
+        let result = discord_token();
+        unsafe {
+            env::remove_var("CREDENTIALS_DIRECTORY");
+            env::remove_var("DISPATCHD_DISCORD_TOKEN");
+        }
+        assert_eq!(result, Some("creds-token".to_string()));
+    }
+
+    #[test]
+    fn missing_credential_file_falls_back_to_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: held under ENV_LOCK; both vars removed before returning.
+        unsafe {
+            env::set_var("CREDENTIALS_DIRECTORY", dir.path());
+            env::set_var("DISPATCHD_DISCORD_TOKEN", "env-token");
+        }
+        let result = discord_token();
+        unsafe {
+            env::remove_var("CREDENTIALS_DIRECTORY");
+            env::remove_var("DISPATCHD_DISCORD_TOKEN");
+        }
+        assert_eq!(result, Some("env-token".to_string()));
+    }
+
+    #[test]
+    fn neither_source_yields_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: held under ENV_LOCK.
+        unsafe {
+            env::remove_var("CREDENTIALS_DIRECTORY");
+            env::remove_var("DISPATCHD_DISCORD_TOKEN");
+        }
+        assert_eq!(discord_token(), None);
     }
 }

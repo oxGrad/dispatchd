@@ -54,12 +54,25 @@ export DISPATCHD_DISCORD_TOKEN="the token you copied in step 1"
 ```
 
 For a systemd deployment (Linux only), run `sudo dispatchd service install`
-instead - it writes `/etc/dispatchd/dispatchd.env` (mode 600) for you to
-fill in the token, generates and enables the unit, and never touches an
-`.env` file that already exists on a re-run. See its own printed output
-for the exact next steps (it won't start the service for you - fill in the
-token and `config.toml`/`members.toml` first, then
-`sudo systemctl start dispatchd`).
+instead. It requires systemd ≥ 250 (no plaintext fallback for older
+systemd) and generates a unit that loads the token via
+`LoadCredentialEncrypted=`, so the token never sits on disk unencrypted.
+It never touches the raw token itself - after installing, encrypt it
+yourself as printed in its output:
+
+```sh
+sudo systemd-creds encrypt --name=discord_token --with-key=host - /etc/dispatchd/discord_token.cred
+```
+
+Paste the token, then press Ctrl-D. `--with-key=host` is used because
+Raspberry Pi boards (Zero 2 W, 3B, etc.) have no TPM2 - this protects an
+offline copy of the SD card (e.g. a stolen or improperly wiped one), but
+not an attacker who already has root on the live running Pi, since
+systemd itself can decrypt the credential there for legitimate service
+starts. Re-running `service install` never overwrites an existing
+`discord_token.cred`. See its own printed output for the exact next steps
+(it won't start the service for you - encrypt the token and fill in
+`config.toml`/`members.toml` first, then `sudo systemctl start dispatchd`).
 
 ## 5. Run it
 
