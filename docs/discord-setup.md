@@ -45,20 +45,32 @@ discord_guild_id = 123456789012345678
 discord_standup_channel_id = 123456789012345679
 ```
 
-Then set the bot token as an environment variable (never put it in
-`config.toml` — it's a secret, and that file may end up in backups or
-version control):
+Then log the bot in, which validates the token against Discord and saves
+it to your OS keyring (never put it in `config.toml` — it's a secret, and
+that file may end up in backups or version control):
 
 ```sh
-export DISPATCHD_DISCORD_TOKEN="the token you copied in step 1"
+dispatchd discord login
 ```
 
+It prompts for the token (input is hidden, like a password prompt),
+confirms it's valid by asking Discord who it belongs to, then stores it
+in the OS keyring. `dispatchd` reads it from there automatically on
+every subsequent run - no export, no file to protect by hand.
+
+`DISPATCHD_DISCORD_TOKEN` still works as a fallback (checked only if
+nothing is in the keyring), for local/dev use or wherever there's no
+usable OS keyring backend - e.g. under `sudo dispatchd service install`
+(see below): a system service normally can't reach the login keyring of
+the user who ran `discord login`, so a systemd deployment still sets the
+token via `/etc/dispatchd/dispatchd.env` rather than `discord login`.
+
 For a systemd deployment (Linux only), run `sudo dispatchd service install`
-instead - it writes `/etc/dispatchd/dispatchd.env` (mode 600) for you to
-fill in the token, generates and enables the unit, and never touches an
-`.env` file that already exists on a re-run. See its own printed output
-for the exact next steps (it won't start the service for you - fill in the
-token and `config.toml`/`members.toml` first, then
+instead of `discord login` - it writes `/etc/dispatchd/dispatchd.env`
+(mode 600) for you to fill in the token, generates and enables the unit,
+and never touches an `.env` file that already exists on a re-run. See its
+own printed output for the exact next steps (it won't start the service
+for you - fill in the token and `config.toml`/`members.toml` first, then
 `sudo systemctl start dispatchd`).
 
 ## 5. Run it
@@ -78,8 +90,9 @@ server within seconds (guild-scoped commands take effect immediately,
 unlike global ones). Run `/ping` in the server — dispatchd should reply
 "pong! dispatchd is alive."
 
-If `discord_guild_id` or `DISPATCHD_DISCORD_TOKEN` aren't set, dispatchd
-still runs its config/database checks and prints "Discord not configured"
+If `discord_guild_id` isn't set, or no token was saved via `discord login`
+or `DISPATCHD_DISCORD_TOKEN`, dispatchd still runs its config/database
+checks and prints "Discord not configured"
 instead of connecting — that's expected until you complete the steps above.
 
 ## 6. `/team-status` permissions

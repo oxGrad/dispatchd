@@ -29,6 +29,10 @@ CI configured yet - these are run locally/by-hand each time.
 dispatchd init      # writes commented-out config.toml + members.toml
                      # templates to their resolved locations (XDG or the
                      # DISPATCHD_*_PATH env vars below), never overwrites
+dispatchd discord login   # prompts for the bot token (hidden input),
+                     # validates it against Discord, and saves it to the
+                     # OS keyring - dispatchd reads it from there on every
+                     # subsequent run. See docs/discord-setup.md.
 dispatchd            # loads config, opens/migrates the DB, seeds members.toml
                      # if present, prints a status block, then connects to
                      # Discord if configured (see below) - otherwise exits 0
@@ -53,7 +57,10 @@ Env vars (all `DISPATCHD_*`, overriding the XDG-resolved path/value):
 - `DISPATCHD_CONFIG_PATH`, `DISPATCHD_DB_PATH`, `DISPATCHD_MEMBERS_PATH`
 - `DISPATCHD_DISCORD_TOKEN` - the bot token, never put in `config.toml`
   (it's a secret; `discord_guild_id`/`discord_standup_channel_id` in
-  `config.toml` are not secrets and live there instead)
+  `config.toml` are not secrets and live there instead). This is the
+  fallback checked only when nothing is stored via `dispatchd discord
+  login` (see below) - useful for local/dev use or a machine with no
+  usable OS keyring backend.
 
 Discord application/bot setup (creating the app, intents, invite link,
 getting guild/channel IDs) is in `docs/discord-setup.md` - don't duplicate
@@ -115,6 +122,11 @@ src/
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
   followups.rs   followups_sent DB logic (missing-todo/update nags)
   init.rs        `dispatchd init` subcommand
+  discord_login.rs `dispatchd discord login` - prompts, validates against
+                 Discord, persists via token_store (no serenity gateway
+                 types, just the one live Http::get_current_user call)
+  token_store.rs OS-keyring-backed TokenStore for the Discord bot token
+                 (KeyringTokenStore in production, FakeTokenStore in tests)
   lock.rs        single-instance guard (`std::fs::File::try_lock`), held
                  for the process's lifetime; used by the main run (`<db>.lock`,
                  so two processes never race the ticker), `maintenance run`

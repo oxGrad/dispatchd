@@ -1,6 +1,7 @@
 mod config;
 mod db;
 mod discord;
+mod discord_login;
 mod entries;
 mod followups;
 mod init;
@@ -10,6 +11,7 @@ mod members;
 mod reminders;
 mod service;
 mod status;
+mod token_store;
 
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -38,6 +40,11 @@ struct Cli {
 enum Command {
     /// Write default config.toml and members.toml templates if missing
     Init,
+    /// Manage the Discord bot token
+    Discord {
+        #[command(subcommand)]
+        action: DiscordCommand,
+    },
     /// Manage the systemd service (Linux only)
     Service {
         #[command(subcommand)]
@@ -48,6 +55,13 @@ enum Command {
         #[command(subcommand)]
         action: MaintenanceCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum DiscordCommand {
+    /// Log in interactively: prompts for the bot token, validates it
+    /// against Discord, and saves it to the OS keyring
+    Login,
 }
 
 #[derive(Subcommand)]
@@ -68,9 +82,26 @@ enum MaintenanceCommand {
 /// not an error, so `dispatchd` stays useful for config/DB setup before a
 /// token exists.
 fn discord_credentials(config: &Config) -> Option<(String, u64)> {
-    let token = env::var("DISPATCHD_DISCORD_TOKEN").ok()?;
+    let token = discord_token()?;
     let guild_id = config.discord_guild_id?;
     Some((token, guild_id))
+}
+
+fn discord_token() -> Option<String> {
+    resolve_discord_token(&token_store::KeyringTokenStore)
+}
+
+/// Resolves the Discord bot token: prefers whatever `dispatchd discord
+/// login` saved to the OS keyring, falling back to `DISPATCHD_DISCORD_TOKEN`
+/// for local/dev use or environments without a usable OS keyring (e.g. a
+/// headless box with no Secret Service daemon running) - a keyring lookup
+/// error is treated the same as "nothing stored" rather than propagated,
+/// so a broken/missing keyring backend never blocks the env-var fallback.
+fn resolve_discord_token(store: &dyn token_store::TokenStore) -> Option<String> {
+    if let Ok(Some(token)) = store.load() {
+        return Some(token);
+    }
+    env::var("DISPATCHD_DISCORD_TOKEN").ok()
 }
 
 fn run_maintenance() -> anyhow::Result<()> {
@@ -98,6 +129,9 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Command::Init) => return init::run(),
+        Some(Command::Discord {
+            action: DiscordCommand::Login,
+        }) => return discord_login::run().await,
         Some(Command::Service {
             action: ServiceCommand::Install,
         }) => return service::install(),
@@ -158,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
             discord::run(token, guild_id, config.clone(), db).await?
         }
         None => println!(
-            "Discord not configured — see docs/discord-setup.md to set DISPATCHD_DISCORD_TOKEN and discord_guild_id"
+            "Discord not configured — run `dispatchd discord login` (or set DISPATCHD_DISCORD_TOKEN) and set discord_guild_id; see docs/discord-setup.md"
         ),
     }
 
@@ -169,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
+    use crate::token_store::TokenStore as _;
 
     #[test]
     fn both_present_yields_credentials() {
@@ -215,5 +250,47 @@ mod tests {
             env::remove_var("DISPATCHD_DISCORD_TOKEN");
         }
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_discord_token_prefers_the_stored_token_over_the_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let store = crate::token_store::FakeTokenStore::new();
+        store.save("keyring-token").unwrap();
+        // SAFETY: held under ENV_LOCK; removed before returning.
+        unsafe {
+            env::set_var("DISPATCHD_DISCORD_TOKEN", "env-token");
+        }
+        let result = resolve_discord_token(&store);
+        unsafe {
+            env::remove_var("DISPATCHD_DISCORD_TOKEN");
+        }
+        assert_eq!(result, Some("keyring-token".to_string()));
+    }
+
+    #[test]
+    fn resolve_discord_token_falls_back_to_env_var_when_nothing_stored() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let store = crate::token_store::FakeTokenStore::new();
+        // SAFETY: held under ENV_LOCK; removed before returning.
+        unsafe {
+            env::set_var("DISPATCHD_DISCORD_TOKEN", "env-token");
+        }
+        let result = resolve_discord_token(&store);
+        unsafe {
+            env::remove_var("DISPATCHD_DISCORD_TOKEN");
+        }
+        assert_eq!(result, Some("env-token".to_string()));
+    }
+
+    #[test]
+    fn resolve_discord_token_yields_none_when_neither_source_has_a_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let store = crate::token_store::FakeTokenStore::new();
+        // SAFETY: held under ENV_LOCK.
+        unsafe {
+            env::remove_var("DISPATCHD_DISCORD_TOKEN");
+        }
+        assert_eq!(resolve_discord_token(&store), None);
     }
 }
