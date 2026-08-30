@@ -72,7 +72,9 @@ Env vars (all `DISPATCHD_*`, overriding the XDG-resolved path/value):
 
 Discord application/bot setup (creating the app, intents, invite link,
 getting guild/channel IDs) is in `docs/discord-setup.md` - don't duplicate
-it here.
+it here. How a team member actually uses the bot day-to-day (`/todo`,
+`/progress`, `/team-status`, the reminder/follow-up timeline) is in
+`docs/user-guide.md` - point new engineers there rather than the setup doc.
 
 ## A note on live Discord testing
 
