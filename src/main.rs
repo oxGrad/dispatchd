@@ -4,6 +4,7 @@ mod discord;
 mod entries;
 mod followups;
 mod init;
+mod maintenance;
 mod members;
 mod reminders;
 mod service;
@@ -41,12 +42,24 @@ enum Command {
         #[command(subcommand)]
         action: ServiceCommand,
     },
+    /// Database maintenance (the handover doc's weekly cron)
+    Maintenance {
+        #[command(subcommand)]
+        action: MaintenanceCommand,
+    },
 }
 
 #[derive(Subcommand)]
 enum ServiceCommand {
     /// Install the systemd unit and enable it to start at boot
     Install,
+}
+
+#[derive(Subcommand)]
+enum MaintenanceCommand {
+    /// Prune reminders_sent/followups_sent rows older than 90 days and
+    /// VACUUM the database. entries is never touched.
+    Run,
 }
 
 /// Returns the bot token and guild ID needed to start the Discord client,
@@ -59,6 +72,17 @@ fn discord_credentials(config: &Config) -> Option<(String, u64)> {
     Some((token, guild_id))
 }
 
+fn run_maintenance() -> anyhow::Result<()> {
+    let config = Config::load()?;
+    let conn = db::open(&config.db_path)?;
+    let (reminders_deleted, followups_deleted) = maintenance::run(&conn)?;
+    println!(
+        "maintenance done: {reminders_deleted} old reminders_sent row(s), \
+         {followups_deleted} old followups_sent row(s) pruned, database vacuumed"
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -68,6 +92,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Service {
             action: ServiceCommand::Install,
         }) => return service::install(),
+        Some(Command::Maintenance {
+            action: MaintenanceCommand::Run,
+        }) => return run_maintenance(),
         None => {}
     }
 

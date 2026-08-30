@@ -37,6 +37,12 @@ dispatchd            # loads config, opens/migrates the DB, seeds members.toml
 dispatchd service install   # Linux only: writes/enables a systemd unit at
                      # /etc/systemd/system/dispatchd.service (needs root -
                      # sudo dispatchd service install). See docs/discord-setup.md.
+                     # Also installs+starts dispatchd-maintenance.timer, which
+                     # runs `dispatchd maintenance run` weekly.
+dispatchd maintenance run   # the handover doc's weekly cron: prunes
+                     # reminders_sent/followups_sent rows older than 90 days
+                     # and VACUUMs. entries is never pruned - it's the
+                     # retained history the biweekly recap depends on.
 ```
 
 Config file: `$XDG_CONFIG_HOME/dispatchd/config.toml` (`~/.config/dispatchd/config.toml`
@@ -109,6 +115,7 @@ src/
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
   followups.rs   followups_sent DB logic (missing-todo/update nags)
   init.rs        `dispatchd init` subcommand
+  maintenance.rs `dispatchd maintenance run` DB logic (weekly prune + VACUUM)
   service.rs     `dispatchd service install` (systemd unit, Linux only)
   discord/       serenity Handler, one file per slash command
     mod.rs         EventHandler impl, interaction dispatch, shared helpers,
