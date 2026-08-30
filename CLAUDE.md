@@ -29,6 +29,13 @@ CI configured yet - these are run locally/by-hand each time.
 dispatchd init      # writes commented-out config.toml + members.toml
                      # templates to their resolved locations (XDG or the
                      # DISPATCHD_*_PATH env vars below), never overwrites
+dispatchd discord login   # (Linux, root) prompts for the bot token (hidden
+                     # input), validates it against Discord, then pipes it
+                     # into `systemd-creds encrypt --with-key=host` and
+                     # writes /etc/dispatchd/discord_token.cred - dispatchd
+                     # runs the encryption itself. See docs/discord-setup.md.
+dispatchd discord logout  # (Linux, root) removes /etc/dispatchd/discord_token.cred.
+                     # Idempotent - a missing credential is not an error.
 dispatchd            # loads config, opens/migrates the DB, seeds members.toml
                      # if present, prints a status block, then connects to
                      # Discord if configured (see below) - otherwise exits 0
@@ -43,6 +50,11 @@ dispatchd maintenance run   # the handover doc's weekly cron: prunes
                      # reminders_sent/followups_sent rows older than 90 days
                      # and VACUUMs. entries is never pruned - it's the
                      # retained history the biweekly recap depends on.
+dispatchd status     # reports the systemd side (version, unit
+                     # installed/enabled/active, encrypted token present)
+                     # and the Discord side (resolves a token the same way
+                     # the bot itself would, pings Discord's API, reports
+                     # round-trip latency).
 ```
 
 Config file: `$XDG_CONFIG_HOME/dispatchd/config.toml` (`~/.config/dispatchd/config.toml`
@@ -53,7 +65,10 @@ Env vars (all `DISPATCHD_*`, overriding the XDG-resolved path/value):
 - `DISPATCHD_CONFIG_PATH`, `DISPATCHD_DB_PATH`, `DISPATCHD_MEMBERS_PATH`
 - `DISPATCHD_DISCORD_TOKEN` - the bot token, never put in `config.toml`
   (it's a secret; `discord_guild_id`/`discord_standup_channel_id` in
-  `config.toml` are not secrets and live there instead)
+  `config.toml` are not secrets and live there instead). This is the
+  fallback checked only when no `systemd-creds`-encrypted credential is
+  found (see `dispatchd discord login` above) - useful for local/dev use
+  outside systemd.
 
 Discord application/bot setup (creating the app, intents, invite link,
 getting guild/channel IDs) is in `docs/discord-setup.md` - don't duplicate
@@ -115,6 +130,12 @@ src/
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
   followups.rs   followups_sent DB logic (missing-todo/update nags)
   init.rs        `dispatchd init` subcommand
+  discord_login.rs `dispatchd discord login` - prompts, validates against
+                 Discord (Http::get_current_user), then shells out to
+                 `systemd-creds encrypt` to persist the token; also
+                 `dispatchd status`'s Discord-ping half (decrypts the
+                 credential directly, since that's a one-off invocation
+                 outside systemd's own LoadCredentialEncrypted= decoding)
   lock.rs        single-instance guard (`std::fs::File::try_lock`), held
                  for the process's lifetime; used by the main run (`<db>.lock`,
                  so two processes never race the ticker), `maintenance run`
@@ -125,7 +146,9 @@ src/
                  (`/etc/dispatchd/service-install.lock`) - each guards only
                  against a second instance of that same subcommand
   maintenance.rs `dispatchd maintenance run` DB logic (weekly prune + VACUUM)
-  service.rs     `dispatchd service install` (systemd unit, Linux only)
+  service.rs     `dispatchd service install` (systemd unit, Linux only,
+                 requires systemd >= 250 for LoadCredentialEncrypted=) and
+                 `dispatchd status`'s systemd-side checks
   discord/       serenity Handler, one file per slash command
     mod.rs         EventHandler impl, interaction dispatch, shared helpers,
                     spawns the ticker alongside the client
