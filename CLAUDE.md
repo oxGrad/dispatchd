@@ -34,6 +34,9 @@ dispatchd            # loads config, opens/migrates the DB, seeds members.toml
                      # Discord if configured (see below) - otherwise exits 0
                      # after the status block, which is the normal state
                      # during initial setup
+dispatchd service install   # Linux only: writes/enables a systemd unit at
+                     # /etc/systemd/system/dispatchd.service (needs root -
+                     # sudo dispatchd service install). See docs/discord-setup.md.
 ```
 
 Config file: `$XDG_CONFIG_HOME/dispatchd/config.toml` (`~/.config/dispatchd/config.toml`
@@ -106,6 +109,7 @@ src/
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
   followups.rs   followups_sent DB logic (missing-todo/update nags)
   init.rs        `dispatchd init` subcommand
+  service.rs     `dispatchd service install` (systemd unit, Linux only)
   discord/       serenity Handler, one file per slash command
     mod.rs         EventHandler impl, interaction dispatch, shared helpers,
                     spawns the ticker alongside the client

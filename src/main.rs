@@ -6,6 +6,7 @@ mod followups;
 mod init;
 mod members;
 mod reminders;
+mod service;
 mod status;
 
 use std::env;
@@ -35,6 +36,17 @@ struct Cli {
 enum Command {
     /// Write default config.toml and members.toml templates if missing
     Init,
+    /// Manage the systemd service (Linux only)
+    Service {
+        #[command(subcommand)]
+        action: ServiceCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Install the systemd unit and enable it to start at boot
+    Install,
 }
 
 /// Returns the bot token and guild ID needed to start the Discord client,
@@ -51,8 +63,12 @@ fn discord_credentials(config: &Config) -> Option<(String, u64)> {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if matches!(cli.command, Some(Command::Init)) {
-        return init::run();
+    match cli.command {
+        Some(Command::Init) => return init::run(),
+        Some(Command::Service {
+            action: ServiceCommand::Install,
+        }) => return service::install(),
+        None => {}
     }
 
     let config = Config::load()?;

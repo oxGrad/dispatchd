@@ -53,8 +53,13 @@ version control):
 export DISPATCHD_DISCORD_TOKEN="the token you copied in step 1"
 ```
 
-For a systemd deployment, set it via the unit's `Environment=` directive or
-an `EnvironmentFile=`, not by exporting it in a shell.
+For a systemd deployment (Linux only), run `sudo dispatchd service install`
+instead - it writes `/etc/dispatchd/dispatchd.env` (mode 600) for you to
+fill in the token, generates and enables the unit, and never touches an
+`.env` file that already exists on a re-run. See its own printed output
+for the exact next steps (it won't start the service for you - fill in the
+token and `config.toml`/`members.toml` first, then
+`sudo systemctl start dispatchd`).
 
 ## 5. Run it
 
