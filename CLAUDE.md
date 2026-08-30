@@ -150,9 +150,18 @@ src/
                  requires systemd >= 250 for LoadCredentialEncrypted=) and
                  `dispatchd status`'s systemd-side checks
   discord/       serenity Handler, one file per slash command
-    mod.rs         EventHandler impl, interaction dispatch, shared helpers,
-                    spawns the ticker alongside the client
-    todo.rs        /todo
+    mod.rs         EventHandler impl, interaction dispatch, shared helpers
+                    (modal_value, get_option_string), spawns the ticker
+                    alongside the client
+    help.rs        /help - static overview of every command
+    todo.rs        /todo create|edit|delete|list|help - create/edit share
+                    one modal shape (edit's pre-filled with current
+                    values); edit/delete/list all operate on any of
+                    today's todos (not just open ones - see
+                    entries::list_todos vs list_open_todos); delete is
+                    blocked by entries.todo_id's FOREIGN KEY (surfaced as
+                    a friendly reply, not a raw DB error) if an /update
+                    already references the todo
     update.rs      /update (autocomplete + modal custom_id encoding)
     team_status.rs /team-status
     ticker.rs      daily standup thread creation + 9am/3pm/4pm reminders;

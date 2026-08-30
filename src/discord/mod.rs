@@ -1,3 +1,4 @@
+mod help;
 mod team_status;
 mod ticker;
 mod todo;
@@ -9,9 +10,10 @@ use anyhow::{Context, Result};
 use chrono_tz::Tz;
 use rusqlite::Connection;
 use serenity::all::{
-    ActionRowComponent, ChannelId, Client, Context as SerenityContext, CreateCommand,
-    CreateInteractionResponse, CreateInteractionResponseMessage, EventHandler, GatewayIntents,
-    GuildId, Interaction, ModalInteraction, Ready,
+    ActionRowComponent, ChannelId, Client, CommandDataOption, CommandDataOptionValue,
+    Context as SerenityContext, CreateCommand, CreateInteractionResponse,
+    CreateInteractionResponseMessage, EventHandler, GatewayIntents, GuildId, Interaction,
+    ModalInteraction, Ready,
 };
 use serenity::async_trait;
 
@@ -29,6 +31,7 @@ impl EventHandler for Handler {
         println!("dispatchd connected to Discord as {}", ready.user.name);
         let commands = vec![
             CreateCommand::new("ping").description("Check that dispatchd is alive"),
+            help::command(),
             todo::command(),
             update::command(),
             team_status::command(),
@@ -51,21 +54,43 @@ impl EventHandler for Handler {
                         eprintln!("failed to respond to /ping: {e}");
                     }
                 }
-                "todo" => todo::handle_command(&ctx, &command).await,
+                "help" => help::handle_command(&ctx, &command).await,
+                "todo" => match todo::subcommand(&command.data.options) {
+                    Some(("create", _)) => todo::handle_create(&ctx, &command).await,
+                    Some(("edit", opts)) => {
+                        todo::handle_edit(&ctx, &command, opts, &self.db, &self.timezone).await
+                    }
+                    Some(("delete", opts)) => {
+                        todo::handle_delete(&ctx, &command, opts, &self.db, &self.timezone).await
+                    }
+                    Some(("list", _)) => {
+                        todo::handle_list(&ctx, &command, &self.db, &self.timezone).await
+                    }
+                    Some(("help", _)) => todo::handle_help(&ctx, &command).await,
+                    _ => {}
+                },
                 "update" => update::handle_command(&ctx, &command).await,
                 "team-status" => {
                     team_status::handle_command(&ctx, &command, &self.db, &self.timezone).await
                 }
                 _ => {}
             },
-            Interaction::Autocomplete(autocomplete) => {
-                if autocomplete.data.name == "update" {
-                    update::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone)
-                        .await;
+            Interaction::Autocomplete(autocomplete) => match autocomplete.data.name.as_str() {
+                "todo" => {
+                    todo::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone).await
                 }
-            }
-            Interaction::Modal(modal) if modal.data.custom_id == todo::MODAL_ID => {
+                "update" => {
+                    update::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone).await
+                }
+                _ => {}
+            },
+            Interaction::Modal(modal) if modal.data.custom_id == todo::CREATE_MODAL_ID => {
                 todo::handle_modal_submission(&ctx, &modal, &self.db, &self.timezone).await;
+            }
+            Interaction::Modal(modal)
+                if modal.data.custom_id.starts_with(todo::EDIT_MODAL_PREFIX) =>
+            {
+                todo::handle_edit_modal_submission(&ctx, &modal, &self.db, &self.timezone).await;
             }
             Interaction::Modal(modal) if modal.data.custom_id.starts_with(update::MODAL_PREFIX) => {
                 update::handle_modal_submission(&ctx, &modal, &self.db, &self.timezone).await;
@@ -85,6 +110,20 @@ pub(crate) fn modal_value(modal: &ModalInteraction, custom_id: &str) -> Option<S
             _ => None,
         })
     })
+}
+
+/// Reads a resolved string-valued command option by name, unwrapping an
+/// in-progress autocomplete value too. Shared by `update.rs` (the `task`
+/// option) and `todo.rs` (the `id` option on `edit`/`delete`).
+pub(crate) fn get_option_string(options: &[CommandDataOption], name: &str) -> Option<String> {
+    options
+        .iter()
+        .find(|o| o.name == name)
+        .and_then(|o| match &o.value {
+            CommandDataOptionValue::String(s) => Some(s.clone()),
+            CommandDataOptionValue::Autocomplete { value, .. } => Some(value.clone()),
+            _ => None,
+        })
 }
 
 /// Connects to the Discord gateway and blocks until the client stops.

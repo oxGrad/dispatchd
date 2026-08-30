@@ -94,6 +94,115 @@ pub fn list_open_todos(
     Ok(rows)
 }
 
+/// Like `list_open_todos`, but not filtered to "open" - includes todos
+/// that already have an update against them. Used by `/todo edit`/`/todo
+/// delete`'s autocomplete and `/todo list`, where the point is to target
+/// *any* of today's todos, not just ones still awaiting an update.
+pub fn list_todos(
+    conn: &Connection,
+    discord_user_id: &str,
+    date: &str,
+    partial: &str,
+) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, task FROM entries
+         WHERE type = 'todo' AND discord_user_id = ?1 AND date = ?2
+           AND task LIKE '%' || ?3 || '%'
+         ORDER BY id
+         LIMIT 25",
+    )?;
+    let rows = stmt
+        .query_map(params![discord_user_id, date, partial], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Current (task, notes) for a todo, scoped to owner+date+type='todo' -
+/// used to pre-fill `/todo edit`'s modal.
+pub fn todo_for_edit(
+    conn: &Connection,
+    todo_id: i64,
+    discord_user_id: &str,
+    date: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    Ok(conn
+        .query_row(
+            "SELECT task, notes FROM entries
+             WHERE id = ?1 AND type = 'todo' AND discord_user_id = ?2 AND date = ?3",
+            params![todo_id, discord_user_id, date],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// Updates a todo's task/notes in place, scoped to owner+date+type='todo'
+/// (same defensive scoping as `todo_task`). Returns `false` if no matching
+/// row was found (already deleted, wrong owner, or not from today).
+pub fn update_todo(
+    conn: &Connection,
+    todo_id: i64,
+    discord_user_id: &str,
+    date: &str,
+    task: &str,
+    notes: Option<&str>,
+) -> Result<bool> {
+    let rows = conn.execute(
+        "UPDATE entries SET task = ?1, notes = ?2
+         WHERE id = ?3 AND type = 'todo' AND discord_user_id = ?4 AND date = ?5",
+        params![task, notes, todo_id, discord_user_id, date],
+    )?;
+    Ok(rows > 0)
+}
+
+/// The outcome of a `delete_todo` call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeleteTodoOutcome {
+    /// Deleted; carries the deleted todo's task text (for the
+    /// confirmation reply).
+    Deleted(String),
+    /// No such todo today, or not owned by this user.
+    NotFound,
+    /// An `/update` already references this todo via `todo_id`.
+    StillReferenced,
+}
+
+/// Deletes a todo, scoped to owner+date+type='todo'. `entries.todo_id`'s
+/// `FOREIGN KEY` (with `PRAGMA foreign_keys = ON`, set in `db::open`)
+/// means deleting a todo an update already references fails at the DB
+/// level - caught here and turned into `StillReferenced` rather than a
+/// raw error, so callers never have to inspect `rusqlite::Error`
+/// internals.
+pub fn delete_todo(
+    conn: &Connection,
+    todo_id: i64,
+    discord_user_id: &str,
+    date: &str,
+) -> Result<DeleteTodoOutcome> {
+    let task: Option<String> = conn
+        .query_row(
+            "SELECT task FROM entries
+             WHERE id = ?1 AND type = 'todo' AND discord_user_id = ?2 AND date = ?3",
+            params![todo_id, discord_user_id, date],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(task) = task else {
+        return Ok(DeleteTodoOutcome::NotFound);
+    };
+
+    match conn.execute("DELETE FROM entries WHERE id = ?1", params![todo_id]) {
+        Ok(_) => Ok(DeleteTodoOutcome::Deleted(task)),
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            Ok(DeleteTodoOutcome::StillReferenced)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +414,164 @@ mod tests {
 
         let no_match = list_open_todos(&conn, "42", "2026-08-29", "nonexistent").unwrap();
         assert!(no_match.is_empty());
+    }
+
+    #[test]
+    fn list_todos_includes_already_updated_todos_unlike_list_open_todos() {
+        let conn = open_test_db();
+        let open_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+        let updated_id = insert_todo(&conn, "42", "2026-08-29", "Ship release", None).unwrap();
+        insert_update(
+            &conn,
+            "42",
+            "2026-08-29",
+            "Ship release",
+            Some(updated_id),
+            "done",
+            "Shipped",
+            None,
+        )
+        .unwrap();
+
+        let open_only = list_open_todos(&conn, "42", "2026-08-29", "").unwrap();
+        assert_eq!(open_only, vec![(open_id, "Write tests".to_string())]);
+
+        let mut all = list_todos(&conn, "42", "2026-08-29", "").unwrap();
+        all.sort();
+        let mut expected = vec![
+            (open_id, "Write tests".to_string()),
+            (updated_id, "Ship release".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(all, expected);
+    }
+
+    #[test]
+    fn todo_for_edit_returns_current_task_and_notes_scoped_to_owner_and_date() {
+        let conn = open_test_db();
+        let id = insert_todo(
+            &conn,
+            "42",
+            "2026-08-29",
+            "Write tests",
+            Some("keep it simple"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            todo_for_edit(&conn, id, "42", "2026-08-29").unwrap(),
+            Some((
+                "Write tests".to_string(),
+                Some("keep it simple".to_string())
+            ))
+        );
+        assert_eq!(todo_for_edit(&conn, id, "99", "2026-08-29").unwrap(), None);
+        assert_eq!(todo_for_edit(&conn, id, "42", "2026-08-30").unwrap(), None);
+        assert_eq!(
+            todo_for_edit(&conn, 999_999, "42", "2026-08-29").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn update_todo_changes_task_and_notes() {
+        let conn = open_test_db();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", Some("old notes")).unwrap();
+
+        let changed = update_todo(
+            &conn,
+            id,
+            "42",
+            "2026-08-29",
+            "Write better tests",
+            Some("new notes"),
+        )
+        .unwrap();
+        assert!(changed);
+
+        let (_, _, _, task, notes, ..) = row(&conn, id);
+        assert_eq!(task, "Write better tests");
+        assert_eq!(notes.as_deref(), Some("new notes"));
+
+        let cleared =
+            update_todo(&conn, id, "42", "2026-08-29", "Write better tests", None).unwrap();
+        assert!(cleared);
+        let (_, _, _, _, notes, ..) = row(&conn, id);
+        assert_eq!(notes, None);
+    }
+
+    #[test]
+    fn update_todo_returns_false_when_no_matching_row() {
+        let conn = open_test_db();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+
+        assert!(!update_todo(&conn, id, "99", "2026-08-29", "x", None).unwrap());
+        assert!(!update_todo(&conn, id, "42", "2026-08-30", "x", None).unwrap());
+        assert!(!update_todo(&conn, 999_999, "42", "2026-08-29", "x", None).unwrap());
+    }
+
+    #[test]
+    fn delete_todo_removes_the_row_and_returns_its_task_text() {
+        let conn = open_test_db();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+
+        let outcome = delete_todo(&conn, id, "42", "2026-08-29").unwrap();
+        assert_eq!(
+            outcome,
+            DeleteTodoOutcome::Deleted("Write tests".to_string())
+        );
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn delete_todo_returns_not_found_for_wrong_owner_wrong_date_or_unknown_id() {
+        let conn = open_test_db();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+
+        assert_eq!(
+            delete_todo(&conn, id, "99", "2026-08-29").unwrap(),
+            DeleteTodoOutcome::NotFound
+        );
+        assert_eq!(
+            delete_todo(&conn, id, "42", "2026-08-30").unwrap(),
+            DeleteTodoOutcome::NotFound
+        );
+        assert_eq!(
+            delete_todo(&conn, 999_999, "42", "2026-08-29").unwrap(),
+            DeleteTodoOutcome::NotFound
+        );
+    }
+
+    #[test]
+    fn delete_todo_blocks_when_an_update_references_it() {
+        let conn = open_test_db();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+        insert_update(
+            &conn,
+            "42",
+            "2026-08-29",
+            "Write tests",
+            Some(id),
+            "done",
+            "Finished",
+            None,
+        )
+        .unwrap();
+
+        let outcome = delete_todo(&conn, id, "42", "2026-08-29").unwrap();
+        assert_eq!(outcome, DeleteTodoOutcome::StillReferenced);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

@@ -3,16 +3,15 @@ use std::sync::{Arc, Mutex};
 use chrono_tz::Tz;
 use rusqlite::Connection;
 use serenity::all::{
-    AutocompleteChoice, CommandDataOption, CommandDataOptionValue, CommandInteraction,
-    CommandInteraction as AutocompleteInteraction, CommandOptionType, Context as SerenityContext,
-    CreateActionRow, CreateAutocompleteResponse, CreateCommand, CreateCommandOption,
-    CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateModal,
-    InputTextStyle, ModalInteraction,
+    AutocompleteChoice, CommandInteraction, CommandInteraction as AutocompleteInteraction,
+    CommandOptionType, Context as SerenityContext, CreateActionRow, CreateAutocompleteResponse,
+    CreateCommand, CreateCommandOption, CreateInputText, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateModal, InputTextStyle, ModalInteraction,
 };
 
 use crate::entries;
 
-use super::modal_value;
+use super::{get_option_string, modal_value};
 
 pub const MODAL_PREFIX: &str = "update_modal:";
 const PROGRESS_INPUT_ID: &str = "progress";
@@ -39,17 +38,6 @@ pub fn command() -> CreateCommand {
                 .add_string_choice("In Progress", "in_progress")
                 .add_string_choice("Blocked", "blocked"),
         )
-}
-
-fn get_option_string(options: &[CommandDataOption], name: &str) -> Option<String> {
-    options
-        .iter()
-        .find(|o| o.name == name)
-        .and_then(|o| match &o.value {
-            CommandDataOptionValue::String(s) => Some(s.clone()),
-            CommandDataOptionValue::Autocomplete { value, .. } => Some(value.clone()),
-            _ => None,
-        })
 }
 
 /// "done" -> "D", etc. Single letters to keep the modal custom_id short.
