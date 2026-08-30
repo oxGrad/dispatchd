@@ -4,6 +4,7 @@ mod discord;
 mod entries;
 mod followups;
 mod init;
+mod lock;
 mod maintenance;
 mod members;
 mod reminders;
@@ -99,6 +100,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let config = Config::load()?;
+
+    // Held for the rest of `main` - guards against two dispatchd processes
+    // racing the ticker against the same data directory (see src/lock.rs).
+    let _singleton = lock::acquire(&config.db_path.with_extension("lock"))?;
+
     let conn = db::open(&config.db_path)?;
     let seeded = members::seed(&conn)?;
 

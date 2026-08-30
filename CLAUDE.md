@@ -115,6 +115,9 @@ src/
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
   followups.rs   followups_sent DB logic (missing-todo/update nags)
   init.rs        `dispatchd init` subcommand
+  lock.rs        single-instance guard (flock on `<db_path>.lock`), held
+                 for the process's lifetime so two dispatchd processes
+                 never race the ticker against the same data directory
   maintenance.rs `dispatchd maintenance run` DB logic (weekly prune + VACUUM)
   service.rs     `dispatchd service install` (systemd unit, Linux only)
   discord/       serenity Handler, one file per slash command
@@ -123,5 +126,7 @@ src/
     todo.rs        /todo
     update.rs      /update (autocomplete + modal custom_id encoding)
     team_status.rs /team-status
-    ticker.rs      daily standup thread creation + 9am/3pm/4pm reminders
+    ticker.rs      daily standup thread creation + 9am/3pm/4pm reminders;
+                    gives up (marks sent, doesn't retry) on a deleted
+                    standup thread instead of retrying every tick
 ```

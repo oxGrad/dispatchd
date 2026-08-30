@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use chrono::NaiveTime;
 use rusqlite::Connection;
-use serenity::all::{ChannelId, ChannelType, CreateMessage, CreateThread, Http};
+use serenity::all::{
+    ChannelId, ChannelType, CreateMessage, CreateThread, Error as SerenityError, Http, HttpError,
+};
 
 use crate::config::Config;
 use crate::{followups, members, reminders};
@@ -11,6 +13,31 @@ use crate::{followups, members, reminders};
 /// Pure time comparison - testable without a live clock or Discord types.
 fn is_due(now: NaiveTime, trigger: NaiveTime) -> bool {
     now >= trigger
+}
+
+/// Discord's JSON error code for "Unknown Channel" - returned when a
+/// request targets a channel or thread that no longer exists (e.g.
+/// someone deleted today's standup thread mid-day).
+const UNKNOWN_CHANNEL_ERROR_CODE: isize = 10003;
+
+fn is_unknown_channel_code(code: isize) -> bool {
+    code == UNKNOWN_CHANNEL_ERROR_CODE
+}
+
+/// True when `err` is Discord reporting that the channel/thread a send
+/// targeted no longer exists, as opposed to a transient failure (rate
+/// limit, network blip, a permissions problem) that's worth retrying on
+/// the next tick. Not unit-tested like the pure helper above - building a
+/// real `serenity::Error` needs a `reqwest::Method`, and reqwest isn't (and
+/// shouldn't become) a direct dependency of this crate just for a test -
+/// same "can't exercise real Discord types without a live connection"
+/// limitation as the rest of this codebase's Discord-facing code.
+fn is_unknown_channel_error(err: &SerenityError) -> bool {
+    matches!(
+        err,
+        SerenityError::Http(HttpError::UnsuccessfulRequest(response))
+            if is_unknown_channel_code(response.error.code)
+    )
 }
 
 /// Runs forever, checking every `config.ticker_interval_seconds` whether
@@ -200,7 +227,20 @@ async fn maybe_fire_simple_reminder(
         .send_message(http, CreateMessage::new().content(message))
         .await
     {
-        eprintln!("failed to post {kind}: {e}");
+        if is_unknown_channel_error(&e) {
+            // The thread was deleted - marking sent anyway stops this from
+            // retrying (and failing identically) every tick for the rest
+            // of the day.
+            eprintln!(
+                "standup thread for {date} no longer exists (deleted?) - giving up on {kind} for today: {e}"
+            );
+            let conn = db.lock().expect("db mutex poisoned");
+            if let Err(e) = reminders::mark_sent(&conn, date, kind) {
+                eprintln!("failed to mark {kind} sent: {e}");
+            }
+        } else {
+            eprintln!("failed to post {kind}: {e}");
+        }
         return;
     }
 
@@ -261,6 +301,11 @@ async fn maybe_fire_followups(
     };
     let channel_id = ChannelId::new(raw_id);
 
+    // Set once the thread is found gone - every remaining member this tick
+    // is then marked sent without another doomed send, instead of each one
+    // failing identically against the same deleted thread.
+    let mut thread_gone = false;
+
     for discord_user_id in missing {
         let already = {
             let conn = db.lock().expect("db mutex poisoned");
@@ -275,15 +320,27 @@ async fn maybe_fire_followups(
             }
         }
 
-        let content = format!("<@{discord_user_id}> {message}");
-        if let Err(e) = channel_id
-            .send_message(http, CreateMessage::new().content(content))
-            .await
-        {
-            eprintln!("failed to post {kind} to {discord_user_id}: {e}");
-            continue;
+        if !thread_gone {
+            let content = format!("<@{discord_user_id}> {message}");
+            if let Err(e) = channel_id
+                .send_message(http, CreateMessage::new().content(content))
+                .await
+            {
+                if is_unknown_channel_error(&e) {
+                    eprintln!(
+                        "standup thread for {date} no longer exists (deleted?) - giving up on {kind} for the rest of today: {e}"
+                    );
+                    thread_gone = true;
+                } else {
+                    eprintln!("failed to post {kind} to {discord_user_id}: {e}");
+                    continue;
+                }
+            }
         }
 
+        // Reached with a successful send, or after just detecting the
+        // thread is gone (marking here, not retrying, stops the
+        // per-person per-tick retry loop for the rest of today).
         let conn = db.lock().expect("db mutex poisoned");
         if let Err(e) = followups::mark_sent(&conn, date, &discord_user_id, kind) {
             eprintln!("failed to mark {kind} sent for {discord_user_id}: {e}");
