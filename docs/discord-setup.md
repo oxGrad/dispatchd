@@ -76,7 +76,9 @@ wiped one), but not an attacker who already has root on the live running
 Pi, since systemd itself can decrypt the credential there for legitimate
 service starts. Needs root (`sudo`), since it writes under `/etc`.
 Re-running it overwrites the existing credential - that's how you rotate
-the token.
+the token. `sudo dispatchd discord logout` removes it (idempotent - fine
+to run even if nothing's stored); a running `dispatchd.service` keeps the
+old token in memory until it's restarted or stopped.
 
 Then start the bot:
 

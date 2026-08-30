@@ -34,6 +34,8 @@ dispatchd discord login   # (Linux, root) prompts for the bot token (hidden
                      # into `systemd-creds encrypt --with-key=host` and
                      # writes /etc/dispatchd/discord_token.cred - dispatchd
                      # runs the encryption itself. See docs/discord-setup.md.
+dispatchd discord logout  # (Linux, root) removes /etc/dispatchd/discord_token.cred.
+                     # Idempotent - a missing credential is not an error.
 dispatchd            # loads config, opens/migrates the DB, seeds members.toml
                      # if present, prints a status block, then connects to
                      # Discord if configured (see below) - otherwise exits 0

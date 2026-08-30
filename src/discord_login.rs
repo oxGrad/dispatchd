@@ -79,6 +79,30 @@ fn encrypt_token(token: &str, cred_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// `dispatchd discord logout`: removes the encrypted credential written by
+/// `discord login`. Requires root, since it lives under `/etc`. Idempotent:
+/// a missing credential is not an error, matching `service::install`'s
+/// "missing is a valid state" convention elsewhere in this project.
+pub fn logout() -> Result<()> {
+    logout_at(crate::service::CRED_PATH)
+}
+
+fn logout_at(cred_path: &str) -> Result<()> {
+    if !std::path::Path::new(cred_path).exists() {
+        println!("no encrypted Discord token found at {cred_path} - nothing to do.");
+        return Ok(());
+    }
+    std::fs::remove_file(cred_path).with_context(|| {
+        format!("failed to remove {cred_path} (are you root? try: sudo dispatchd discord logout)")
+    })?;
+    println!("removed {cred_path}.");
+    println!(
+        "dispatchd.service (if running) keeps the old token in memory until restarted - run \
+         `sudo systemctl stop dispatchd` if you want to disconnect it now."
+    );
+    Ok(())
+}
+
 /// Decrypts the stored credential directly, for `dispatchd status`'s
 /// Discord ping. Unlike the long-running bot (started by systemd itself,
 /// which decrypts `LoadCredentialEncrypted=` automatically into
@@ -138,5 +162,24 @@ mod tests {
     #[test]
     fn decrypt_cred_file_returns_none_for_a_missing_file() {
         assert_eq!(decrypt_cred_file("/nonexistent/discord_token.cred"), None);
+    }
+
+    #[test]
+    fn logout_at_removes_an_existing_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("discord_token.cred");
+        std::fs::write(&path, "encrypted-stuff").unwrap();
+
+        logout_at(path.to_str().unwrap()).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn logout_at_on_a_missing_credential_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("discord_token.cred");
+
+        logout_at(path.to_str().unwrap()).unwrap();
     }
 }

@@ -63,6 +63,8 @@ enum DiscordCommand {
     /// Log in interactively: prompts for the bot token, validates it
     /// against Discord, and encrypts it at rest via systemd-creds
     Login,
+    /// Remove the encrypted Discord token
+    Logout,
 }
 
 #[derive(Subcommand)]
@@ -142,6 +144,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Discord {
             action: DiscordCommand::Login,
         }) => return discord_login::run().await,
+        Some(Command::Discord {
+            action: DiscordCommand::Logout,
+        }) => return discord_login::logout(),
         Some(Command::Service {
             action: ServiceCommand::Install,
         }) => return service::install(),
