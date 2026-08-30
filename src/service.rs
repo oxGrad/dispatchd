@@ -3,6 +3,7 @@ const MAINTENANCE_SERVICE_PATH: &str = "/etc/systemd/system/dispatchd-maintenanc
 const MAINTENANCE_TIMER_PATH: &str = "/etc/systemd/system/dispatchd-maintenance.timer";
 const ENV_DIR: &str = "/etc/dispatchd";
 const ENV_FILE: &str = "/etc/dispatchd/dispatchd.env";
+const INSTALL_LOCK_PATH: &str = "/etc/dispatchd/service-install.lock";
 const ENV_TEMPLATE: &str = "# dispatchd secrets - fill in and (re)start the service.\n\
 # mode 600, root-owned; never commit this file.\n\
 DISPATCHD_DISCORD_TOKEN=\n";
@@ -77,6 +78,10 @@ pub fn install() -> anyhow::Result<()> {
     std::fs::create_dir_all(ENV_DIR).with_context(|| {
         format!("failed to create {ENV_DIR} (are you root? try: sudo dispatchd service install)")
     })?;
+
+    // Guards against two concurrent `service install` runs interleaving
+    // their writes to the same unit files.
+    let _singleton = crate::lock::acquire(std::path::Path::new(INSTALL_LOCK_PATH))?;
 
     if std::path::Path::new(ENV_FILE).exists() {
         println!("{ENV_FILE} already exists, leaving it untouched");

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::{config, members};
+use crate::{config, lock, members};
 
 const CONFIG_TEMPLATE: &str = include_str!("../config.example.toml");
 const MEMBERS_TEMPLATE: &str = include_str!("../members.example.toml");
@@ -11,11 +11,14 @@ const MEMBERS_TEMPLATE: &str = include_str!("../members.example.toml");
 /// locations, if they don't already exist. Never overwrites an existing
 /// file - safe to re-run.
 pub fn run() -> Result<()> {
-    create_if_missing(
-        &config::config_target_path()?,
-        "config.toml",
-        CONFIG_TEMPLATE,
-    )?;
+    let config_path = config::config_target_path()?;
+
+    // Guards the check-then-write below against two `dispatchd init`
+    // processes racing each other - without it, both could see
+    // config.toml as missing and write it concurrently.
+    let _singleton = lock::acquire(&config_path.with_extension("lock"))?;
+
+    create_if_missing(&config_path, "config.toml", CONFIG_TEMPLATE)?;
     create_if_missing(&members::target_path()?, "members.toml", MEMBERS_TEMPLATE)?;
     Ok(())
 }

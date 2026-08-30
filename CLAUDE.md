@@ -115,9 +115,15 @@ src/
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
   followups.rs   followups_sent DB logic (missing-todo/update nags)
   init.rs        `dispatchd init` subcommand
-  lock.rs        single-instance guard (flock on `<db_path>.lock`), held
-                 for the process's lifetime so two dispatchd processes
-                 never race the ticker against the same data directory
+  lock.rs        single-instance guard (`std::fs::File::try_lock`), held
+                 for the process's lifetime; used by the main run (`<db>.lock`,
+                 so two processes never race the ticker), `maintenance run`
+                 (`<db>.maintenance.lock` - deliberately separate, since the
+                 maintenance timer is meant to run concurrently with the
+                 main service, not be blocked by it), `init`
+                 (`<config>.lock`), and `service install`
+                 (`/etc/dispatchd/service-install.lock`) - each guards only
+                 against a second instance of that same subcommand
   maintenance.rs `dispatchd maintenance run` DB logic (weekly prune + VACUUM)
   service.rs     `dispatchd service install` (systemd unit, Linux only)
   discord/       serenity Handler, one file per slash command

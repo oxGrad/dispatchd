@@ -75,6 +75,14 @@ fn discord_credentials(config: &Config) -> Option<(String, u64)> {
 
 fn run_maintenance() -> anyhow::Result<()> {
     let config = Config::load()?;
+
+    // A separate lock from the main run's `<db>.lock` - the weekly
+    // maintenance timer is designed to fire independently of (and
+    // concurrently with) the long-running bot process, so this only
+    // guards against two overlapping `maintenance run` invocations, e.g.
+    // a slow run still going when the next timer fires.
+    let _singleton = lock::acquire(&config.db_path.with_extension("maintenance.lock"))?;
+
     let conn = db::open(&config.db_path)?;
     let (reminders_deleted, followups_deleted) = maintenance::run(&conn)?;
     println!(
