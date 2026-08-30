@@ -45,41 +45,56 @@ discord_guild_id = 123456789012345678
 discord_standup_channel_id = 123456789012345679
 ```
 
-Then log the bot in, which validates the token against Discord and saves
-it to your OS keyring (never put it in `config.toml` — it's a secret, and
-that file may end up in backups or version control):
+For a systemd deployment (Linux only - this is the supported path; see
+below for local/dev use), first install the unit:
 
 ```sh
-dispatchd discord login
+sudo dispatchd service install
+```
+
+This requires systemd ≥ 250 (no plaintext fallback for older systemd) and
+generates a unit that loads the token via `LoadCredentialEncrypted=`, so
+it never sits on disk unencrypted. It won't start the service yet - there's
+no token configured until the next step.
+
+Then log the bot in. This is also where the token gets encrypted - unlike
+a typical "paste your token here" prompt, `dispatchd` runs the encryption
+itself:
+
+```sh
+sudo dispatchd discord login
 ```
 
 It prompts for the token (input is hidden, like a password prompt),
-confirms it's valid by asking Discord who it belongs to, then stores it
-in the OS keyring. `dispatchd` reads it from there automatically on
-every subsequent run - no export, no file to protect by hand.
+confirms it's valid by asking Discord who it belongs to, then pipes it
+straight into `systemd-creds encrypt --with-key=host` and writes the
+result to `/etc/dispatchd/discord_token.cred` - the plaintext token is
+never written to disk itself, only to that pipe. `--with-key=host` is
+used because Raspberry Pi boards (Zero 2 W, 3B, etc.) have no TPM2 - this
+protects an offline copy of the SD card (e.g. a stolen or improperly
+wiped one), but not an attacker who already has root on the live running
+Pi, since systemd itself can decrypt the credential there for legitimate
+service starts. Needs root (`sudo`), since it writes under `/etc`.
+Re-running it overwrites the existing credential - that's how you rotate
+the token.
 
-`DISPATCHD_DISCORD_TOKEN` still works as a fallback (checked only if
-nothing is in the keyring), for local/dev use or wherever there's no
-usable OS keyring backend - e.g. under `sudo dispatchd service install`
-(see below): a system service normally can't reach the login keyring of
-the user who ran `discord login`, so a systemd deployment still sets the
-token via `/etc/dispatchd/dispatchd.env` rather than `discord login`.
+Then start the bot:
 
-For a systemd deployment (Linux only), run `sudo dispatchd service install`
-instead of `discord login` - it writes `/etc/dispatchd/dispatchd.env`
-(mode 600) for you to fill in the token, generates and enables the unit,
-and never touches an `.env` file that already exists on a re-run. See its
-own printed output for the exact next steps (it won't start the service
-for you - fill in the token and `config.toml`/`members.toml` first, then
-`sudo systemctl start dispatchd`).
+```sh
+sudo systemctl start dispatchd
+```
+
+`DISPATCHD_DISCORD_TOKEN` still works as a fallback (checked only if no
+encrypted credential is found) for local/dev use, i.e. running `dispatchd`
+directly instead of via `service install` - convenient when you don't
+need or want the systemd-creds machinery.
 
 ## 5. Run it
 
-```sh
-dispatchd
-```
-
-If everything's wired up correctly, you'll see:
+Under systemd, `sudo systemctl start dispatchd` (from step 4) starts it.
+Running `dispatchd` directly (local/dev, no systemd) does the same thing
+in the foreground. Either way, if everything's wired up correctly you'll
+see:
 
 ```
 dispatchd connected to Discord as <your bot's name>
@@ -94,6 +109,22 @@ If `discord_guild_id` isn't set, or no token was saved via `discord login`
 or `DISPATCHD_DISCORD_TOKEN`, dispatchd still runs its config/database
 checks and prints "Discord not configured"
 instead of connecting — that's expected until you complete the steps above.
+
+To check on it afterwards without watching the logs, `dispatchd status`
+reports the systemd side (systemd version, whether the unit is
+installed/enabled/active, whether an encrypted token is on disk) and the
+Discord side (resolves a token exactly like the bot itself would, then
+pings Discord's API and reports the round-trip latency):
+
+```
+$ dispatchd status
+systemd:
+  version:              252 (>= 250, ok)
+  dispatchd.service:    installed, enabled=enabled, active=active
+  discord token:        encrypted credential present (/etc/dispatchd/discord_token.cred)
+discord:
+  ping:                 ok - logged in as dispatchd (123456789012345678), 84ms
+```
 
 ## 6. `/team-status` permissions
 

@@ -8,7 +8,6 @@ anyhow = "1.0.104"
 chrono = "0.4.45"
 chrono-tz = "0.10.4"
 clap = { version = "4.6.6", features = ["derive"] }
-keyring = "4.1.5"
 rpassword = "7.5.4"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 rusqlite_migration = "2.5.0"
