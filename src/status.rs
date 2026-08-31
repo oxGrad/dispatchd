@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
@@ -5,6 +7,9 @@ pub struct MemberStatus {
     pub name: String,
     pub todo_count: i64,
     pub matched_update_count: i64,
+    /// Today's non-null SOW refs from this member's todos, unique and in
+    /// first-seen (id) order.
+    pub sow_refs: Vec<String>,
 }
 
 /// One row per `members` entry for `date`. Simple per-member COUNT queries
@@ -31,34 +36,62 @@ pub fn team_status(conn: &Connection, date: &str) -> Result<Vec<MemberStatus>> {
             params![date, discord_user_id],
             |row| row.get(0),
         )?;
+
+        let mut sow_ref_stmt = conn.prepare(
+            "SELECT sow_ref FROM entries
+             WHERE type = 'todo' AND date = ?1 AND discord_user_id = ?2 AND sow_ref IS NOT NULL
+             ORDER BY id",
+        )?;
+        let mut sow_refs = Vec::new();
+        let mut seen = HashSet::new();
+        for sow_ref in sow_ref_stmt.query_map(params![date, discord_user_id], |row| {
+            row.get::<_, String>(0)
+        })? {
+            let sow_ref = sow_ref?;
+            if seen.insert(sow_ref.clone()) {
+                sow_refs.push(sow_ref);
+            }
+        }
+
         result.push(MemberStatus {
             name,
             todo_count,
             matched_update_count,
+            sow_refs,
         });
     }
     Ok(result)
 }
 
-/// Formats one `/team-status` line, e.g. `✅ Alice — 3/3 updated`.
-/// A member with no todos posted shows no fraction (`0/0` reads as noise);
-/// one who posted todos but matched none of them is treated the same as
-/// "no todo posted" - both are the "needs attention" case.
+/// Formats one `/team-status` line, e.g. `✅ Alice — 3/3 updated`, with
+/// any SOW refs tagged on today's todos appended in parens, e.g.
+/// `✅ Alice — 3/3 updated (M1D1, M1D2, M2)`. A member with no todos posted
+/// shows no fraction (`0/0` reads as noise); one who posted todos but
+/// matched none of them is treated the same as "no todo posted" - both
+/// are the "needs attention" case. A member with no SOW refs set gets no
+/// trailing parens (a `todo_count == 0` member structurally can't have
+/// any either, since the column only exists on todo rows).
 pub fn format_status_line(status: &MemberStatus) -> String {
-    if status.todo_count == 0 {
-        return format!("❌ {} — no todo posted", status.name);
-    }
-    let emoji = if status.matched_update_count == status.todo_count {
-        "✅"
-    } else if status.matched_update_count == 0 {
-        "❌"
+    let base = if status.todo_count == 0 {
+        format!("❌ {} — no todo posted", status.name)
     } else {
-        "⚠️"
+        let emoji = if status.matched_update_count == status.todo_count {
+            "✅"
+        } else if status.matched_update_count == 0 {
+            "❌"
+        } else {
+            "⚠️"
+        };
+        format!(
+            "{emoji} {} — {}/{} updated",
+            status.name, status.matched_update_count, status.todo_count
+        )
     };
-    format!(
-        "{emoji} {} — {}/{} updated",
-        status.name, status.matched_update_count, status.todo_count
-    )
+    if status.sow_refs.is_empty() {
+        base
+    } else {
+        format!("{base} ({})", status.sow_refs.join(", "))
+    }
 }
 
 #[cfg(test)]
@@ -88,7 +121,7 @@ mod tests {
         let conn = open_test_db();
         seed_member(&conn, "1", "Alice", "lead");
         for task in ["a", "b", "c"] {
-            let todo_id = entries::insert_todo(&conn, "1", DATE, task, None).unwrap();
+            let todo_id = entries::insert_todo(&conn, "1", DATE, task, None, None).unwrap();
             entries::insert_update(&conn, "1", DATE, task, Some(todo_id), "done", "done", None)
                 .unwrap();
         }
@@ -102,8 +135,8 @@ mod tests {
     fn partially_matched_member_shows_warning() {
         let conn = open_test_db();
         seed_member(&conn, "2", "Budi", "designer");
-        let todo1 = entries::insert_todo(&conn, "2", DATE, "a", None).unwrap();
-        entries::insert_todo(&conn, "2", DATE, "b", None).unwrap();
+        let todo1 = entries::insert_todo(&conn, "2", DATE, "a", None, None).unwrap();
+        entries::insert_todo(&conn, "2", DATE, "b", None, None).unwrap();
         entries::insert_update(&conn, "2", DATE, "a", Some(todo1), "done", "done", None).unwrap();
 
         let statuses = team_status(&conn, DATE).unwrap();
@@ -126,8 +159,8 @@ mod tests {
     fn member_with_todos_but_zero_matches_shows_red() {
         let conn = open_test_db();
         seed_member(&conn, "4", "Dedi", "medior");
-        entries::insert_todo(&conn, "4", DATE, "a", None).unwrap();
-        entries::insert_todo(&conn, "4", DATE, "b", None).unwrap();
+        entries::insert_todo(&conn, "4", DATE, "a", None, None).unwrap();
+        entries::insert_todo(&conn, "4", DATE, "b", None, None).unwrap();
 
         let statuses = team_status(&conn, DATE).unwrap();
         assert_eq!(format_status_line(&statuses[0]), "❌ Dedi — 0/2 updated");
@@ -137,7 +170,7 @@ mod tests {
     fn ad_hoc_update_does_not_count_toward_matched() {
         let conn = open_test_db();
         seed_member(&conn, "5", "Eka", "junior");
-        entries::insert_todo(&conn, "5", DATE, "a", None).unwrap();
+        entries::insert_todo(&conn, "5", DATE, "a", None, None).unwrap();
         entries::insert_update(
             &conn,
             "5",
@@ -159,7 +192,7 @@ mod tests {
     fn two_updates_against_the_same_todo_still_count_as_one_match() {
         let conn = open_test_db();
         seed_member(&conn, "6", "Fajar", "senior");
-        let todo_id = entries::insert_todo(&conn, "6", DATE, "a", None).unwrap();
+        let todo_id = entries::insert_todo(&conn, "6", DATE, "a", None, None).unwrap();
         entries::insert_update(
             &conn,
             "6",
@@ -185,6 +218,44 @@ mod tests {
 
         let statuses = team_status(&conn, DATE).unwrap();
         assert_eq!(statuses[0].matched_update_count, 1);
+    }
+
+    #[test]
+    fn sow_refs_are_appended_in_first_seen_order() {
+        let conn = open_test_db();
+        seed_member(&conn, "7", "Gita", "senior");
+        let todo1 = entries::insert_todo(&conn, "7", DATE, "a", None, Some("M1D1")).unwrap();
+        entries::insert_todo(&conn, "7", DATE, "b", None, Some("M1D2")).unwrap();
+        entries::insert_update(&conn, "7", DATE, "a", Some(todo1), "done", "done", None).unwrap();
+
+        let statuses = team_status(&conn, DATE).unwrap();
+        assert_eq!(statuses[0].sow_refs, vec!["M1D1", "M1D2"]);
+        assert_eq!(
+            format_status_line(&statuses[0]),
+            "⚠️ Gita — 1/2 updated (M1D1, M1D2)"
+        );
+    }
+
+    #[test]
+    fn repeated_sow_ref_across_todos_appears_once() {
+        let conn = open_test_db();
+        seed_member(&conn, "8", "Hadi", "medior");
+        entries::insert_todo(&conn, "8", DATE, "a", None, Some("M1")).unwrap();
+        entries::insert_todo(&conn, "8", DATE, "b", None, Some("M1")).unwrap();
+
+        let statuses = team_status(&conn, DATE).unwrap();
+        assert_eq!(statuses[0].sow_refs, vec!["M1"]);
+    }
+
+    #[test]
+    fn no_sow_refs_leaves_the_line_unchanged() {
+        let conn = open_test_db();
+        seed_member(&conn, "9", "Ida", "junior");
+        entries::insert_todo(&conn, "9", DATE, "a", None, None).unwrap();
+
+        let statuses = team_status(&conn, DATE).unwrap();
+        assert!(statuses[0].sow_refs.is_empty());
+        assert_eq!(format_status_line(&statuses[0]), "❌ Ida — 0/1 updated");
     }
 
     #[test]

@@ -100,7 +100,7 @@ mod tests {
         let conn = open_test_db();
         seed_member(&conn, "1", "Alice");
         seed_member(&conn, "2", "Budi");
-        entries::insert_todo(&conn, "1", DATE, "a", None).unwrap();
+        entries::insert_todo(&conn, "1", DATE, "a", None, None).unwrap();
 
         let missing = members_missing_todo(&conn, DATE).unwrap();
         assert_eq!(missing, vec!["2".to_string()]);
@@ -113,9 +113,9 @@ mod tests {
         seed_member(&conn, "2", "Budi"); // todo, no update
         seed_member(&conn, "3", "Citra"); // todo, fully matched
 
-        entries::insert_todo(&conn, "2", DATE, "a", None).unwrap();
+        entries::insert_todo(&conn, "2", DATE, "a", None, None).unwrap();
 
-        let todo3 = entries::insert_todo(&conn, "3", DATE, "a", None).unwrap();
+        let todo3 = entries::insert_todo(&conn, "3", DATE, "a", None, None).unwrap();
         entries::insert_update(&conn, "3", DATE, "a", Some(todo3), "done", "done", None).unwrap();
 
         let missing = members_missing_update(&conn, DATE).unwrap();

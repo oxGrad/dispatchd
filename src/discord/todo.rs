@@ -10,7 +10,7 @@ use serenity::all::{
     InputTextStyle, ModalInteraction,
 };
 
-use crate::entries::{self, DeleteTodoOutcome};
+use crate::entries::{self, DeleteTodoOutcome, TodoForEdit};
 
 use super::{get_option_string, modal_value};
 
@@ -18,11 +18,13 @@ pub const CREATE_MODAL_ID: &str = "todo_modal";
 pub const EDIT_MODAL_PREFIX: &str = "todo_edit_modal:";
 const TASK_INPUT_ID: &str = "task";
 const NOTES_INPUT_ID: &str = "notes";
+const SOW_REF_INPUT_ID: &str = "sow_ref";
+const SOW_REF_MAX_LEN: u16 = 30;
 
 const TODO_HELP_TEXT: &str = "\
 **/todo subcommands**
-`/todo create` - submit a new todo for today
-`/todo edit id:<...>` - edit one of today's todos (autocomplete over today's)
+`/todo create` - submit a new todo for today (optionally tag it with an SOW ref like M1D2)
+`/todo edit id:<...>` - edit one of today's todos, SOW ref included (autocomplete over today's)
 `/todo delete id:<...>` - delete one of today's todos
 `/todo list` - list today's todos with their ids
 `/todo help` - show this message";
@@ -112,6 +114,15 @@ pub async fn handle_create(ctx: &SerenityContext, command: &CommandInteraction) 
             )
             .required(false),
         ),
+        CreateActionRow::InputText(
+            CreateInputText::new(
+                InputTextStyle::Short,
+                "SOW Ref (optional)",
+                SOW_REF_INPUT_ID,
+            )
+            .required(false)
+            .max_length(SOW_REF_MAX_LEN),
+        ),
     ]);
     if let Err(e) = command
         .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
@@ -129,12 +140,20 @@ pub async fn handle_modal_submission(
 ) {
     let task = modal_value(modal, TASK_INPUT_ID).unwrap_or_default();
     let notes = modal_value(modal, NOTES_INPUT_ID).filter(|s| !s.trim().is_empty());
+    let sow_ref = modal_value(modal, SOW_REF_INPUT_ID).filter(|s| !s.trim().is_empty());
     let discord_user_id = modal.user.id.to_string();
     let date = entries::today_in(timezone);
 
     let insert_result = {
         let conn = db.lock().expect("db mutex poisoned");
-        entries::insert_todo(&conn, &discord_user_id, &date, &task, notes.as_deref())
+        entries::insert_todo(
+            &conn,
+            &discord_user_id,
+            &date,
+            &task,
+            notes.as_deref(),
+            sow_ref.as_deref(),
+        )
     };
 
     let reply_text = match insert_result {
@@ -187,8 +206,12 @@ pub async fn handle_edit(
         entries::todo_for_edit(&conn, id, &discord_user_id, &date)
     };
 
-    let (task, notes) = match current {
-        Ok(Some(pair)) => pair,
+    let TodoForEdit {
+        task,
+        notes,
+        sow_ref,
+    } = match current {
+        Ok(Some(todo)) => todo,
         Ok(None) => {
             reply_ephemeral(
                 ctx,
@@ -227,6 +250,16 @@ pub async fn handle_edit(
             .required(false)
             .value(notes.unwrap_or_default()),
         ),
+        CreateActionRow::InputText(
+            CreateInputText::new(
+                InputTextStyle::Short,
+                "SOW Ref (optional)",
+                SOW_REF_INPUT_ID,
+            )
+            .required(false)
+            .max_length(SOW_REF_MAX_LEN)
+            .value(sow_ref.unwrap_or_default()),
+        ),
     ]);
     if let Err(e) = command
         .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
@@ -257,12 +290,21 @@ pub async fn handle_edit_modal_submission(
 
     let task = modal_value(modal, TASK_INPUT_ID).unwrap_or_default();
     let notes = modal_value(modal, NOTES_INPUT_ID).filter(|s| !s.trim().is_empty());
+    let sow_ref = modal_value(modal, SOW_REF_INPUT_ID).filter(|s| !s.trim().is_empty());
     let discord_user_id = modal.user.id.to_string();
     let date = entries::today_in(timezone);
 
     let updated = {
         let conn = db.lock().expect("db mutex poisoned");
-        entries::update_todo(&conn, id, &discord_user_id, &date, &task, notes.as_deref())
+        entries::update_todo(
+            &conn,
+            id,
+            &discord_user_id,
+            &date,
+            &task,
+            notes.as_deref(),
+            sow_ref.as_deref(),
+        )
     };
 
     let reply_text = match updated {
@@ -348,7 +390,10 @@ pub async fn handle_list(
         Ok(rows) => {
             let lines: Vec<String> = rows
                 .iter()
-                .map(|(id, task)| format!("`{id}` {task}"))
+                .map(|(id, task, sow_ref)| match sow_ref {
+                    Some(r) => format!("`{id}` {task} [{r}]"),
+                    None => format!("`{id}` {task}"),
+                })
                 .collect();
             format!("**Today's todos:**\n{}", lines.join("\n"))
         }
@@ -386,7 +431,7 @@ pub async fn handle_autocomplete(
         Ok(rows) => {
             let choices = rows
                 .into_iter()
-                .map(|(id, task)| AutocompleteChoice::new(task, id.to_string()))
+                .map(|(id, task, _sow_ref)| AutocompleteChoice::new(task, id.to_string()))
                 .collect();
             CreateAutocompleteResponse::new().set_choices(choices)
         }

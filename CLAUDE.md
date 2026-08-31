@@ -126,9 +126,12 @@ src/
   main.rs        CLI entry point, Config/DB/seed wiring, Discord gating
   config.rs      Config struct, XDG lookup + env-var overrides, TOML merge
   db/            SQLite connection + embedded migrations
-  entries.rs     todo/update row DB logic
+  entries.rs     todo/update row DB logic, incl. entries.sow_ref - a
+                 purely informational, unvalidated cross-reference into
+                 an external scope-of-work doc (e.g. "M1D2"), todo-only
   members.rs     roster seeding + is_lead check + all_member_ids
-  status.rs      /team-status DB queries + formatting
+  status.rs      /team-status DB queries + formatting, incl. each
+                 member's deduped sow_ref tag list appended to their line
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
   followups.rs   followups_sent DB logic (missing-todo/update nags)
   init.rs        `dispatchd init` subcommand
@@ -158,12 +161,13 @@ src/
     help.rs        /help - static overview of every command
     todo.rs        /todo create|edit|delete|list|help - create/edit share
                     one modal shape (edit's pre-filled with current
-                    values); edit/delete/list all operate on any of
-                    today's todos (not just open ones - see
-                    entries::list_todos vs list_open_todos); delete is
-                    blocked by entries.todo_id's FOREIGN KEY (surfaced as
-                    a friendly reply, not a raw DB error) if a /progress
-                    report already references the todo
+                    values, now incl. an optional SOW Ref field); edit/
+                    delete/list all operate on any of today's todos (not
+                    just open ones - see entries::list_todos vs
+                    list_open_todos); delete is blocked by
+                    entries.todo_id's FOREIGN KEY (surfaced as a friendly
+                    reply, not a raw DB error) if a /progress report
+                    already references the todo
     progress.rs    /progress (autocomplete + modal custom_id encoding) -
                     named for the report it submits, not the underlying
                     'update' DB row type (entries.type/reminders_sent.type/
@@ -176,7 +180,9 @@ src/
                     into it (entries::entries_since + a per-thread sync
                     cursor on daily_threads) since those commands' own
                     replies are ephemeral - the only way the team sees
-                    each other's activity; gives up (marks sent/advances
-                    the cursor, doesn't retry) on a deleted standup thread
-                    instead of retrying every tick
+                    each other's activity; a todo's sync message includes
+                    its sow_ref tag (the progress/update one doesn't);
+                    gives up (marks sent/advances the cursor, doesn't
+                    retry) on a deleted standup thread instead of
+                    retrying every tick
 ```

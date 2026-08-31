@@ -39,8 +39,10 @@ So after you run `/todo create`, expect to see something like:
 ```
 📋 <@you> added a todo: **Write tests**
 ```
-show up publicly a little after your private confirmation. Same idea for
-`/progress`:
+show up publicly a little after your private confirmation - or, if you
+tagged it with an SOW ref (see `/todo` below), `` **Write tests** [M1D2] ``.
+Same idea for `/progress` (which never shows the SOW ref, even if the
+todo it's against has one):
 ```
 ✅ <@you> progress on **Write tests**: Done
 ```
@@ -49,20 +51,26 @@ it's already been posted to the thread doesn't change or remove that post.
 
 ## `/todo` - your task list for the day
 
-- **`/todo create`** - opens a form: **Task** (required, short) and
-  **Notes** (optional, longer). Submit it once per todo - call it again
-  for a second todo, a third, etc. There's no single "todo list" input;
-  each todo is its own submission.
-- **`/todo list`** - shows today's todos with their ids, e.g.:
+- **`/todo create`** - opens a form: **Task** (required, short), **Notes**
+  (optional, longer), and **SOW Ref** (optional, short) - a free-text tag
+  cross-referencing your scope-of-work document, e.g. `M1D2` for
+  milestone 1, deliverable 2, or just `M1` when only the milestone
+  applies. It's purely informational - dispatchd doesn't validate it
+  against anything. Submit the form once per todo - call `/todo create`
+  again for a second todo, a third, etc. There's no single "todo list"
+  input; each todo is its own submission.
+- **`/todo list`** - shows today's todos with their ids, and their SOW
+  ref if one was set, e.g.:
   ```
-  `12` Write tests
+  `12` Write tests [M1D2]
   `13` Ship the release
   ```
   Use this when you need an id for `edit`/`delete` below.
 - **`/todo edit id:<...>`** - the `id` field autocompletes over today's
   todos as you type (pick from the suggestions rather than typing a
   number by hand). Opens the same form as `create`, pre-filled with the
-  current Task/Notes, so you can fix a typo or add detail.
+  current Task/Notes/SOW Ref, so you can fix a typo, add detail, or tag
+  it after the fact.
 - **`/todo delete id:<...>`** - same autocomplete. Deletes it immediately
   (no confirmation prompt) and echoes back what was deleted, so double
   check the reply if you're not sure you picked the right one. If you've
@@ -108,8 +116,12 @@ Example - unplanned work, nothing on your todo list matched:
 
 Shows one line per team member: how many of today's todos have a matching
 progress report, e.g. `✅ Alice — 3/3 updated`, `⚠️ Budi — 1/2 updated`,
-`❌ Citra — no todo posted`. Everyone else gets an "restricted to the tech
-lead" reply if they try it - it's not meant as a general team overview.
+`❌ Citra — no todo posted`. If any of that member's todos were tagged
+with an SOW ref, the unique refs are appended, e.g. `✅ Alice — 3/3
+updated (M1D1, M1D2, M2)` - handy for the tech lead to see which
+milestones/deliverables got touched today without opening `/todo list`
+for each person. Everyone else gets an "restricted to the tech lead"
+reply if they try it - it's not meant as a general team overview.
 
 ## `/help` and `/ping`
 

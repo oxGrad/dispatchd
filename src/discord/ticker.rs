@@ -369,16 +369,19 @@ async fn maybe_sync_thread(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, date: 
 /// `is_due`/`is_weekend` above.
 fn format_sync_message(entry: &entries::SyncEntry) -> String {
     match entry.entry_type.as_str() {
-        "todo" => match &entry.notes {
-            Some(notes) => format!(
-                "📋 <@{}> added a todo: **{}** — _{notes}_",
-                entry.discord_user_id, entry.task
-            ),
-            None => format!(
+        "todo" => {
+            let mut message = format!(
                 "📋 <@{}> added a todo: **{}**",
                 entry.discord_user_id, entry.task
-            ),
-        },
+            );
+            if let Some(notes) = &entry.notes {
+                message.push_str(&format!(" — _{notes}_"));
+            }
+            if let Some(sow_ref) = &entry.sow_ref {
+                message.push_str(&format!(" [{sow_ref}]"));
+            }
+            message
+        }
         _ => {
             let (emoji, label) = match entry.status.as_deref() {
                 Some("done") => ("✅", "Done"),
@@ -529,6 +532,17 @@ mod tests {
         status: Option<&str>,
         blocker: Option<&str>,
     ) -> entries::SyncEntry {
+        sync_entry_with_sow_ref(entry_type, task, notes, status, blocker, None)
+    }
+
+    fn sync_entry_with_sow_ref(
+        entry_type: &str,
+        task: &str,
+        notes: Option<&str>,
+        status: Option<&str>,
+        blocker: Option<&str>,
+        sow_ref: Option<&str>,
+    ) -> entries::SyncEntry {
         entries::SyncEntry {
             id: 1,
             discord_user_id: "42".to_string(),
@@ -537,6 +551,7 @@ mod tests {
             notes: notes.map(str::to_string),
             status: status.map(str::to_string),
             blocker: blocker.map(str::to_string),
+            sow_ref: sow_ref.map(str::to_string),
         }
     }
 
@@ -555,6 +570,47 @@ mod tests {
         assert_eq!(
             format_sync_message(&entry),
             "📋 <@42> added a todo: **Write tests** — _keep it simple_"
+        );
+    }
+
+    #[test]
+    fn format_sync_message_for_todo_with_sow_ref() {
+        let entry = sync_entry_with_sow_ref("todo", "Write tests", None, None, None, Some("M1D2"));
+        assert_eq!(
+            format_sync_message(&entry),
+            "📋 <@42> added a todo: **Write tests** [M1D2]"
+        );
+    }
+
+    #[test]
+    fn format_sync_message_for_todo_with_notes_and_sow_ref() {
+        let entry = sync_entry_with_sow_ref(
+            "todo",
+            "Write tests",
+            Some("keep it simple"),
+            None,
+            None,
+            Some("M1D2"),
+        );
+        assert_eq!(
+            format_sync_message(&entry),
+            "📋 <@42> added a todo: **Write tests** — _keep it simple_ [M1D2]"
+        );
+    }
+
+    #[test]
+    fn format_sync_message_for_progress_ignores_sow_ref() {
+        let entry = sync_entry_with_sow_ref(
+            "update",
+            "Write tests",
+            None,
+            Some("done"),
+            None,
+            Some("M1"),
+        );
+        assert_eq!(
+            format_sync_message(&entry),
+            "✅ <@42> progress on **Write tests**: Done"
         );
     }
 

@@ -9,18 +9,28 @@ pub fn today_in(tz: &Tz) -> String {
 }
 
 /// Inserts a new `type = 'todo'` row. `todo_id`/`status`/`progress`/`blocker`
-/// stay `NULL` - those are update-only columns. Returns the new row's id.
+/// stay `NULL` - those are update-only columns. `sow_ref` is a purely
+/// informational cross-reference into an external scope-of-work document
+/// (e.g. "M1D2"), never validated. Returns the new row's id.
 pub fn insert_todo(
     conn: &Connection,
     discord_user_id: &str,
     date: &str,
     task: &str,
     notes: Option<&str>,
+    sow_ref: Option<&str>,
 ) -> Result<i64> {
     conn.execute(
-        "INSERT INTO entries (discord_user_id, date, type, task, notes, created_at)
-         VALUES (?1, ?2, 'todo', ?3, ?4, ?5)",
-        params![discord_user_id, date, task, notes, Utc::now().to_rfc3339()],
+        "INSERT INTO entries (discord_user_id, date, type, task, notes, sow_ref, created_at)
+         VALUES (?1, ?2, 'todo', ?3, ?4, ?5, ?6)",
+        params![
+            discord_user_id,
+            date,
+            task,
+            notes,
+            sow_ref,
+            Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -98,14 +108,16 @@ pub fn list_open_todos(
 /// that already have an update against them. Used by `/todo edit`/`/todo
 /// delete`'s autocomplete and `/todo list`, where the point is to target
 /// *any* of today's todos, not just ones still awaiting an update.
+/// `sow_ref` is included since `/todo list` shows it; the autocomplete
+/// caller ignores it.
 pub fn list_todos(
     conn: &Connection,
     discord_user_id: &str,
     date: &str,
     partial: &str,
-) -> Result<Vec<(i64, String)>> {
+) -> Result<Vec<(i64, String, Option<String>)>> {
     let mut stmt = conn.prepare(
-        "SELECT id, task FROM entries
+        "SELECT id, task, sow_ref FROM entries
          WHERE type = 'todo' AND discord_user_id = ?1 AND date = ?2
            AND task LIKE '%' || ?3 || '%'
          ORDER BY id
@@ -113,33 +125,49 @@ pub fn list_todos(
     )?;
     let rows = stmt
         .query_map(params![discord_user_id, date, partial], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
-/// Current (task, notes) for a todo, scoped to owner+date+type='todo' -
-/// used to pre-fill `/todo edit`'s modal.
+/// A todo's current editable fields, scoped to owner+date+type='todo' -
+/// used to pre-fill `/todo edit`'s modal. A struct rather than a tuple:
+/// with two same-typed `Option<String>` fields (`notes`, `sow_ref`), a
+/// positional tuple would be easy to mix up at the call site.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TodoForEdit {
+    pub task: String,
+    pub notes: Option<String>,
+    pub sow_ref: Option<String>,
+}
+
 pub fn todo_for_edit(
     conn: &Connection,
     todo_id: i64,
     discord_user_id: &str,
     date: &str,
-) -> Result<Option<(String, Option<String>)>> {
+) -> Result<Option<TodoForEdit>> {
     Ok(conn
         .query_row(
-            "SELECT task, notes FROM entries
+            "SELECT task, notes, sow_ref FROM entries
              WHERE id = ?1 AND type = 'todo' AND discord_user_id = ?2 AND date = ?3",
             params![todo_id, discord_user_id, date],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok(TodoForEdit {
+                    task: row.get(0)?,
+                    notes: row.get(1)?,
+                    sow_ref: row.get(2)?,
+                })
+            },
         )
         .optional()?)
 }
 
-/// Updates a todo's task/notes in place, scoped to owner+date+type='todo'
-/// (same defensive scoping as `todo_task`). Returns `false` if no matching
-/// row was found (already deleted, wrong owner, or not from today).
+/// Updates a todo's task/notes/sow_ref in place, scoped to
+/// owner+date+type='todo' (same defensive scoping as `todo_task`).
+/// Returns `false` if no matching row was found (already deleted, wrong
+/// owner, or not from today).
 pub fn update_todo(
     conn: &Connection,
     todo_id: i64,
@@ -147,11 +175,12 @@ pub fn update_todo(
     date: &str,
     task: &str,
     notes: Option<&str>,
+    sow_ref: Option<&str>,
 ) -> Result<bool> {
     let rows = conn.execute(
-        "UPDATE entries SET task = ?1, notes = ?2
-         WHERE id = ?3 AND type = 'todo' AND discord_user_id = ?4 AND date = ?5",
-        params![task, notes, todo_id, discord_user_id, date],
+        "UPDATE entries SET task = ?1, notes = ?2, sow_ref = ?3
+         WHERE id = ?4 AND type = 'todo' AND discord_user_id = ?5 AND date = ?6",
+        params![task, notes, sow_ref, todo_id, discord_user_id, date],
     )?;
     Ok(rows > 0)
 }
@@ -203,7 +232,8 @@ pub fn delete_todo(
     }
 }
 
-/// One row for the ticker's periodic thread-sync pass.
+/// One row for the ticker's periodic thread-sync pass. `sow_ref` is only
+/// ever set on `'todo'` rows (`update` rows always read `None` here).
 #[derive(Debug, PartialEq, Eq)]
 pub struct SyncEntry {
     pub id: i64,
@@ -213,6 +243,7 @@ pub struct SyncEntry {
     pub notes: Option<String>,
     pub status: Option<String>,
     pub blocker: Option<String>,
+    pub sow_ref: Option<String>,
 }
 
 /// Todo and update rows for `date` with `id > after_id`, ordered by id -
@@ -221,7 +252,7 @@ pub struct SyncEntry {
 /// to matter.
 pub fn entries_since(conn: &Connection, date: &str, after_id: i64) -> Result<Vec<SyncEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, discord_user_id, type, task, notes, status, blocker
+        "SELECT id, discord_user_id, type, task, notes, status, blocker, sow_ref
          FROM entries
          WHERE date = ?1 AND id > ?2
          ORDER BY id",
@@ -236,6 +267,7 @@ pub fn entries_since(conn: &Connection, date: &str, after_id: i64) -> Result<Vec
                 notes: row.get(4)?,
                 status: row.get(5)?,
                 blocker: row.get(6)?,
+                sow_ref: row.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -298,6 +330,7 @@ mod tests {
             "2026-08-29",
             "Write tests",
             Some("keep it simple"),
+            None,
         )
         .unwrap();
 
@@ -325,16 +358,42 @@ mod tests {
     #[test]
     fn insert_todo_without_notes_leaves_notes_null() {
         let conn = open_test_db();
-        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
         let (_, _, _, _, notes, ..) = row(&conn, id);
         assert_eq!(notes, None);
     }
 
     #[test]
+    fn insert_todo_with_sow_ref_sets_the_column() {
+        let conn = open_test_db();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, Some("M1D2")).unwrap();
+
+        let sow_ref: Option<String> = conn
+            .query_row("SELECT sow_ref FROM entries WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(sow_ref.as_deref(), Some("M1D2"));
+    }
+
+    #[test]
+    fn insert_todo_without_sow_ref_leaves_it_null() {
+        let conn = open_test_db();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
+
+        let sow_ref: Option<String> = conn
+            .query_row("SELECT sow_ref FROM entries WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(sow_ref, None);
+    }
+
+    #[test]
     fn multiple_todos_same_user_and_date_are_distinct_rows() {
         let conn = open_test_db();
-        let id1 = insert_todo(&conn, "42", "2026-08-29", "First task", None).unwrap();
-        let id2 = insert_todo(&conn, "42", "2026-08-29", "Second task", None).unwrap();
+        let id1 = insert_todo(&conn, "42", "2026-08-29", "First task", None, None).unwrap();
+        let id2 = insert_todo(&conn, "42", "2026-08-29", "Second task", None, None).unwrap();
         assert_ne!(id1, id2);
 
         let count: i64 = conn
@@ -356,7 +415,7 @@ mod tests {
     #[test]
     fn insert_update_with_todo_id_sets_expected_columns() {
         let conn = open_test_db();
-        let todo_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+        let todo_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
         let update_id = insert_update(
             &conn,
             "42",
@@ -418,7 +477,7 @@ mod tests {
     #[test]
     fn todo_task_returns_text_for_owning_user_only() {
         let conn = open_test_db();
-        let todo_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+        let todo_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
 
         assert_eq!(
             todo_task(&conn, todo_id, "42").unwrap(),
@@ -431,8 +490,9 @@ mod tests {
     #[test]
     fn list_open_todos_excludes_already_updated_and_filters_by_substring() {
         let conn = open_test_db();
-        let open_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
-        let updated_id = insert_todo(&conn, "42", "2026-08-29", "Ship release", None).unwrap();
+        let open_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
+        let updated_id =
+            insert_todo(&conn, "42", "2026-08-29", "Ship release", None, None).unwrap();
         insert_update(
             &conn,
             "42",
@@ -458,8 +518,9 @@ mod tests {
     #[test]
     fn list_todos_includes_already_updated_todos_unlike_list_open_todos() {
         let conn = open_test_db();
-        let open_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
-        let updated_id = insert_todo(&conn, "42", "2026-08-29", "Ship release", None).unwrap();
+        let open_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
+        let updated_id =
+            insert_todo(&conn, "42", "2026-08-29", "Ship release", None, None).unwrap();
         insert_update(
             &conn,
             "42",
@@ -478,11 +539,23 @@ mod tests {
         let mut all = list_todos(&conn, "42", "2026-08-29", "").unwrap();
         all.sort();
         let mut expected = vec![
-            (open_id, "Write tests".to_string()),
-            (updated_id, "Ship release".to_string()),
+            (open_id, "Write tests".to_string(), None),
+            (updated_id, "Ship release".to_string(), None),
         ];
         expected.sort();
         assert_eq!(all, expected);
+    }
+
+    #[test]
+    fn list_todos_includes_sow_ref() {
+        let conn = open_test_db();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, Some("M1D2")).unwrap();
+
+        let all = list_todos(&conn, "42", "2026-08-29", "").unwrap();
+        assert_eq!(
+            all,
+            vec![(id, "Write tests".to_string(), Some("M1D2".to_string()))]
+        );
     }
 
     #[test]
@@ -494,15 +567,17 @@ mod tests {
             "2026-08-29",
             "Write tests",
             Some("keep it simple"),
+            Some("M1D2"),
         )
         .unwrap();
 
         assert_eq!(
             todo_for_edit(&conn, id, "42", "2026-08-29").unwrap(),
-            Some((
-                "Write tests".to_string(),
-                Some("keep it simple".to_string())
-            ))
+            Some(TodoForEdit {
+                task: "Write tests".to_string(),
+                notes: Some("keep it simple".to_string()),
+                sow_ref: Some("M1D2".to_string()),
+            })
         );
         assert_eq!(todo_for_edit(&conn, id, "99", "2026-08-29").unwrap(), None);
         assert_eq!(todo_for_edit(&conn, id, "42", "2026-08-30").unwrap(), None);
@@ -515,7 +590,15 @@ mod tests {
     #[test]
     fn update_todo_changes_task_and_notes() {
         let conn = open_test_db();
-        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", Some("old notes")).unwrap();
+        let id = insert_todo(
+            &conn,
+            "42",
+            "2026-08-29",
+            "Write tests",
+            Some("old notes"),
+            None,
+        )
+        .unwrap();
 
         let changed = update_todo(
             &conn,
@@ -524,6 +607,7 @@ mod tests {
             "2026-08-29",
             "Write better tests",
             Some("new notes"),
+            None,
         )
         .unwrap();
         assert!(changed);
@@ -532,27 +616,62 @@ mod tests {
         assert_eq!(task, "Write better tests");
         assert_eq!(notes.as_deref(), Some("new notes"));
 
-        let cleared =
-            update_todo(&conn, id, "42", "2026-08-29", "Write better tests", None).unwrap();
+        let cleared = update_todo(
+            &conn,
+            id,
+            "42",
+            "2026-08-29",
+            "Write better tests",
+            None,
+            None,
+        )
+        .unwrap();
         assert!(cleared);
         let (_, _, _, _, notes, ..) = row(&conn, id);
         assert_eq!(notes, None);
     }
 
     #[test]
+    fn update_todo_changes_sow_ref() {
+        let conn = open_test_db();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, Some("M1")).unwrap();
+
+        update_todo(
+            &conn,
+            id,
+            "42",
+            "2026-08-29",
+            "Write tests",
+            None,
+            Some("M1D2"),
+        )
+        .unwrap();
+        let edited = todo_for_edit(&conn, id, "42", "2026-08-29")
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited.sow_ref.as_deref(), Some("M1D2"));
+
+        update_todo(&conn, id, "42", "2026-08-29", "Write tests", None, None).unwrap();
+        let cleared = todo_for_edit(&conn, id, "42", "2026-08-29")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared.sow_ref, None);
+    }
+
+    #[test]
     fn update_todo_returns_false_when_no_matching_row() {
         let conn = open_test_db();
-        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
 
-        assert!(!update_todo(&conn, id, "99", "2026-08-29", "x", None).unwrap());
-        assert!(!update_todo(&conn, id, "42", "2026-08-30", "x", None).unwrap());
-        assert!(!update_todo(&conn, 999_999, "42", "2026-08-29", "x", None).unwrap());
+        assert!(!update_todo(&conn, id, "99", "2026-08-29", "x", None, None).unwrap());
+        assert!(!update_todo(&conn, id, "42", "2026-08-30", "x", None, None).unwrap());
+        assert!(!update_todo(&conn, 999_999, "42", "2026-08-29", "x", None, None).unwrap());
     }
 
     #[test]
     fn delete_todo_removes_the_row_and_returns_its_task_text() {
         let conn = open_test_db();
-        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
 
         let outcome = delete_todo(&conn, id, "42", "2026-08-29").unwrap();
         assert_eq!(
@@ -571,7 +690,7 @@ mod tests {
     #[test]
     fn delete_todo_returns_not_found_for_wrong_owner_wrong_date_or_unknown_id() {
         let conn = open_test_db();
-        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
 
         assert_eq!(
             delete_todo(&conn, id, "99", "2026-08-29").unwrap(),
@@ -590,7 +709,7 @@ mod tests {
     #[test]
     fn delete_todo_blocks_when_an_update_references_it() {
         let conn = open_test_db();
-        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None).unwrap();
+        let id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
         insert_update(
             &conn,
             "42",
@@ -617,7 +736,15 @@ mod tests {
     #[test]
     fn entries_since_returns_only_rows_after_cursor_for_that_date() {
         let conn = open_test_db();
-        let todo_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", Some("notes")).unwrap();
+        let todo_id = insert_todo(
+            &conn,
+            "42",
+            "2026-08-29",
+            "Write tests",
+            Some("notes"),
+            Some("M1D2"),
+        )
+        .unwrap();
         let update_id = insert_update(
             &conn,
             "42",
@@ -630,7 +757,7 @@ mod tests {
         )
         .unwrap();
         // A row on a different date must never leak into "today"'s sync.
-        insert_todo(&conn, "42", "2026-08-30", "Tomorrow's task", None).unwrap();
+        insert_todo(&conn, "42", "2026-08-30", "Tomorrow's task", None, None).unwrap();
 
         let since_zero = entries_since(&conn, "2026-08-29", 0).unwrap();
         assert_eq!(
@@ -644,6 +771,7 @@ mod tests {
                     notes: Some("notes".to_string()),
                     status: None,
                     blocker: None,
+                    sow_ref: Some("M1D2".to_string()),
                 },
                 SyncEntry {
                     id: update_id,
@@ -653,6 +781,7 @@ mod tests {
                     notes: None,
                     status: Some("done".to_string()),
                     blocker: None,
+                    sow_ref: None,
                 },
             ]
         );

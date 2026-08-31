@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn never_touches_entries() {
         let conn = open_test_db();
-        crate::entries::insert_todo(&conn, "1", "2000-01-01", "ancient task", None).unwrap();
+        crate::entries::insert_todo(&conn, "1", "2000-01-01", "ancient task", None, None).unwrap();
         seed_reminder(&conn, "2000-01-01");
 
         run(&conn).unwrap();
