@@ -21,7 +21,10 @@ cargo fmt --check              # verify formatting without changing files
 ```
 
 All four should be clean before considering a change done. There is no
-CI configured yet - these are run locally/by-hand each time.
+CI running these on every push - they're run locally/by-hand each time.
+(`.github/workflows/release.yml` is a separate, release-only workflow -
+see `docs/installing.md` - it only fires on a version tag, it doesn't
+build/test/lint on every commit.)
 
 ## Running it
 
@@ -75,6 +78,9 @@ getting guild/channel IDs) is in `docs/discord-setup.md` - don't duplicate
 it here. How a team member actually uses the bot day-to-day (`/todo`,
 `/progress`, `/team-status`, the reminder/follow-up timeline) is in
 `docs/user-guide.md` - point new engineers there rather than the setup doc.
+Installing the `dispatchd` binary itself (prebuilt releases via
+`curl | sh`, no Rust toolchain needed - see `install.sh` and
+`.github/workflows/release.yml`) is in `docs/installing.md`.
 
 ## A note on live Discord testing
 

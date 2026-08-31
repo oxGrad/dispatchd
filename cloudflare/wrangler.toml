@@ -1,0 +1,13 @@
+name = "dispatchd-install"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# After the first `wrangler deploy`, bind this Worker to
+# dispatchd.graditya.com via the dashboard (Settings -> Domains & Routes
+# -> Add -> Custom Domain) or uncomment and adjust the block below and
+# redeploy - either way works, the dashboard is simpler for a one-time
+# setup. See ../docs/installing.md.
+#
+# [[routes]]
+# pattern = "dispatchd.graditya.com"
+# custom_domain = true
