@@ -20,11 +20,14 @@ cargo fmt                      # apply formatting
 cargo fmt --check              # verify formatting without changing files
 ```
 
-All four should be clean before considering a change done. There is no
-CI running these on every push - they're run locally/by-hand each time.
-(`.github/workflows/release.yml` is a separate, release-only workflow -
-see `docs/installing.md` - it only fires on a version tag, it doesn't
-build/test/lint on every commit.)
+All four should be clean before considering a change done - still worth
+running locally before pushing, for a fast inner loop, but
+`.github/workflows/ci.yml` now also gates every pull request and push to
+`main` on the same four checks (clippy with `-D warnings`, so any warning
+fails CI even though a local `cargo clippy` run wouldn't). This is a
+separate workflow from `.github/workflows/release.yml` (release-only,
+fires on a version tag - see `docs/installing.md`); `ci.yml` never builds
+or publishes a release artifact.
 
 ## Running it
 
