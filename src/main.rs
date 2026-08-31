@@ -30,6 +30,7 @@ pub(crate) mod test_support {
 }
 
 #[derive(Parser)]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

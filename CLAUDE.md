@@ -58,6 +58,9 @@ dispatchd status     # reports the systemd side (version, unit
                      # and the Discord side (resolves a token the same way
                      # the bot itself would, pings Discord's API, reports
                      # round-trip latency).
+dispatchd --version  # prints the crate version (from Cargo.toml, baked
+                     # in at compile time) - useful for confirming what
+                     # a `curl | sh` install actually fetched.
 ```
 
 Config file: `$XDG_CONFIG_HOME/dispatchd/config.toml` (`~/.config/dispatchd/config.toml`
