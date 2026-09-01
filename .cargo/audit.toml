@@ -1,0 +1,33 @@
+# cargo-audit configuration.
+#
+# rustls-webpki 0.102.8 is pulled in transitively through serenity's Discord
+# gateway WebSocket TLS stack:
+#
+#   serenity 0.12.5
+#     -> tokio-tungstenite 0.21
+#       -> tokio-rustls 0.25 -> rustls 0.22 -> rustls-webpki 0.102
+#
+# It cannot be bumped without a breaking change upstream:
+#
+# - No patched 0.102.x release of rustls-webpki exists; every fix landed in
+#   the 0.103 line, which requires rustls 0.23 (tokio-rustls 0.26).
+# - serenity 0.12.5 is the latest stable release and hard-pins
+#   tokio-tungstenite to "0.21", which pins tokio-rustls 0.25 / rustls 0.22.
+#   serenity's unreleased `next` branch has moved to a newer tungstenite,
+#   but there is no release on crates.io yet.
+#
+# All four advisories require a misissued or compromised trusted-CA
+# certificate to be exploitable - they are bugs in post-signature-verification
+# name-constraint and CRL matching logic. The two CRL advisories (0049, 0104)
+# additionally require the application to opt into CRL checking, which
+# serenity does not. dispatchd only ever connects to Discord's own API
+# endpoints, so the practical exposure here is negligible.
+#
+# Revisit once serenity ships a stable release on rustls 0.23+.
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0098", # rustls-webpki: URI name constraints incorrectly accepted
+    "RUSTSEC-2026-0049", # rustls-webpki: CRL distributionPoint matching bug
+    "RUSTSEC-2026-0099", # rustls-webpki: wildcard name constraint bypass
+    "RUSTSEC-2026-0104", # rustls-webpki: reachable panic parsing CRLs
+]

@@ -72,6 +72,12 @@ release workflow's container).
   `feat:`/`fix:`/etc. commits going forward.
 - `.github/dependabot.yml`: weekly `cargo` + `github-actions` bumps.
 - `.markdownlint.json`: line-length rule (MD013) off for `docs/`.
+- `.cargo/audit.toml`: `cargo audit` (the CI `rust-audit` job) ignore
+  list. Currently holds four `rustls-webpki 0.102.8` advisories pulled in
+  transitively via `serenity` -> `tokio-tungstenite 0.21` -> `rustls
+  0.22`; unbumpable until serenity ships a release on `rustls 0.23+`.
+  The file documents why each is safe to ignore - revisit when serenity
+  updates.
 
 ## Running it
 
