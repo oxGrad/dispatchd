@@ -1,5 +1,9 @@
+use std::process::Command;
+
+#[cfg(target_os = "linux")]
 use std::io::Write as _;
-use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 
 use anyhow::{Context, Result};
 
@@ -9,6 +13,10 @@ use anyhow::{Context, Result};
 /// printing a command for the operator to run by hand. `--with-key=host`
 /// is used because Raspberry Pi boards (Zero 2 W, 3B, etc.) have no TPM2;
 /// this protects an offline copy of the SD card, not root on the live Pi.
+///
+/// Linux only - the whole flow is built on `systemd-creds`. The
+/// `not(target_os = "linux")` stub below mirrors `service::install`.
+#[cfg(target_os = "linux")]
 pub async fn run() -> Result<()> {
     let version = crate::service::systemd_version()?;
     if version < crate::service::MIN_SYSTEMD_VERSION {
@@ -47,11 +55,17 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+pub async fn run() -> Result<()> {
+    anyhow::bail!("`dispatchd discord login` is only supported on Linux (systemd-creds)")
+}
+
 /// Pipes `token` into `systemd-creds encrypt ... - cred_path`, so the
 /// plaintext token only ever exists in memory and in the pipe to that
 /// child process, never as an intermediate file. Overwrites `cred_path` if
 /// it already exists - re-running `discord login` is how you rotate the
 /// token.
+#[cfg(target_os = "linux")]
 fn encrypt_token(token: &str, cred_path: &str) -> Result<()> {
     let mut child = Command::new("systemd-creds")
         .args(["encrypt", "--name=discord_token", "--with-key=host", "-"])

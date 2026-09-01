@@ -1,3 +1,9 @@
+// This module is systemd glue plus a handful of pure, platform-agnostic
+// renderers/parsers that stay unit-tested everywhere. On non-Linux only the
+// `#[cfg(not(target_os = "linux"))]` stubs of `install`/`status` are live, so
+// the paths, renderers, and version parser are all legitimately unused there.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 const UNIT_PATH: &str = "/etc/systemd/system/dispatchd.service";
 const MAINTENANCE_SERVICE_PATH: &str = "/etc/systemd/system/dispatchd-maintenance.service";
 const MAINTENANCE_TIMER_PATH: &str = "/etc/systemd/system/dispatchd-maintenance.timer";

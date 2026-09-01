@@ -206,7 +206,12 @@ src/
                  `systemd-creds encrypt` to persist the token; also
                  `dispatchd status`'s Discord-ping half (decrypts the
                  credential directly, since that's a one-off invocation
-                 outside systemd's own LoadCredentialEncrypted= decoding)
+                 outside systemd's own LoadCredentialEncrypted= decoding).
+                 `run()` (login) is `#[cfg(target_os = "linux")]` with a
+                 non-Linux stub that bails, same split as `service.rs` -
+                 systemd-creds is Linux-only, and the macOS release build
+                 has to compile. `ping`/`logout`/`decrypt_cred_file` stay
+                 cross-platform (used by `dispatchd status`)
   lock.rs        single-instance guard (`std::fs::File::try_lock`), held
                  for the process's lifetime; used by the main run (`<db>.lock`,
                  so two processes never race the ticker), `maintenance run`
