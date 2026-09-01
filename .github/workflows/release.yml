@@ -55,7 +55,7 @@ jobs:
           tar -czf dist/${{ env.BIN_NAME }}-${{ matrix.target }}.tar.gz \
             -C target/${{ matrix.target }}/release ${{ env.BIN_NAME }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.BIN_NAME }}-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -81,7 +81,7 @@ jobs:
           tar -czf dist/${{ env.BIN_NAME }}-${{ env.TARGET }}.tar.gz \
             -C target/${{ env.TARGET }}/release ${{ env.BIN_NAME }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.BIN_NAME }}-${{ env.TARGET }}
           path: dist/*.tar.gz
