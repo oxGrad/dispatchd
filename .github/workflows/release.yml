@@ -9,7 +9,30 @@ env:
   BIN_NAME: dispatchd
 
 jobs:
+  # Quality gates from the shared oxHive pipeline, mirroring the order in
+  # oxHive/pipelines rust-release.yml. The binary build below is kept bespoke
+  # (static musl, armv7, SHA256SUMS, curl|sh installer) rather than using
+  # rust-build-binaries.yml, which is glibc-only and drops armv7.
+  verify-version:
+    uses: oxHive/pipelines/.github/workflows/rust-verify-version.yml@v2
+    with:
+      package-name: dispatchd
+
+  check:
+    needs: verify-version
+    uses: oxHive/pipelines/.github/workflows/rust-check.yml@v2
+    with:
+      fail-under-coverage: 30
+
+  audit:
+    needs: verify-version
+    permissions:
+      checks: write
+      contents: read
+    uses: oxHive/pipelines/.github/workflows/rust-audit.yml@v2
+
   build-linux:
+    needs: [check, audit]
     strategy:
       matrix:
         target:
@@ -38,6 +61,7 @@ jobs:
           path: dist/*.tar.gz
 
   build-macos:
+    needs: [check, audit]
     runs-on: macos-14
     env:
       TARGET: aarch64-apple-darwin
@@ -75,7 +99,7 @@ jobs:
 
       - name: Checksums
         working-directory: dist
-        run: sha256sum *.tar.gz > SHA256SUMS
+        run: sha256sum -- *.tar.gz > SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
         with:

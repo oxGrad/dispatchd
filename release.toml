@@ -1,0 +1,15 @@
+# cargo-release configuration
+# Usage: cargo release patch / minor / major   (dry-run by default)
+#        cargo release --execute patch
+#
+# On --execute this bumps the version in Cargo.toml + Cargo.lock, commits it,
+# tags it `v{version}`, and pushes both - which is what fires
+# `.github/workflows/release.yml` to build and publish the prebuilt binaries.
+
+sign-commit = false
+sign-tag = false
+push = true
+publish = false                                # not a crates.io crate; releases are prebuilt binaries only
+tag = true
+tag-name = "v{{version}}"
+pre-release-commit-message = "chore: release v{{version}}"

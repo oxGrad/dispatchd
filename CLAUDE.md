@@ -21,13 +21,57 @@ cargo fmt --check              # verify formatting without changing files
 ```
 
 All four should be clean before considering a change done - still worth
-running locally before pushing, for a fast inner loop, but
-`.github/workflows/ci.yml` now also gates every pull request and push to
-`main` on the same four checks (clippy with `-D warnings`, so any warning
-fails CI even though a local `cargo clippy` run wouldn't). This is a
-separate workflow from `.github/workflows/release.yml` (release-only,
-fires on a version tag - see `docs/installing.md`); `ci.yml` never builds
-or publishes a release artifact.
+running locally before pushing, for a fast inner loop. CI is the shared
+oxHive reusable pipeline (`oxHive/pipelines`, pinned `@v2`), consumed by
+two thin workflows here:
+
+- `.github/workflows/pull-request.yml` (every PR + push to `main`) calls
+  `rust-check.yml` (`cargo fmt --check`, `cargo clippy -- -D warnings`,
+  and `cargo tarpaulin` coverage gated at `fail-under-coverage: 30` - see
+  below) and `rust-audit.yml` (`rustsec/audit-check`). Note the pipeline's
+  clippy is not `--all-targets`, so warnings in `#[cfg(test)]` code only
+  fail your local `cargo clippy --all-targets`, not CI - keep running it.
+- `.github/workflows/release.yml` (on a `v*` tag) runs the same
+  `rust-verify-version` -> `rust-check` -> `rust-audit` gates, then a
+  bespoke binary build (static musl for x86_64/aarch64/armv7 + macOS
+  arm64, `SHA256SUMS`, GitHub Release). `rust-build-binaries.yml` is
+  deliberately not used - it's glibc-only and drops armv7 (Raspberry Pi),
+  and dispatchd is not a crates.io crate so `rust-publish-crates` is
+  skipped too. See `docs/installing.md`.
+
+Coverage sits around 35% (measured 2026-09-01): the DB-layer modules are
+~fully covered, the `src/discord/*` serenity code is near zero because it
+can't be exercised without a live gateway (see the testing notes below).
+`fail-under-coverage: 30` guards the tested core against regression
+without demanding the impossible - raise it as real tests grow.
+
+`build.rs` bakes the git short-SHA and an "is this an exact tag" flag
+into compile-time env vars (`DISPATCHD_GIT_SHA`, `DISPATCHD_IS_TAGGED`,
+and the composed `DISPATCHD_VERSION` that `--version` prints); it degrades
+to a clean version string when `git` isn't available (e.g. `cross` in the
+release workflow's container).
+
+## Release tooling
+
+- `just` (`.justfile` + `recipes/*.just`, all gitignored-scratch-aware):
+  `just check` runs the fast local loop (`cargo fmt --check`, `cargo
+  clippy --all-targets -D warnings`, `cargo test`, `cargo build
+  --release`) - a superset of the pipeline's clippy, but it doesn't
+  re-run coverage or the audit; `just release-patch`
+  (`-minor`, `-major`) wraps `cargo release`; `just testenv-init` /
+  `testenv-run` exercise the binary against an isolated
+  `XDG_CONFIG_HOME`/`XDG_DATA_HOME` under `.testenv/` so testing never
+  touches your real `~/.config/dispatchd` or the real DB.
+- `release.toml` (`cargo-release`): bumps `Cargo.toml`/`Cargo.lock`,
+  commits `chore: release v{version}`, tags `v{version}`, and pushes -
+  which is what fires `release.yml`. Not a crates.io crate (`publish =
+  false`). Dry-run by default; `--execute` to actually do it.
+- `cliff.toml` (`git-cliff`): conventional-commits changelog config,
+  commit URLs point at `github.com/oxgrad/dispatchd`. Existing history
+  is not conventional-commits, so a generated changelog only picks up
+  `feat:`/`fix:`/etc. commits going forward.
+- `.github/dependabot.yml`: weekly `cargo` + `github-actions` bumps.
+- `.markdownlint.json`: line-length rule (MD013) off for `docs/`.
 
 ## Running it
 
@@ -62,8 +106,12 @@ dispatchd status     # reports the systemd side (version, unit
                      # the bot itself would, pings Discord's API, reports
                      # round-trip latency).
 dispatchd --version  # prints the crate version (from Cargo.toml, baked
-                     # in at compile time) - useful for confirming what
-                     # a `curl | sh` install actually fetched.
+                     # in at compile time by build.rs) - useful for
+                     # confirming what a `curl | sh` install actually
+                     # fetched. Non-tagged builds (local, CI, a `main`
+                     # install) also get the short git SHA appended
+                     # ("0.1.0 (abc1234)"); a build made from an exact
+                     # version tag stays just "0.1.0".
 ```
 
 Config file: `$XDG_CONFIG_HOME/dispatchd/config.toml` (`~/.config/dispatchd/config.toml`

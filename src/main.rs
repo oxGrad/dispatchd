@@ -30,7 +30,7 @@ pub(crate) mod test_support {
 }
 
 #[derive(Parser)]
-#[command(version)]
+#[command(version = env!("DISPATCHD_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

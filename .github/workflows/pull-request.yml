@@ -1,0 +1,26 @@
+name: Pull Request
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: pr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    uses: oxHive/pipelines/.github/workflows/rust-check.yml@v2
+    with:
+      # dispatchd's serenity/gateway code can't be unit-tested without a live
+      # Discord connection (see CLAUDE.md), so the DB-layer core carries the
+      # coverage. Local run on 2026-09-01 was 35%; 30 leaves regression room.
+      fail-under-coverage: 30
+
+  audit:
+    permissions:
+      checks: write
+      contents: read
+    uses: oxHive/pipelines/.github/workflows/rust-audit.yml@v2
