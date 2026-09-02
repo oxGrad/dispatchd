@@ -135,7 +135,27 @@ provisioning command changes.
 already works with no extra setup. Serving it at the bare custom domain
 (no path) needs a small proxy in front, since GitHub's raw content isn't
 served from that domain - `cloudflare/worker.js` in this repo is exactly
-that proxy. To wire it up (needs your own Cloudflare account - this is a
+that proxy. It routes:
+
+| Path | Serves |
+| --- | --- |
+| `/` and `/install.sh` | `install.sh` (so `curl … \| sh` works) |
+| `/tos` | `cloudflare/tos.html` - the bot's Terms of Service |
+| `/privacy-policy` | `cloudflare/privacy-policy.html` - the bot's Privacy Policy |
+| anything else | `404` |
+
+Every route is fetched from the repo's `main` branch (cached 5 minutes at
+Cloudflare's edge), so editing one of those files in the repo is all it
+takes to update what the domain serves. The `/tos` and `/privacy-policy`
+URLs are what you put in the Discord Developer Portal (**App → General
+Information → Terms of Service URL / Privacy Policy URL**); Discord asks
+for them once a bot is in enough servers to need verification. **Fill in
+the `[effective date]` and `[operator contact email]` placeholders in
+both HTML files before publishing** - and have a lawyer look them over if
+anything real is riding on them; they are a plain-English starting point,
+not legal advice.
+
+To wire up the Worker (needs your own Cloudflare account - this is a
 one-time setup step, not something dispatchd's CI does for you):
 
 1. **Create the Worker.** Cloudflare dashboard → **Workers & Pages** →
@@ -151,10 +171,12 @@ one-time setup step, not something dispatchd's CI does for you):
    with no extra path configuration needed.
 3. That's it - `curl -fsSL https://dispatchd.graditya.com | sudo sh` now
    works directly, no `-L` needed (the Worker serves the script itself
-   rather than redirecting to GitHub).
+   rather than redirecting to GitHub), and `/tos` / `/privacy-policy`
+   serve the two HTML pages.
 
-The Worker proxies `install.sh` from the `main` branch on every request
-(cached at Cloudflare's edge for 5 minutes), so it always mirrors
-whatever's actually in the repo - merging a change to `install.sh` is
-the only step needed to update what people get from the one-liner; the
-Worker itself never needs redeploying for that.
+The Worker fetches each route's file from the `main` branch on every
+request (cached at Cloudflare's edge for 5 minutes), so it always mirrors
+whatever's actually in the repo - merging a change to `install.sh`,
+`cloudflare/tos.html`, or `cloudflare/privacy-policy.html` is the only
+step needed to update what the domain serves; the Worker itself only
+needs redeploying if you change its routing in `worker.js`.

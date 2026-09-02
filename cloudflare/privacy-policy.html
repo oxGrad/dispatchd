@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dispatchd - Privacy Policy</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 2.5rem 1.25rem 4rem;
+    color: #1a1a1a;
+    background: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e6e6e6; background: #16181c; }
+    a { color: #7db4ff; }
+    code { background: #24272e; }
+  }
+  h1 { font-size: 2rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.3rem; margin-top: 2.25rem; }
+  .meta { color: #888; font-size: 0.9rem; margin-bottom: 2rem; }
+  code {
+    background: #f0f0f0;
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  ul { padding-left: 1.25rem; }
+  li { margin: 0.35rem 0; }
+  footer { margin-top: 3rem; font-size: 0.9rem; color: #888; }
+</style>
+</head>
+<body>
+
+<h1>Privacy Policy</h1>
+<p class="meta">For the <strong>dispatchd</strong> Discord bot &middot; last updated <!-- REVIEW -->[effective date]</p>
+
+<p>
+  <strong>dispatchd</strong> is an open-source Discord bot that automates a
+  single team's daily standup ritual. This policy explains what data the
+  instance operated by the person who added this bot to your Discord server
+  (the &ldquo;operator&rdquo;) collects, why, and how it is handled. If you
+  run your own copy of dispatchd, you are the operator and this policy is a
+  template you should adapt.
+</p>
+
+<h2>Who is responsible</h2>
+<p>
+  dispatchd is self-hosted. The <strong>operator</strong> chose to run this
+  instance, owns the server it runs on, and is the party responsible for the
+  data it holds &mdash; including how it is secured, backed up, retained, and
+  deleted, for responding to your requests about it, and for any notification
+  required in the event of a breach.
+</p>
+<p>
+  The dispatchd project and its authors publish the software (under the
+  Apache-2.0 licence) but do <strong>not</strong> operate this or any other
+  instance, have no access to any deployment's data, and are not a party to
+  your use of the bot.
+</p>
+
+<h2>What data is collected</h2>
+<p>dispatchd only ever receives data through Discord slash commands and the
+roster the operator configures. Specifically:</p>
+<ul>
+  <li>
+    <strong>Team roster.</strong> The Discord user IDs, display names, and
+    roles of the team members the operator lists in the bot's configuration.
+  </li>
+  <li>
+    <strong>Standup submissions.</strong> The text you enter when you run
+    <code>/todo</code>, <code>/progress</code>, and related commands: task
+    descriptions, optional notes, optional scope-of-work reference tags,
+    progress write-ups, blocker descriptions, and the status you pick
+    (Done / In&nbsp;Progress / Blocked).
+  </li>
+  <li>
+    <strong>Timestamps</strong> of those submissions, and the date each one
+    is attributed to.
+  </li>
+  <li>
+    <strong>Server configuration.</strong> The Discord server (guild) ID and
+    channel ID the operator points the bot at.
+  </li>
+</ul>
+<p>
+  dispatchd does <strong>not</strong> use Discord's Message Content Intent.
+  It never reads ordinary channel messages, direct messages, attachments,
+  voice, or presence &mdash; only the explicit input you submit through its
+  own commands.
+</p>
+
+<h2>How the data is used</h2>
+<p>The data is used solely to operate the standup workflow:</p>
+<ul>
+  <li>Posting each submission into the day's standup thread so the team can see it.</li>
+  <li>Sending scheduled reminders and follow-up nudges.</li>
+  <li>Producing the team lead's periodic recap of what the team worked on.</li>
+</ul>
+<p>
+  dispatchd does not sell, rent, or share your data with any third party. It
+  runs no advertising and no third-party analytics or tracking.
+</p>
+
+<h2>Where the data is stored, and how it is secured</h2>
+<p>
+  All data is stored in a single SQLite database file on the server the
+  operator runs the bot on. There is no external database and no cloud
+  service beyond the operator's own host and Discord itself.
+</p>
+<p>
+  Securing that host is the operator's responsibility: restricting who can
+  reach the machine and the database file, keeping backups, and deciding on
+  measures such as full-disk encryption. dispatchd supports encrypting the
+  Discord bot token at rest (via <code>systemd-creds</code>); whether that
+  and any further protections are in place is the operator's decision.
+</p>
+
+<h2>Data retention</h2>
+<ul>
+  <li>
+    <strong>Standup entries</strong> (todos and progress reports) are
+    retained indefinitely, because the periodic recap depends on the full
+    history.
+  </li>
+  <li>
+    <strong>Reminder and follow-up bookkeeping</strong> is automatically
+    deleted after 90 days.
+  </li>
+</ul>
+
+<h2>Your choices</h2>
+<ul>
+  <li>
+    Being removed from the team roster stops any further data collection
+    about you, but does not automatically erase past entries.
+  </li>
+  <li>
+    To request a copy of the data held about you, or its deletion, contact
+    the operator (below). The operator can remove your rows from the
+    database on request.
+  </li>
+</ul>
+
+<h2>Children</h2>
+<p>
+  dispatchd is not directed at children. In line with Discord's Terms of
+  Service, you must be at least 13 years old (or the minimum age of digital
+  consent in your country) to use Discord and therefore this bot.
+</p>
+
+<h2>Changes to this policy</h2>
+<p>
+  If this policy changes, the updated version will be posted at this URL
+  with a new &ldquo;last updated&rdquo; date.
+</p>
+
+<h2>Contact</h2>
+<p>
+  Questions or requests: <!-- REVIEW -->[operator contact email].
+</p>
+
+<footer>
+  dispatchd is free software released under the Apache-2.0 licence.
+  Source: <a href="https://github.com/oxGrad/dispatchd">github.com/oxGrad/dispatchd</a>.
+  See also the <a href="/tos">Terms of Service</a>.
+</footer>
+
+</body>
+</html>
