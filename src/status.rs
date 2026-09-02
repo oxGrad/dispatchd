@@ -166,9 +166,9 @@ fn row_to_update_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateDetai
     })
 }
 
-/// Formats one `/team status` line, e.g. `✅ Alice — 3/3 updated`, with
+/// Formats one `/team status` line, e.g. `✅ Alice - 3/3 updated`, with
 /// any SOW refs tagged on today's todos appended in parens, e.g.
-/// `✅ Alice — 3/3 updated (M1D1, M1D2, M2)`. A member with no todos posted
+/// `✅ Alice - 3/3 updated (M1D1, M1D2, M2)`. A member with no todos posted
 /// shows no fraction (`0/0` reads as noise); one who posted todos but
 /// matched none of them is treated the same as "no todo posted" - both
 /// are the "needs attention" case. A member with no SOW refs set gets no
@@ -176,7 +176,7 @@ fn row_to_update_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateDetai
 /// any either, since the column only exists on todo rows).
 pub fn format_status_line(status: &MemberStatus) -> String {
     let base = if status.todo_count == 0 {
-        format!("❌ {} — no todo posted", status.name)
+        format!("❌ {} - no todo posted", status.name)
     } else {
         let emoji = if status.matched_update_count == status.todo_count {
             "✅"
@@ -186,7 +186,7 @@ pub fn format_status_line(status: &MemberStatus) -> String {
             "⚠️"
         };
         format!(
-            "{emoji} {} — {}/{} updated",
+            "{emoji} {} - {}/{} updated",
             status.name, status.matched_update_count, status.todo_count
         )
     };
@@ -211,7 +211,7 @@ fn status_glyph_label(status: &str) -> (&'static str, String) {
 
 fn push_update_line(out: &mut String, update: &UpdateDetail) {
     let (glyph, label) = status_glyph_label(&update.status);
-    out.push_str(&format!("  {glyph} {label} — {}", update.progress));
+    out.push_str(&format!("  {glyph} {label}: {}", update.progress));
     if let Some(blocker) = &update.blocker {
         out.push_str(&format!(" (blocker: {blocker})"));
     }
@@ -221,7 +221,7 @@ fn push_update_line(out: &mut String, update: &UpdateDetail) {
 /// trailing newline. Callers join member blocks with "\n\n".
 pub fn format_report(report: &MemberReport) -> String {
     if report.todos.is_empty() && report.ad_hoc.is_empty() {
-        return format!("**{}** — nothing posted today", report.name);
+        return format!("**{}** - nothing posted today", report.name);
     }
 
     let mut out = format!("**{}**", report.name);
@@ -329,7 +329,7 @@ mod tests {
 
         let statuses = team_status(&conn, DATE).unwrap();
         assert_eq!(statuses.len(), 1);
-        assert_eq!(format_status_line(&statuses[0]), "✅ Alice — 3/3 updated");
+        assert_eq!(format_status_line(&statuses[0]), "✅ Alice - 3/3 updated");
     }
 
     #[test]
@@ -341,7 +341,7 @@ mod tests {
         entries::insert_update(&conn, "2", DATE, "a", Some(todo1), "done", "done", None).unwrap();
 
         let statuses = team_status(&conn, DATE).unwrap();
-        assert_eq!(format_status_line(&statuses[0]), "⚠️ Budi — 1/2 updated");
+        assert_eq!(format_status_line(&statuses[0]), "⚠️ Budi - 1/2 updated");
     }
 
     #[test]
@@ -352,7 +352,7 @@ mod tests {
         let statuses = team_status(&conn, DATE).unwrap();
         assert_eq!(
             format_status_line(&statuses[0]),
-            "❌ Citra — no todo posted"
+            "❌ Citra - no todo posted"
         );
     }
 
@@ -364,7 +364,7 @@ mod tests {
         entries::insert_todo(&conn, "4", DATE, "b", None, None).unwrap();
 
         let statuses = team_status(&conn, DATE).unwrap();
-        assert_eq!(format_status_line(&statuses[0]), "❌ Dedi — 0/2 updated");
+        assert_eq!(format_status_line(&statuses[0]), "❌ Dedi - 0/2 updated");
     }
 
     #[test]
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(statuses[0].sow_refs, vec!["M1D1", "M1D2"]);
         assert_eq!(
             format_status_line(&statuses[0]),
-            "⚠️ Gita — 1/2 updated (M1D1, M1D2)"
+            "⚠️ Gita - 1/2 updated (M1D1, M1D2)"
         );
     }
 
@@ -456,7 +456,7 @@ mod tests {
 
         let statuses = team_status(&conn, DATE).unwrap();
         assert!(statuses[0].sow_refs.is_empty());
-        assert_eq!(format_status_line(&statuses[0]), "❌ Ida — 0/1 updated");
+        assert_eq!(format_status_line(&statuses[0]), "❌ Ida - 0/1 updated");
     }
 
     #[test]
@@ -637,13 +637,13 @@ mod tests {
             "**Alice**\n\
              • Refactor auth [M1D2]\n\
              \u{20}\u{20}notes: split into service + handler\n\
-             \u{20}\u{20}✅ done — extracted AuthService\n\
+             \u{20}\u{20}✅ done: extracted AuthService\n\
              • Write migration\n\
-             \u{20}\u{20}⛔ blocked — schema drafted (blocker: waiting on DBA)\n\
+             \u{20}\u{20}⛔ blocked: schema drafted (blocker: waiting on DBA)\n\
              • Docs pass\n\
              \u{20}\u{20}❌ no progress report yet\n\
              • unplanned: Hotfix prod 500\n\
-             \u{20}\u{20}✅ done — bad index, added it"
+             \u{20}\u{20}✅ done: bad index, added it"
         );
     }
 
@@ -654,7 +654,7 @@ mod tests {
             todos: vec![],
             ad_hoc: vec![],
         };
-        assert_eq!(format_report(&report), "**Budi** — nothing posted today");
+        assert_eq!(format_report(&report), "**Budi** - nothing posted today");
     }
 
     #[test]
@@ -676,7 +676,7 @@ mod tests {
         };
         assert_eq!(
             format_report(&report),
-            "**Citra**\n• Thing\n\u{20}\u{20}• weird — hmm"
+            "**Citra**\n• Thing\n\u{20}\u{20}• weird: hmm"
         );
     }
 
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn split_into_messages_keeps_a_small_report_as_one_chunk() {
-        let full = "**Alice**\n• a\n  ✅ done — x\n\n**Budi** — nothing posted today";
+        let full = "**Alice**\n• a\n  ✅ done: x\n\n**Budi** - nothing posted today";
         assert_eq!(split_into_messages(full, 2000), vec![full.to_string()]);
     }
 

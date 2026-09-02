@@ -81,10 +81,10 @@ impl RemindKind {
     pub fn reminder_text(&self, user_id: &str) -> String {
         match self {
             RemindKind::Todo => format!(
-                "👋 <@{user_id}> — reminder from the tech lead: please submit your `/todo` for today."
+                "👋 <@{user_id}>, reminder from the tech lead: please submit your `/todo` for today."
             ),
             RemindKind::Progress => format!(
-                "👋 <@{user_id}> — reminder from the tech lead: please post a `/progress` update for today's todo(s)."
+                "👋 <@{user_id}>, reminder from the tech lead: please post a `/progress` update for today's todo(s)."
             ),
         }
     }
@@ -345,7 +345,7 @@ pub async fn handle_remind(
         match send_reminder(&ctx.http, db, timezone, &member, kind).await {
             SendOutcome::Sent => format!("✅ Reminder sent to {name} in today's standup thread."),
             SendOutcome::NoThread => {
-                "⚠️ Today's standup thread hasn't been created yet — try again once it's posted."
+                "⚠️ Today's standup thread hasn't been created yet - try again once it's posted."
                     .to_string()
             }
             SendOutcome::ThreadGone => {

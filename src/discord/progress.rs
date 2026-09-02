@@ -66,6 +66,19 @@ fn status_label(status: &str) -> &'static str {
     }
 }
 
+/// The ephemeral confirmation shown to the submitter after `/progress`.
+/// One field per line; the `Blocker:` line is always present (`none` when
+/// empty) since this is a read-back of exactly what was recorded.
+fn format_confirmation(task: &str, status: &str, progress: &str, blocker: Option<&str>) -> String {
+    let progress = progress.trim();
+    let blocker = blocker.map(str::trim).filter(|s| !s.is_empty());
+    format!(
+        "✅ Progress saved: {task}\nStatus: {}\nProgress: {progress}\nBlocker: {}",
+        status_label(status),
+        blocker.unwrap_or("none"),
+    )
+}
+
 /// Encodes a resolved `task` option value for embedding in the modal's
 /// custom_id. An `"id:<n>"` reference (already short) passes through
 /// unchanged; free text longer than `TASK_ENCODE_MAX_LEN` is truncated.
@@ -213,7 +226,7 @@ pub async fn handle_modal_submission(
     };
 
     let reply_text = match insert_result {
-        Ok(task) => format!("✅ Progress saved: {task} — {}", status_label(status)),
+        Ok(task) => format_confirmation(&task, status, &progress, blocker.as_deref()),
         Err(e) => {
             eprintln!("failed to insert update: {e}");
             "⚠️ Something went wrong saving your progress - please try again.".to_string()
@@ -277,5 +290,34 @@ mod tests {
     fn parse_custom_id_rejects_malformed_input() {
         assert_eq!(parse_custom_id("something_else:D:id:42"), None);
         assert_eq!(parse_custom_id("progress_modal:D"), None);
+    }
+
+    #[test]
+    fn format_confirmation_without_blocker_reads_back_none() {
+        assert_eq!(
+            format_confirmation("Refactor auth", "done", "all tests green", None),
+            "✅ Progress saved: Refactor auth\nStatus: Done\nProgress: all tests green\nBlocker: none"
+        );
+    }
+
+    #[test]
+    fn format_confirmation_with_blocker_shows_it() {
+        assert_eq!(
+            format_confirmation(
+                "Write migration",
+                "blocked",
+                "schema drafted",
+                Some("DBA review")
+            ),
+            "✅ Progress saved: Write migration\nStatus: Blocked\nProgress: schema drafted\nBlocker: DBA review"
+        );
+    }
+
+    #[test]
+    fn format_confirmation_trims_and_treats_whitespace_blocker_as_none() {
+        assert_eq!(
+            format_confirmation("Task", "in_progress", "  did a thing  ", Some("   ")),
+            "✅ Progress saved: Task\nStatus: In Progress\nProgress: did a thing\nBlocker: none"
+        );
     }
 }

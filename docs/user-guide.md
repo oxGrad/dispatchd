@@ -7,7 +7,7 @@ it, see `docs/discord-setup.md` instead.)
 ## The daily ritual
 
 Every weekday (unless the tech lead has enabled weekend runs), dispatchd
-posts into a "Standup — YYYY-MM-DD" thread in the team's standup channel:
+posts into a "Standup: YYYY-MM-DD" thread in the team's standup channel:
 
 1. **Thread opens** (8:30 by default) - the day's thread is created
    quietly, before the morning ping. You can already submit `/todo` at
@@ -39,12 +39,19 @@ So after you run `/todo create`, expect to see something like:
 ```
 📋 <@you> added a todo: **Write tests**
 ```
-show up publicly a little after your private confirmation - or, if you
-tagged it with an SOW ref (see `/todo` below), `` **Write tests** [M1D2] ``.
+show up publicly a little after your private confirmation. An SOW ref
+(see `/todo` below) is appended to the header - `` **Write tests** [M1D2] ``
+- and any Notes you added show up as a quoted line below it:
+```
+📋 <@you> added a todo: **Write tests** [M1D2]
+> start with the parser, then the encoder
+```
 Same idea for `/progress` (which never shows the SOW ref, even if the
-todo it's against has one):
+todo it's against has one) - the Progress writeup, and the Blocker if you
+set one, follow as quoted lines:
 ```
 ✅ <@you> progress on **Write tests**: Done
+> all the unit tests pass now
 ```
 This is a one-way sync, not a live view - editing or deleting a todo after
 it's already been posted to the thread doesn't change or remove that post.
@@ -96,12 +103,18 @@ be needed, but nothing stops it - if you already reported Done and now
 realize there's more to do, just submit `/progress` again against the
 same task.
 
+Your private confirmation reads back exactly what was recorded - the
+`Blocker:` line is always shown, `none` when you left it blank.
+
 Example - reporting against something on your todo list:
 ```
 /progress task:"Write tests" status:Done
   → Progress: "Finished all the unit tests, all green"
   → Blocker: (left blank)
-  → ✅ Progress saved: Write tests — Done
+  → ✅ Progress saved: Write tests
+     Status: Done
+     Progress: Finished all the unit tests, all green
+     Blocker: none
 ```
 
 Example - unplanned work, nothing on your todo list matched:
@@ -109,15 +122,18 @@ Example - unplanned work, nothing on your todo list matched:
 /progress task:"Fixed a prod outage" status:Blocked
   → Progress: "Rolled back the bad deploy"
   → Blocker: "waiting on ops to confirm root cause"
-  → ✅ Progress saved: Fixed a prod outage — Blocked
+  → ✅ Progress saved: Fixed a prod outage
+     Status: Blocked
+     Progress: Rolled back the bad deploy
+     Blocker: waiting on ops to confirm root cause
 ```
 
 ## `/team status` - tech lead only
 
 Shows one line per team member: how many of today's todos have a matching
-progress report, e.g. `✅ Alice — 3/3 updated`, `⚠️ Budi — 1/2 updated`,
-`❌ Citra — no todo posted`. If any of that member's todos were tagged
-with an SOW ref, the unique refs are appended, e.g. `✅ Alice — 3/3
+progress report, e.g. `✅ Alice - 3/3 updated`, `⚠️ Budi - 1/2 updated`,
+`❌ Citra - no todo posted`. If any of that member's todos were tagged
+with an SOW ref, the unique refs are appended, e.g. `✅ Alice - 3/3
 updated (M1D1, M1D2, M2)` - handy for the tech lead to see which
 milestones/deliverables got touched today without opening `/todo list`
 for each person. Everyone else gets an "restricted to the tech lead"

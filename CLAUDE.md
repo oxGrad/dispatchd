@@ -271,8 +271,12 @@ src/
                     cursor on daily_threads) since those commands' own
                     replies are ephemeral - the only way the team sees
                     each other's activity; a todo's sync message includes
-                    its sow_ref tag (the progress/update one doesn't);
-                    gives up (marks sent/advances the cursor, doesn't
+                    its sow_ref tag (the progress/update one doesn't) and
+                    its notes as a blockquote line; a progress sync message
+                    quotes the writeup (and the blocker, if any) below the
+                    header (SyncEntry.progress); the thread is named
+                    "Standup: <date>"; gives up (marks sent/advances the
+                    cursor, doesn't
                     retry) on a deleted standup thread instead of
                     retrying every tick
 ```

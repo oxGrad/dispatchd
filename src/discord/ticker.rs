@@ -109,7 +109,7 @@ async fn tick(
 /// Creates today's standup thread ahead of the actual todo prompt (see
 /// `maybe_fire_todo_reminder` below), so early submissions have somewhere
 /// to sync into even before the 9am ping fires. No message is posted here -
-/// Discord's own "X started a thread: Standup — <date>" system line is
+/// Discord's own "X started a thread: Standup: <date>" system line is
 /// enough; the todo prompt still does the @mention/ping once it fires.
 async fn maybe_create_thread(
     http: &Arc<Http>,
@@ -129,7 +129,7 @@ async fn maybe_create_thread(
     let thread = match channel_id
         .create_thread(
             http,
-            CreateThread::new(format!("Standup — {date}")).kind(ChannelType::PublicThread),
+            CreateThread::new(format!("Standup: {date}")).kind(ChannelType::PublicThread),
         )
         .await
     {
@@ -347,11 +347,11 @@ fn format_sync_message(entry: &entries::SyncEntry) -> String {
                 "📋 <@{}> added a todo: **{}**",
                 entry.discord_user_id, entry.task
             );
-            if let Some(notes) = &entry.notes {
-                message.push_str(&format!(" — _{notes}_"));
-            }
             if let Some(sow_ref) = &entry.sow_ref {
                 message.push_str(&format!(" [{sow_ref}]"));
+            }
+            if let Some(notes) = non_empty(&entry.notes) {
+                message.push_str(&quote_block(&format!("_{notes}_")));
             }
             message
         }
@@ -361,18 +361,31 @@ fn format_sync_message(entry: &entries::SyncEntry) -> String {
                 Some("blocked") => ("⚠️", "Blocked"),
                 _ => ("🔧", "In Progress"),
             };
-            match &entry.blocker {
-                Some(blocker) => format!(
-                    "{emoji} <@{}> progress on **{}**: {label} — blocked on: {blocker}",
-                    entry.discord_user_id, entry.task
-                ),
-                None => format!(
-                    "{emoji} <@{}> progress on **{}**: {label}",
-                    entry.discord_user_id, entry.task
-                ),
+            let mut message = format!(
+                "{emoji} <@{}> progress on **{}**: {label}",
+                entry.discord_user_id, entry.task
+            );
+            if let Some(progress) = non_empty(&entry.progress) {
+                message.push_str(&quote_block(progress));
             }
+            if let Some(blocker) = non_empty(&entry.blocker) {
+                message.push_str(&quote_block(&format!("blocked on: {blocker}")));
+            }
+            message
         }
     }
+}
+
+/// The trimmed inner text of an optional field, or `None` when it is
+/// absent or whitespace-only.
+fn non_empty(field: &Option<String>) -> Option<&str> {
+    field.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Renders `text` as a Discord blockquote appended below the current line:
+/// a leading newline, then every line of `text` prefixed with `> `.
+fn quote_block(text: &str) -> String {
+    format!("\n> {}", text.replace('\n', "\n> "))
 }
 
 /// Nags each member `query` returns as missing something for `date`, one
@@ -523,8 +536,23 @@ mod tests {
             task: task.to_string(),
             notes: notes.map(str::to_string),
             status: status.map(str::to_string),
+            progress: None,
             blocker: blocker.map(str::to_string),
             sow_ref: sow_ref.map(str::to_string),
+        }
+    }
+
+    /// An `'update'` `SyncEntry` carrying a `/progress` writeup - the case
+    /// the sync-message progress line depends on.
+    fn sync_update(
+        task: &str,
+        status: &str,
+        progress: &str,
+        blocker: Option<&str>,
+    ) -> entries::SyncEntry {
+        entries::SyncEntry {
+            progress: Some(progress.to_string()),
+            ..sync_entry_with_sow_ref("update", task, None, Some(status), blocker, None)
         }
     }
 
@@ -542,7 +570,7 @@ mod tests {
         let entry = sync_entry("todo", "Write tests", Some("keep it simple"), None, None);
         assert_eq!(
             format_sync_message(&entry),
-            "📋 <@42> added a todo: **Write tests** — _keep it simple_"
+            "📋 <@42> added a todo: **Write tests**\n> _keep it simple_"
         );
     }
 
@@ -567,7 +595,7 @@ mod tests {
         );
         assert_eq!(
             format_sync_message(&entry),
-            "📋 <@42> added a todo: **Write tests** — _keep it simple_ [M1D2]"
+            "📋 <@42> added a todo: **Write tests** [M1D2]\n> _keep it simple_"
         );
     }
 
@@ -606,6 +634,52 @@ mod tests {
     }
 
     #[test]
+    fn format_sync_message_progress_includes_the_writeup() {
+        let entry = sync_update(
+            "Ship release",
+            "in_progress",
+            "cut the RC, smoke tests green",
+            None,
+        );
+        assert_eq!(
+            format_sync_message(&entry),
+            "🔧 <@42> progress on **Ship release**: In Progress\n> cut the RC, smoke tests green"
+        );
+    }
+
+    #[test]
+    fn format_sync_message_blocked_shows_writeup_then_blocker() {
+        let entry = sync_update(
+            "Fix bug",
+            "blocked",
+            "traced it to the cache",
+            Some("waiting on ops"),
+        );
+        assert_eq!(
+            format_sync_message(&entry),
+            "⚠️ <@42> progress on **Fix bug**: Blocked\n> traced it to the cache\n> blocked on: waiting on ops"
+        );
+    }
+
+    #[test]
+    fn format_sync_message_multiline_writeup_is_fully_quoted() {
+        let entry = sync_update("Refactor", "done", "line one\nline two", None);
+        assert_eq!(
+            format_sync_message(&entry),
+            "✅ <@42> progress on **Refactor**: Done\n> line one\n> line two"
+        );
+    }
+
+    #[test]
+    fn format_sync_message_blank_writeup_adds_no_quote_line() {
+        let entry = sync_update("Refactor", "done", "   ", None);
+        assert_eq!(
+            format_sync_message(&entry),
+            "✅ <@42> progress on **Refactor**: Done"
+        );
+    }
+
+    #[test]
     fn format_sync_message_for_progress_blocked_with_blocker() {
         let entry = sync_entry(
             "update",
@@ -616,7 +690,7 @@ mod tests {
         );
         assert_eq!(
             format_sync_message(&entry),
-            "⚠️ <@42> progress on **Fix bug**: Blocked — blocked on: waiting on ops"
+            "⚠️ <@42> progress on **Fix bug**: Blocked\n> blocked on: waiting on ops"
         );
     }
 
