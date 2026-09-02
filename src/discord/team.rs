@@ -4,9 +4,10 @@ use chrono_tz::Tz;
 use rusqlite::Connection;
 use serenity::all::{
     AutocompleteChoice, ChannelId, CommandDataOption, CommandDataOptionValue, CommandInteraction,
-    CommandOptionType, Context as SerenityContext, CreateAutocompleteResponse, CreateCommand,
-    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseFollowup,
-    CreateInteractionResponseMessage, CreateMessage, Http, Permissions,
+    CommandInteraction as AutocompleteInteraction, CommandOptionType, Context as SerenityContext,
+    CreateAutocompleteResponse, CreateCommand, CreateCommandOption, CreateInteractionResponse,
+    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage, Http,
+    Permissions,
 };
 
 use crate::{entries, members, status};
@@ -210,7 +211,9 @@ pub async fn handle_report(
                         .map(status::format_report)
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    Ok(status::split_into_messages(&full, 2000))
+                    // 1900, not Discord's 2000 cap: headroom in case a non-BMP
+                    // emoji in user text counts as 2 against the limit.
+                    Ok(status::split_into_messages(&full, 1900))
                 }
                 Err(e) => {
                     eprintln!("failed to fetch team report: {e}");
@@ -260,7 +263,7 @@ pub async fn handle_report(
 
 pub async fn handle_autocomplete(
     ctx: &SerenityContext,
-    autocomplete: &CommandInteraction,
+    autocomplete: &AutocompleteInteraction,
     db: &Arc<Mutex<Connection>>,
 ) {
     let partial = subcommand(&autocomplete.data.options)

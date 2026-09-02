@@ -70,7 +70,7 @@ impl EventHandler for Handler {
                     _ => {}
                 },
                 "progress" => progress::handle_command(&ctx, &command).await,
-                // `match` (not `if let`) because Task 9 adds a `remind` arm here.
+                // Three subcommands, so `match` rather than `if let`.
                 "team" => match team::subcommand(&command.data.options) {
                     Some(("status", _)) => {
                         team::handle_status(&ctx, &command, &self.db, &self.timezone).await

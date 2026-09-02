@@ -120,13 +120,16 @@ pub fn team_report(conn: &Connection, date: &str) -> Result<Vec<MemberReport>> {
 
         let mut todos = Vec::with_capacity(todo_rows.len());
         for (todo_id, task, notes, sow_ref) in todo_rows {
+            // date-scoped to match team_status's matched_update_count filter, so
+            // /team status and /team report agree for a given day. A cross-midnight
+            // update (todo dated D, its update dated D+1) is shown by neither.
             let mut upd_stmt = conn.prepare(
                 "SELECT task, status, progress, blocker FROM entries
-                 WHERE type = 'update' AND todo_id = ?1
+                 WHERE type = 'update' AND todo_id = ?1 AND date = ?2
                  ORDER BY id",
             )?;
             let updates = upd_stmt
-                .query_map([todo_id], row_to_update_detail)?
+                .query_map(params![todo_id, date], row_to_update_detail)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             todos.push(TodoDetail {
                 task,
@@ -711,5 +714,131 @@ mod tests {
         assert_eq!(chunks[1].chars().count(), 2000);
         assert!(chunks[2].chars().count() <= 2000);
         assert_eq!(chunks.concat().chars().count(), full.chars().count());
+    }
+
+    #[test]
+    fn team_report_pipeline_chunks_without_losing_content() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice", "lead");
+        seed_member(&conn, "2", "Budi", "designer");
+        let a1 = entries::insert_todo(
+            &conn,
+            "1",
+            DATE,
+            "Refactor auth",
+            Some("notes here"),
+            Some("M1D2"),
+        )
+        .unwrap();
+        entries::insert_update(
+            &conn,
+            "1",
+            DATE,
+            "Refactor auth",
+            Some(a1),
+            "done",
+            "extracted service",
+            None,
+        )
+        .unwrap();
+        entries::insert_todo(&conn, "2", DATE, "Design audit", None, None).unwrap();
+        entries::insert_update(&conn, "2", DATE, "Hotfix", None, "done", "shipped", None).unwrap();
+
+        let reports = team_report(&conn, DATE).unwrap();
+        let full = reports
+            .iter()
+            .map(format_report)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let chunks = split_into_messages(&full, 1900);
+
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 1900);
+        }
+        let joined = chunks.concat();
+        for needle in [
+            "Alice",
+            "Budi",
+            "Refactor auth",
+            "Design audit",
+            "M1D2",
+            "Hotfix",
+            "extracted service",
+        ] {
+            assert!(joined.contains(needle), "chunked output lost {needle:?}");
+        }
+    }
+
+    #[test]
+    fn team_report_separates_matched_and_ad_hoc_for_one_member() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice", "lead");
+        let t = entries::insert_todo(&conn, "1", DATE, "Planned work", None, None).unwrap();
+        entries::insert_update(
+            &conn,
+            "1",
+            DATE,
+            "Planned work",
+            Some(t),
+            "in_progress",
+            "halfway",
+            None,
+        )
+        .unwrap();
+        entries::insert_update(
+            &conn,
+            "1",
+            DATE,
+            "Surprise incident",
+            None,
+            "done",
+            "resolved",
+            None,
+        )
+        .unwrap();
+
+        let reports = team_report(&conn, DATE).unwrap();
+        assert_eq!(reports[0].todos.len(), 1);
+        assert_eq!(reports[0].todos[0].updates.len(), 1);
+        assert_eq!(reports[0].todos[0].updates[0].progress, "halfway");
+        assert_eq!(reports[0].ad_hoc.len(), 1);
+        assert_eq!(reports[0].ad_hoc[0].task, "Surprise incident");
+    }
+
+    #[test]
+    fn team_report_does_not_leak_one_members_updates_into_another() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice", "lead");
+        seed_member(&conn, "2", "Budi", "designer");
+        let a = entries::insert_todo(&conn, "1", DATE, "Alice task", None, None).unwrap();
+        entries::insert_update(
+            &conn,
+            "1",
+            DATE,
+            "Alice task",
+            Some(a),
+            "done",
+            "alice progress",
+            None,
+        )
+        .unwrap();
+        entries::insert_todo(&conn, "2", DATE, "Budi task", None, None).unwrap();
+
+        let reports = team_report(&conn, DATE).unwrap();
+        let budi = reports.iter().find(|r| r.name == "Budi").unwrap();
+        assert_eq!(budi.todos.len(), 1);
+        assert!(budi.todos[0].updates.is_empty());
+        assert!(budi.ad_hoc.is_empty());
+    }
+
+    #[test]
+    fn split_into_messages_packs_two_blocks_that_exactly_hit_the_limit() {
+        let a = "a".repeat(100);
+        let b = "b".repeat(98);
+        // 100 + 2 (for "\n\n") + 98 == 200
+        let full = format!("{a}\n\n{b}");
+        let chunks = split_into_messages(&full, 200);
+        assert_eq!(chunks, vec![full]);
     }
 }
