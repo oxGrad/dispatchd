@@ -140,7 +140,7 @@ pub async fn handle_modal_submission(
 ) {
     let task = modal_value(modal, TASK_INPUT_ID).unwrap_or_default();
     let notes = modal_value(modal, NOTES_INPUT_ID).filter(|s| !s.trim().is_empty());
-    let sow_ref = modal_value(modal, SOW_REF_INPUT_ID).filter(|s| !s.trim().is_empty());
+    let sow_ref = normalize_sow_ref(modal_value(modal, SOW_REF_INPUT_ID));
     let discord_user_id = modal.user.id.to_string();
     let date = entries::today_in(timezone);
 
@@ -179,6 +179,15 @@ pub async fn handle_modal_submission(
 /// instead of picking an autocomplete suggestion.
 fn parse_id_option(options: &[CommandDataOption]) -> Option<i64> {
     get_option_string(options, "id")?.parse().ok()
+}
+
+/// Trims and upper-cases a raw SOW ref from the modal, yielding `None` when
+/// nothing meaningful was entered. SOW refs are stored and displayed
+/// upper-cased (e.g. `m1d2` -> `M1D2`) so tags line up across members
+/// regardless of how each person typed them.
+fn normalize_sow_ref(raw: Option<String>) -> Option<String> {
+    raw.map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty())
 }
 
 pub async fn handle_edit(
@@ -290,7 +299,7 @@ pub async fn handle_edit_modal_submission(
 
     let task = modal_value(modal, TASK_INPUT_ID).unwrap_or_default();
     let notes = modal_value(modal, NOTES_INPUT_ID).filter(|s| !s.trim().is_empty());
-    let sow_ref = modal_value(modal, SOW_REF_INPUT_ID).filter(|s| !s.trim().is_empty());
+    let sow_ref = normalize_sow_ref(modal_value(modal, SOW_REF_INPUT_ID));
     let discord_user_id = modal.user.id.to_string();
     let date = entries::today_in(timezone);
 
@@ -464,6 +473,25 @@ mod tests {
         ] {
             assert!(TODO_HELP_TEXT.contains(needle), "missing {needle}");
         }
+    }
+
+    #[test]
+    fn normalize_sow_ref_uppercases_and_trims() {
+        assert_eq!(
+            normalize_sow_ref(Some("  m1d2 ".to_string())),
+            Some("M1D2".to_string())
+        );
+        assert_eq!(
+            normalize_sow_ref(Some("M1D2".to_string())),
+            Some("M1D2".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_sow_ref_drops_empty_and_whitespace_only() {
+        assert_eq!(normalize_sow_ref(None), None);
+        assert_eq!(normalize_sow_ref(Some(String::new())), None);
+        assert_eq!(normalize_sow_ref(Some("   ".to_string())), None);
     }
 
     // `subcommand()` isn't unit-tested here: `CommandDataOption` is
