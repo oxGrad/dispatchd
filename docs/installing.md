@@ -62,6 +62,72 @@ Discord application, get a bot token, and wire up `discord_guild_id`/
 `discord_standup_channel_id`. `docs/user-guide.md` covers day-to-day
 usage once it's running.
 
+## Running on a cloud VM (Google Cloud free tier)
+
+dispatchd is a good fit for a tiny always-on VM: one static binary,
+~20-50 MB RAM, negligible CPU, a few MB of SQLite on disk, and only
+**outbound** network (the Discord gateway). No inbound ports, so there is
+**no firewall or load-balancer setup** - a plain VM on the default VPC is
+all it needs.
+
+GCP's [free tier](https://cloud.google.com/free/docs/free-cloud-features#compute)
+includes one `e2-micro` that runs $0 for compute as long as you stay
+inside these limits:
+
+- **Region:** `us-west1`, `us-central1`, or `us-east1` (only these
+  qualify).
+- **Machine type:** exactly `e2-micro`.
+- **Boot disk:** 30 GB or less, **Standard persistent disk**
+  (`pd-standard`) - not SSD or balanced.
+- **Image:** Debian 12 or Ubuntu 24.04. Both ship systemd >= 250, which
+  `dispatchd discord login` requires. **Ubuntu 22.04 ships systemd 249
+  and will not work** with the systemd install path.
+- **Egress:** 1 GB/month is free; a standup bot for a handful of people
+  uses a tiny fraction of that.
+
+One caveat: GCP now bills external IPv4 addresses at roughly
+**$0.004/hr (about $3/month)** even on a free-tier VM. dispatchd needs
+outbound internet, and removing the external IP would force Cloud NAT
+(not free), so budget ~$3/month for the address unless Google's pricing
+changes. Everything else is genuinely free.
+
+Create the VM (console: **Compute Engine -> Create instance**, or CLI):
+
+```sh
+gcloud compute instances create dispatchd \
+  --zone=us-central1-a \
+  --machine-type=e2-micro \
+  --image-family=debian-12 --image-project=debian-cloud \
+  --boot-disk-size=10GB --boot-disk-type=pd-standard
+```
+
+SSH in and install as usual:
+
+```sh
+gcloud compute ssh dispatchd --zone=us-central1-a
+
+# on the VM:
+curl -fsSL https://dispatchd.graditya.com | sudo sh
+sudo timedatectl set-timezone Asia/Jakarta   # optional - match your team
+dispatchd init
+# edit ~/.config/dispatchd/config.toml (discord_guild_id,
+# discord_standup_channel_id, timezone) and ~/.config/dispatchd/members.toml
+sudo dispatchd service install
+sudo dispatchd discord login
+sudo systemctl start dispatchd
+dispatchd status
+```
+
+The systemd unit restarts the bot on failure and on VM reboot, and the
+maintenance timer (installed alongside it) handles the weekly prune. The
+SQLite DB lives on the boot disk, which persists across reboots - back it
+up (`~/.local/share/dispatchd/`, or wherever `DISPATCHD_DB_PATH` points)
+if the biweekly-recap history matters to you.
+
+The same recipe works on any small always-on Linux VM (Oracle Cloud's
+always-free Ampere instances, a Raspberry Pi, etc.) - only the
+provisioning command changes.
+
 ## Hosting the installer at `dispatchd.graditya.com` (Cloudflare)
 
 `install.sh` is committed at the repo root, so
