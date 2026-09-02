@@ -195,6 +195,60 @@ pub fn format_status_line(status: &MemberStatus) -> String {
     }
 }
 
+/// `(glyph, label)` for a progress-report status value. Unknown values
+/// (shouldn't happen - the command only writes done/in_progress/blocked)
+/// fall back to a neutral bullet and the raw string.
+fn status_glyph_label(status: &str) -> (&'static str, String) {
+    match status {
+        "done" => ("✅", "done".to_string()),
+        "in_progress" => ("⏳", "in progress".to_string()),
+        "blocked" => ("⛔", "blocked".to_string()),
+        other => ("•", other.to_string()),
+    }
+}
+
+fn push_update_line(out: &mut String, update: &UpdateDetail) {
+    let (glyph, label) = status_glyph_label(&update.status);
+    out.push_str(&format!("  {glyph} {label} — {}", update.progress));
+    if let Some(blocker) = &update.blocker {
+        out.push_str(&format!(" (blocker: {blocker})"));
+    }
+}
+
+/// One member's block for `/team report`, in Discord markdown, with no
+/// trailing newline. Callers join member blocks with "\n\n".
+#[allow(dead_code)]
+pub fn format_report(report: &MemberReport) -> String {
+    if report.todos.is_empty() && report.ad_hoc.is_empty() {
+        return format!("**{}** — nothing posted today", report.name);
+    }
+
+    let mut out = format!("**{}**", report.name);
+    for todo in &report.todos {
+        out.push('\n');
+        match &todo.sow_ref {
+            Some(sow_ref) => out.push_str(&format!("• {} [{sow_ref}]", todo.task)),
+            None => out.push_str(&format!("• {}", todo.task)),
+        }
+        if let Some(notes) = &todo.notes {
+            out.push_str(&format!("\n  notes: {notes}"));
+        }
+        if todo.updates.is_empty() {
+            out.push_str("\n  ❌ no progress report yet");
+        } else {
+            for update in &todo.updates {
+                out.push('\n');
+                push_update_line(&mut out, update);
+            }
+        }
+    }
+    for update in &report.ad_hoc {
+        out.push_str(&format!("\n• unplanned: {}\n", update.task));
+        push_update_line(&mut out, update);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,5 +539,98 @@ mod tests {
         assert!(members::is_lead(&conn, "1").unwrap());
         assert!(!members::is_lead(&conn, "2").unwrap());
         assert!(!members::is_lead(&conn, "999").unwrap());
+    }
+
+    fn sample_report() -> MemberReport {
+        MemberReport {
+            name: "Alice".into(),
+            todos: vec![
+                TodoDetail {
+                    task: "Refactor auth".into(),
+                    notes: Some("split into service + handler".into()),
+                    sow_ref: Some("M1D2".into()),
+                    updates: vec![UpdateDetail {
+                        task: "Refactor auth".into(),
+                        status: "done".into(),
+                        progress: "extracted AuthService".into(),
+                        blocker: None,
+                    }],
+                },
+                TodoDetail {
+                    task: "Write migration".into(),
+                    notes: None,
+                    sow_ref: None,
+                    updates: vec![UpdateDetail {
+                        task: "Write migration".into(),
+                        status: "blocked".into(),
+                        progress: "schema drafted".into(),
+                        blocker: Some("waiting on DBA".into()),
+                    }],
+                },
+                TodoDetail {
+                    task: "Docs pass".into(),
+                    notes: None,
+                    sow_ref: None,
+                    updates: vec![],
+                },
+            ],
+            ad_hoc: vec![UpdateDetail {
+                task: "Hotfix prod 500".into(),
+                status: "done".into(),
+                progress: "bad index, added it".into(),
+                blocker: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn format_report_renders_todos_notes_updates_and_ad_hoc() {
+        let out = format_report(&sample_report());
+        assert_eq!(
+            out,
+            "**Alice**\n\
+             • Refactor auth [M1D2]\n\
+             \u{20}\u{20}notes: split into service + handler\n\
+             \u{20}\u{20}✅ done — extracted AuthService\n\
+             • Write migration\n\
+             \u{20}\u{20}⛔ blocked — schema drafted (blocker: waiting on DBA)\n\
+             • Docs pass\n\
+             \u{20}\u{20}❌ no progress report yet\n\
+             • unplanned: Hotfix prod 500\n\
+             \u{20}\u{20}✅ done — bad index, added it"
+        );
+    }
+
+    #[test]
+    fn format_report_empty_member_is_a_single_line() {
+        let report = MemberReport {
+            name: "Budi".into(),
+            todos: vec![],
+            ad_hoc: vec![],
+        };
+        assert_eq!(format_report(&report), "**Budi** — nothing posted today");
+    }
+
+    #[test]
+    fn format_report_unknown_status_falls_back_to_verbatim() {
+        let report = MemberReport {
+            name: "Citra".into(),
+            todos: vec![TodoDetail {
+                task: "Thing".into(),
+                notes: None,
+                sow_ref: None,
+                updates: vec![UpdateDetail {
+                    task: "Thing".into(),
+                    status: "weird".into(),
+                    progress: "hmm".into(),
+                    blocker: None,
+                }],
+            }],
+            ad_hoc: vec![],
+        };
+        assert_eq!(
+            format_report(&report),
+            "**Citra**\n• Thing\n\u{20}\u{20}• weird — hmm"
+        );
     }
 }
