@@ -242,6 +242,9 @@ pub struct SyncEntry {
     pub task: String,
     pub notes: Option<String>,
     pub status: Option<String>,
+    /// The `/progress` writeup text. Set on `'update'` rows, `None` on
+    /// `'todo'` rows.
+    pub progress: Option<String>,
     pub blocker: Option<String>,
     pub sow_ref: Option<String>,
 }
@@ -252,7 +255,7 @@ pub struct SyncEntry {
 /// to matter.
 pub fn entries_since(conn: &Connection, date: &str, after_id: i64) -> Result<Vec<SyncEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, discord_user_id, type, task, notes, status, blocker, sow_ref
+        "SELECT id, discord_user_id, type, task, notes, status, progress, blocker, sow_ref
          FROM entries
          WHERE date = ?1 AND id > ?2
          ORDER BY id",
@@ -266,8 +269,9 @@ pub fn entries_since(conn: &Connection, date: &str, after_id: i64) -> Result<Vec
                 task: row.get(3)?,
                 notes: row.get(4)?,
                 status: row.get(5)?,
-                blocker: row.get(6)?,
-                sow_ref: row.get(7)?,
+                progress: row.get(6)?,
+                blocker: row.get(7)?,
+                sow_ref: row.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -770,6 +774,7 @@ mod tests {
                     task: "Write tests".to_string(),
                     notes: Some("notes".to_string()),
                     status: None,
+                    progress: None,
                     blocker: None,
                     sow_ref: Some("M1D2".to_string()),
                 },
@@ -780,6 +785,7 @@ mod tests {
                     task: "Write tests".to_string(),
                     notes: None,
                     status: Some("done".to_string()),
+                    progress: Some("Finished".to_string()),
                     blocker: None,
                     sow_ref: None,
                 },

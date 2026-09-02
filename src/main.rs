@@ -195,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
         println!("  members seeded:               {seeded}");
     } else {
         println!(
-            "  members seeded:               0 (no members configured yet — run `dispatchd init`, then edit members.toml)"
+            "  members seeded:               0 (no members configured yet - run `dispatchd init`, then edit members.toml)"
         );
     }
     match config.discord_guild_id {
@@ -209,7 +209,7 @@ async fn main() -> anyhow::Result<()> {
             discord::run(token, guild_id, config.clone(), db).await?
         }
         None => println!(
-            "Discord not configured — run `sudo dispatchd discord login` (or set DISPATCHD_DISCORD_TOKEN) and set discord_guild_id; see docs/discord-setup.md"
+            "Discord not configured - run `sudo dispatchd discord login` (or set DISPATCHD_DISCORD_TOKEN) and set discord_guild_id; see docs/discord-setup.md"
         ),
     }
 
