@@ -146,9 +146,10 @@ see:
 dispatchd connected to Discord as <your bot's name>
 ```
 
-and `/ping`, `/todo`, `/progress`, and `/team-status` will show up in your
-server within seconds (guild-scoped commands take effect immediately,
-unlike global ones). Run `/ping` in the server — dispatchd should reply
+and `/ping`, `/todo`, `/progress`, and `/team` (with its `status` /
+`report` / `remind` subcommands) will show up in your server within
+seconds (guild-scoped commands take effect immediately, unlike global
+ones). Run `/ping` in the server — dispatchd should reply
 "pong! dispatchd is alive."
 
 If `discord_guild_id` isn't set, or no token was saved via `discord login`
@@ -172,17 +173,18 @@ discord:
   ping:                 ok - logged in as dispatchd (123456789012345678), 84ms
 ```
 
-## 6. `/team-status` permissions
+## 6. `/team` permissions
 
-`/team-status` is meant for the tech lead only. The bot always checks this
-itself (looking up the caller in `members.toml`'s `is_lead` flag) no matter
-what — that check can't be bypassed from Discord's side. On top of that,
-the command is registered with Discord's `Manage Server` permission
-requirement, so it's hidden from the command picker for anyone without
-that permission by default.
+The `/team` command group — `status`, `report`, and `remind` — is meant
+for the tech lead only. The bot always checks this itself for all three
+subcommands (looking up the caller in `members.toml`'s `is_lead` flag) no
+matter what — that check can't be bypassed from Discord's side. On top of
+that, the parent `/team` command is registered with Discord's `Manage
+Server` permission requirement, so it's hidden from the command picker
+for anyone without that permission by default.
 
 If you want it restricted to a specific "Tech Lead" role instead of
 everyone with `Manage Server`, that's a one-time manual step: **Server
-Settings → Integrations → dispatchd → team-status**, then set it to only
-the role(s) you want. This is optional — the bot-side check is the real
-gate either way.
+Settings → Integrations → dispatchd → team**, where each of `status`,
+`report`, and `remind` can be restricted to the role(s) you want. This is
+optional — the bot-side check is the real gate either way.

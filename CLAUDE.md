@@ -1,7 +1,7 @@
 # dispatchd
 
 A Discord bot that automates a 6-person team's daily standup ritual
-(`/todo`, `/progress`, `/team-status`) and stores submissions in SQLite for
+(`/todo`, `/progress`, `/team status`) and stores submissions in SQLite for
 a later biweekly recap. Rust, `serenity` + `tokio` for Discord, `rusqlite`
 for storage. Full requirements live in the original handover doc (ask the
 user for it if you need the "why" behind a design choice — it's not
@@ -136,8 +136,9 @@ Env vars (all `DISPATCHD_*`, overriding the XDG-resolved path/value):
 Discord application/bot setup (creating the app, intents, invite link,
 getting guild/channel IDs) is in `docs/discord-setup.md` - don't duplicate
 it here. How a team member actually uses the bot day-to-day (`/todo`,
-`/progress`, `/team-status`, the reminder/follow-up timeline) is in
-`docs/user-guide.md` - point new engineers there rather than the setup doc.
+`/progress`, `/team status` / `report` / `remind`, the reminder/follow-up
+timeline) is in `docs/user-guide.md` - point new engineers there rather
+than the setup doc.
 Installing the `dispatchd` binary itself (prebuilt releases via
 `curl | sh`, no Rust toolchain needed - see `install.sh` and
 `.github/workflows/release.yml`) is in `docs/installing.md`.
@@ -145,9 +146,10 @@ Installing the `dispatchd` binary itself (prebuilt releases via
 ## A note on live Discord testing
 
 Every Discord-facing feature so far (`/ping`, `/todo`, `/progress`,
-`/team-status`) has been written without ever exercising a live gateway
-connection or a real interaction - the sandbox this was originally built
-in has its egress proxy configured to block `discord.com` outright
+`/team status`, `/team report`, `/team remind`) has been written without
+ever exercising a live gateway connection or a real interaction - the
+sandbox this was originally built in has its egress proxy configured to
+block `discord.com` outright
 (confirmed via the proxy's own status endpoint, not assumed). **That
 restriction is specific to that sandbox, not a property of this project** -
 if you have real network access, actually try connecting and running the
@@ -195,9 +197,13 @@ src/
   entries.rs     todo/update row DB logic, incl. entries.sow_ref - a
                  purely informational, unvalidated cross-reference into
                  an external scope-of-work doc (e.g. "M1D2"), todo-only
-  members.rs     roster seeding + is_lead check + all_member_ids
-  status.rs      /team-status DB queries + formatting, incl. each
-                 member's deduped sow_ref tag list appended to their line
+  members.rs     roster seeding + is_lead check + all_member_ids +
+                 roster/name_of (used by /team remind's member autocomplete)
+  status.rs      /team status DB queries + formatting (team_status /
+                 format_status_line), incl. each member's deduped sow_ref
+                 tag list appended to their line; also team_report /
+                 format_report / split_into_messages - the full per-member
+                 detail for /team report and its 2000-char message chunking
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
   followups.rs   followups_sent DB logic (missing-todo/update nags)
   init.rs        `dispatchd init` subcommand
@@ -227,8 +233,9 @@ src/
                  `dispatchd status`'s systemd-side checks
   discord/       serenity Handler, one file per slash command
     mod.rs         EventHandler impl, interaction dispatch, shared helpers
-                    (modal_value, get_option_string), spawns the ticker
-                    alongside the client
+                    (modal_value, get_option_string, is_unknown_channel_error
+                    - the last moved here from ticker.rs, now shared by
+                    ticker + team), spawns the ticker alongside the client
     help.rs        /help - static overview of every command
     todo.rs        /todo create|edit|delete|list|help - create/edit share
                     one modal shape (edit's pre-filled with current
@@ -244,7 +251,19 @@ src/
                     'update' DB row type (entries.type/reminders_sent.type/
                     etc. keep that name - it's the data concept, not the
                     command surface)
-    team_status.rs /team-status
+    team.rs        the `/team` command group (was team_status.rs):
+                    `status` - the old standalone summary command moved
+                    here verbatim, one line per member showing who's
+                    updated today; `report` - full per-member todo +
+                    progress detail, tech-lead-only, ephemeral, split
+                    across follow-up messages past 2000 chars (see
+                    status::split_into_messages); `remind` - manual
+                    tech-lead nudge that @-mentions one member in today's
+                    standup thread to submit a /todo or /progress,
+                    independent of the automated followup nags. The parent
+                    command is MANAGE_GUILD-gated and every subcommand
+                    also does a bot-side members::is_lead check. Shares
+                    is_unknown_channel_error with ticker.rs (via mod.rs)
     ticker.rs      creates today's thread early (thread_creation_time,
                     default 08:30) ahead of the 9am/3pm/4pm reminders, then
                     every tick posts any new /todo|/progress submission

@@ -55,7 +55,9 @@ dispatchd status                 # unit state + a live Discord ping
 | --- | --- | --- |
 | `/todo create\|edit\|delete\|list\|help` | everyone | manage your todos for today; optional free-text SOW reference tag |
 | `/progress` | everyone | report progress (Done / In Progress / Blocked) against a todo, or ad-hoc work |
-| `/team-status` | tech lead | one line per member: how many of today's todos have a progress report |
+| `/team status` | tech lead | one line per member: how many of today's todos have a progress report |
+| `/team report` | tech lead | full detail — everyone's todos, notes, SOW refs, and progress reports for today |
+| `/team remind` | tech lead | post a reminder to one member in today's thread to submit a todo / progress update |
 | `/help`, `/ping` | everyone | command overview; liveness check |
 
 `/todo` and `/progress` replies are ephemeral - dispatchd separately
