@@ -91,7 +91,6 @@ pub struct MemberReport {
 /// One `MemberReport` per roster row, ordered by name. Per-member queries
 /// rather than one big JOIN - same rationale as `team_status`: a 6-person
 /// team's worth of rows, easier to read and verify.
-#[allow(dead_code)]
 pub fn team_report(conn: &Connection, date: &str) -> Result<Vec<MemberReport>> {
     let mut members_stmt =
         conn.prepare("SELECT discord_user_id, name FROM members ORDER BY name")?;
@@ -217,7 +216,6 @@ fn push_update_line(out: &mut String, update: &UpdateDetail) {
 
 /// One member's block for `/team report`, in Discord markdown, with no
 /// trailing newline. Callers join member blocks with "\n\n".
-#[allow(dead_code)]
 pub fn format_report(report: &MemberReport) -> String {
     if report.todos.is_empty() && report.ad_hoc.is_empty() {
         return format!("**{}** — nothing posted today", report.name);
@@ -253,7 +251,6 @@ pub fn format_report(report: &MemberReport) -> String {
 /// most `limit` characters, so `/team report` fits Discord's 2000-char
 /// message cap. A single block over `limit` is hard-wrapped at char
 /// boundaries. Empty input yields no chunks.
-#[allow(dead_code)]
 pub fn split_into_messages(full: &str, limit: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut current = String::new();

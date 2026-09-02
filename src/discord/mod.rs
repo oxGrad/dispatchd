@@ -70,12 +70,13 @@ impl EventHandler for Handler {
                     _ => {}
                 },
                 "progress" => progress::handle_command(&ctx, &command).await,
-                // `match` (not `if let`) because Tasks 7 & 9 add `report` /
-                // `remind` arms here - allow the single-arm form until then.
-                #[allow(clippy::single_match)]
+                // `match` (not `if let`) because Task 9 adds a `remind` arm here.
                 "team" => match team::subcommand(&command.data.options) {
                     Some(("status", _)) => {
                         team::handle_status(&ctx, &command, &self.db, &self.timezone).await
+                    }
+                    Some(("report", _)) => {
+                        team::handle_report(&ctx, &command, &self.db, &self.timezone).await
                     }
                     _ => {}
                 },

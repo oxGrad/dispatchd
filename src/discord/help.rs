@@ -12,6 +12,7 @@ const HELP_TEXT: &str = "\
 `/todo help` - todo-specific help
 `/progress` - submit a progress report against one of today's todos (or free-typed unplanned work)
 `/team status` - (tech lead only) one line per member: who's updated today
+`/team report` - (tech lead only) full detail of everyone's todos + progress today
 `/ping` - check that dispatchd is alive";
 
 pub fn command() -> CreateCommand {
@@ -44,6 +45,7 @@ mod tests {
             "/todo help",
             "/progress",
             "/team status",
+            "/team report",
             "/ping",
         ] {
             assert!(HELP_TEXT.contains(needle), "missing {needle}");
