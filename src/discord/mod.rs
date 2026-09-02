@@ -81,6 +81,9 @@ impl EventHandler for Handler {
                     Some(("remind", opts)) => {
                         team::handle_remind(&ctx, &command, opts, &self.db, &self.timezone).await
                     }
+                    Some(("skip-meeting", _)) => {
+                        team::handle_skip_meeting(&ctx, &command, &self.db, &self.timezone).await
+                    }
                     _ => {}
                 },
                 _ => {}

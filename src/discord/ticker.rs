@@ -64,15 +64,10 @@ async fn tick(
         )
         .await;
     }
-    if is_due(now_time, config.meeting_reminder_time) {
-        maybe_fire_simple_reminder(
-            http,
-            db,
-            &date,
-            "meeting_reminder",
-            "🗓️ Optional meeting time - whether it happens today is the tech lead's call.",
-        )
-        .await;
+    let meeting_reminder_trigger = config.meeting_time
+        - chrono::Duration::minutes(config.meeting_reminder_lead_minutes.into());
+    if is_due(now_time, meeting_reminder_trigger) {
+        maybe_fire_meeting_reminder(http, db, &date, config.meeting_reminder_lead_minutes).await;
     }
 
     let todo_followup_trigger =
@@ -165,24 +160,58 @@ async fn maybe_fire_todo_reminder(http: &Arc<Http>, db: &Arc<Mutex<Connection>>,
         }
     }
 
-    let mentions = {
-        let conn = db.lock().expect("db mutex poisoned");
-        match members::all_member_ids(&conn) {
-            Ok(ids) => ids
-                .iter()
-                .map(|id| format!("<@{id}>"))
-                .collect::<Vec<_>>()
-                .join(" "),
-            Err(e) => {
-                eprintln!("failed to list members for standup ping: {e}");
-                String::new()
-            }
-        }
-    };
-
+    let mentions = all_member_mentions(db);
     let message =
         format!("{mentions}\n📋 Time for today's standup! Submit your todo with `/todo create`.");
     maybe_fire_simple_reminder(http, db, date, "todo_reminder", &message).await;
+}
+
+/// Space-joined `<@id>` mentions for every roster member, for the reminders
+/// that ping the whole team. Empty string on a DB error (logged) so the
+/// reminder still goes out, just without the pings.
+fn all_member_mentions(db: &Arc<Mutex<Connection>>) -> String {
+    let conn = db.lock().expect("db mutex poisoned");
+    match members::all_member_ids(&conn) {
+        Ok(ids) => ids
+            .iter()
+            .map(|id| format!("<@{id}>"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Err(e) => {
+            eprintln!("failed to list members for a team ping: {e}");
+            String::new()
+        }
+    }
+}
+
+/// The pre-meeting reminder body (without the member mentions prepended).
+/// Pure - `lead` is `config.meeting_reminder_lead_minutes`.
+fn meeting_reminder_body(lead: u32) -> String {
+    let unit = if lead == 1 { "minute" } else { "minutes" };
+    format!("🗓️ Daily meeting starts in {lead} {unit}.")
+}
+
+/// Fires the pre-meeting reminder into today's thread, pinging every roster
+/// member. The daily meeting happens by default; the tech lead cancels it
+/// with `/team skip-meeting`, which also marks this reminder sent so it
+/// won't fire afterwards.
+async fn maybe_fire_meeting_reminder(
+    http: &Arc<Http>,
+    db: &Arc<Mutex<Connection>>,
+    date: &str,
+    lead: u32,
+) {
+    match already_sent(db, date, "meeting_reminder") {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("failed to check meeting_reminder status: {e}");
+            return;
+        }
+    }
+    let mentions = all_member_mentions(db);
+    let message = format!("{mentions}\n{}", meeting_reminder_body(lead));
+    maybe_fire_simple_reminder(http, db, date, "meeting_reminder", &message).await;
 }
 
 async fn maybe_fire_simple_reminder(
@@ -509,6 +538,30 @@ mod tests {
         assert!(!is_weekend(Weekday::Wed));
         assert!(!is_weekend(Weekday::Thu));
         assert!(!is_weekend(Weekday::Fri));
+    }
+
+    #[test]
+    fn meeting_reminder_body_uses_the_configured_lead_and_pluralizes() {
+        assert_eq!(
+            meeting_reminder_body(5),
+            "🗓️ Daily meeting starts in 5 minutes."
+        );
+        assert_eq!(
+            meeting_reminder_body(1),
+            "🗓️ Daily meeting starts in 1 minute."
+        );
+    }
+
+    #[test]
+    fn meeting_reminder_trigger_is_lead_minutes_before_the_meeting() {
+        let meeting = NaiveTime::from_hms_opt(16, 0, 0).unwrap();
+        let trigger = meeting - chrono::Duration::minutes(5);
+        assert_eq!(trigger, NaiveTime::from_hms_opt(15, 55, 0).unwrap());
+        assert!(!is_due(
+            NaiveTime::from_hms_opt(15, 54, 0).unwrap(),
+            trigger
+        ));
+        assert!(is_due(NaiveTime::from_hms_opt(15, 55, 0).unwrap(), trigger));
     }
 
     fn sync_entry(

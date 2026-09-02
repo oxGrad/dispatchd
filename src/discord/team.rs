@@ -50,7 +50,16 @@ pub fn command() -> CreateCommand {
                 .add_string_choice("Post a progress update", "progress"),
             ),
         )
+        .add_option(CreateCommandOption::new(
+            CommandOptionType::SubCommand,
+            "skip-meeting",
+            "Cancel today's meeting and tell the team you're all caught up",
+        ))
 }
+
+/// The fixed announcement `/team skip-meeting` posts into the standup
+/// thread. Plain text, no mentions.
+pub const SKIP_MEETING_MESSAGE: &str = "🗓️ **No meeting today.** I've reviewed everyone's progress and I'm all caught up: no follow-ups or clarifications needed. Thanks, team, and enjoy the rest of your day!";
 
 /// Discord nests a subcommand's own options one level under an entry named
 /// after the subcommand - this pulls out `(subcommand_name, its_options)`.
@@ -98,15 +107,14 @@ pub enum SendOutcome {
     Failed,
 }
 
-/// Posts a manual reminder for `member_id` into today's standup thread.
-/// Independent of the ticker's automated follow-ups - never reads or
-/// writes `followups_sent`.
-pub async fn send_reminder(
+/// Posts `content` into today's standup thread. Shared by `/team remind`
+/// and `/team skip-meeting`. Independent of the ticker's automated
+/// follow-ups - never reads or writes `followups_sent`.
+pub async fn post_to_standup_thread(
     http: &Arc<Http>,
     db: &Arc<Mutex<Connection>>,
     timezone: &Tz,
-    member_id: &str,
-    kind: RemindKind,
+    content: &str,
 ) -> SendOutcome {
     let date = entries::today_in(timezone);
 
@@ -118,7 +126,7 @@ pub async fn send_reminder(
         Ok(Some(id)) => id,
         Ok(None) => return SendOutcome::NoThread,
         Err(e) => {
-            eprintln!("failed to look up standup thread for /team remind: {e}");
+            eprintln!("failed to look up standup thread for a /team post: {e}");
             return SendOutcome::Failed;
         }
     };
@@ -128,19 +136,27 @@ pub async fn send_reminder(
     };
 
     match ChannelId::new(raw_id)
-        .send_message(
-            http,
-            CreateMessage::new().content(kind.reminder_text(member_id)),
-        )
+        .send_message(http, CreateMessage::new().content(content))
         .await
     {
         Ok(_) => SendOutcome::Sent,
         Err(e) if super::is_unknown_channel_error(&e) => SendOutcome::ThreadGone,
         Err(e) => {
-            eprintln!("failed to post /team remind message: {e}");
+            eprintln!("failed to post a /team message to the standup thread: {e}");
             SendOutcome::Failed
         }
     }
+}
+
+/// Posts a manual reminder for `member_id` into today's standup thread.
+pub async fn send_reminder(
+    http: &Arc<Http>,
+    db: &Arc<Mutex<Connection>>,
+    timezone: &Tz,
+    member_id: &str,
+    kind: RemindKind,
+) -> SendOutcome {
+    post_to_standup_thread(http, db, timezone, &kind.reminder_text(member_id)).await
 }
 
 pub async fn handle_status(
@@ -366,6 +382,85 @@ pub async fn handle_remind(
     }
 }
 
+pub async fn handle_skip_meeting(
+    ctx: &SerenityContext,
+    command: &CommandInteraction,
+    db: &Arc<Mutex<Connection>>,
+    timezone: &Tz,
+) {
+    let discord_user_id = command.user.id.to_string();
+    let date = entries::today_in(timezone);
+
+    let reply_text = 'reply: {
+        {
+            let conn = db.lock().expect("db mutex poisoned");
+            match members::is_lead(&conn, &discord_user_id) {
+                Ok(false) => {
+                    break 'reply "⛔ This command is restricted to the tech lead.".to_string();
+                }
+                Ok(true) => {}
+                Err(e) => {
+                    eprintln!("failed to check is_lead: {e}");
+                    break 'reply "⚠️ Something went wrong checking permissions.".to_string();
+                }
+            }
+            match crate::reminders::already_sent(&conn, &date, "meeting_skip") {
+                Ok(true) => {
+                    break 'reply "ℹ️ The meeting is already marked skipped for today.".to_string();
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("failed to check meeting_skip status: {e}");
+                    break 'reply "⚠️ Something went wrong.".to_string();
+                }
+            }
+        }
+
+        match post_to_standup_thread(&ctx.http, db, timezone, SKIP_MEETING_MESSAGE).await {
+            SendOutcome::Sent => {
+                let conn = db.lock().expect("db mutex poisoned");
+                if let Err(e) = crate::reminders::mark_sent(&conn, &date, "meeting_skip") {
+                    eprintln!("failed to record meeting_skip: {e}");
+                }
+                // Suppress the automated pre-meeting ping if it hasn't fired yet.
+                match crate::reminders::already_sent(&conn, &date, "meeting_reminder") {
+                    Ok(false) => {
+                        if let Err(e) =
+                            crate::reminders::mark_sent(&conn, &date, "meeting_reminder")
+                        {
+                            eprintln!("failed to suppress meeting_reminder: {e}");
+                        }
+                    }
+                    Ok(true) => {}
+                    Err(e) => eprintln!("failed to check meeting_reminder status: {e}"),
+                }
+                "✅ Meeting skipped for today - the team has been notified in the standup thread."
+                    .to_string()
+            }
+            SendOutcome::NoThread => {
+                "⚠️ Today's standup thread hasn't been created yet - try again once it's posted."
+                    .to_string()
+            }
+            SendOutcome::ThreadGone => {
+                "⚠️ Today's standup thread appears to have been deleted.".to_string()
+            }
+            SendOutcome::Failed => {
+                "⚠️ Something went wrong posting to the standup thread.".to_string()
+            }
+        }
+    };
+
+    let reply = CreateInteractionResponseMessage::new()
+        .content(reply_text)
+        .ephemeral(true);
+    if let Err(e) = command
+        .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+        .await
+    {
+        eprintln!("failed to respond to /team skip-meeting: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +475,14 @@ mod tests {
         assert!(RemindKind::parse("").is_none());
         assert!(RemindKind::parse("TODO").is_none());
         assert!(RemindKind::parse("nope").is_none());
+    }
+
+    #[test]
+    fn skip_meeting_message_is_plain_and_closes_warmly() {
+        assert!(!SKIP_MEETING_MESSAGE.contains('—'));
+        assert!(!SKIP_MEETING_MESSAGE.contains("<@"));
+        assert!(SKIP_MEETING_MESSAGE.contains("No meeting today"));
+        assert!(SKIP_MEETING_MESSAGE.contains("enjoy the rest of your day"));
     }
 
     #[test]

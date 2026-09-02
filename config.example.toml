@@ -22,7 +22,8 @@
 # thread_creation_time = "08:30"
 # todo_time = "09:00"
 # update_time = "15:00"
-# meeting_reminder_time = "16:00"
+# meeting_time = "16:00"                 # when the daily meeting starts
+# meeting_reminder_lead_minutes = 5      # pre-meeting ping fires this many minutes before meeting_time
 # ticker_interval_seconds = 60
 # run_on_weekends = false
 

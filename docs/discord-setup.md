@@ -175,7 +175,8 @@ discord:
 
 ## 6. `/team` permissions
 
-The `/team` command group — `status`, `report`, and `remind` — is meant
+The `/team` command group — `status`, `report`, `remind`, and
+`skip-meeting` — is meant
 for the tech lead only. The bot always checks this itself for all three
 subcommands (looking up the caller in `members.toml`'s `is_lead` flag) no
 matter what — that check can't be bypassed from Discord's side. On top of
@@ -186,5 +187,6 @@ for anyone without that permission by default.
 If you want it restricted to a specific "Tech Lead" role instead of
 everyone with `Manage Server`, that's a one-time manual step: **Server
 Settings → Integrations → dispatchd → team**, where each of `status`,
-`report`, and `remind` can be restricted to the role(s) you want. This is
+`report`, `remind`, and `skip-meeting` can be restricted to the role(s)
+you want. This is
 optional — the bot-side check is the real gate either way.
