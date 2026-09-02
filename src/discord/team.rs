@@ -3,9 +3,10 @@ use std::sync::{Arc, Mutex};
 use chrono_tz::Tz;
 use rusqlite::Connection;
 use serenity::all::{
-    CommandDataOption, CommandDataOptionValue, CommandInteraction, CommandOptionType,
+    ChannelId, CommandDataOption, CommandDataOptionValue, CommandInteraction, CommandOptionType,
     Context as SerenityContext, CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, Permissions,
+    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage, Http,
+    Permissions,
 };
 
 use crate::{entries, members, status};
@@ -34,6 +35,90 @@ pub fn subcommand(options: &[CommandDataOption]) -> Option<(&str, &[CommandDataO
     match &top.value {
         CommandDataOptionValue::SubCommand(nested) => Some((top.name.as_str(), nested)),
         _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // caller lands in Task 9 (/team remind handler)
+pub enum RemindKind {
+    Todo,
+    Progress,
+}
+
+#[allow(dead_code)] // caller lands in Task 9 (/team remind handler)
+impl RemindKind {
+    pub fn parse(s: &str) -> Option<RemindKind> {
+        match s {
+            "todo" => Some(RemindKind::Todo),
+            "progress" => Some(RemindKind::Progress),
+            _ => None,
+        }
+    }
+
+    pub fn reminder_text(&self, user_id: &str) -> String {
+        match self {
+            RemindKind::Todo => format!(
+                "👋 <@{user_id}> — reminder from the tech lead: please submit your `/todo` for today."
+            ),
+            RemindKind::Progress => format!(
+                "👋 <@{user_id}> — reminder from the tech lead: please post a `/progress` update for today's todo(s)."
+            ),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)] // caller lands in Task 9 (/team remind handler)
+pub enum SendOutcome {
+    Sent,
+    NoThread,
+    ThreadGone,
+    Failed,
+}
+
+/// Posts a manual reminder for `member_id` into today's standup thread.
+/// Independent of the ticker's automated follow-ups - never reads or
+/// writes `followups_sent`.
+#[allow(dead_code)] // caller lands in Task 9 (/team remind handler)
+pub async fn send_reminder(
+    http: &Arc<Http>,
+    db: &Arc<Mutex<Connection>>,
+    timezone: &Tz,
+    member_id: &str,
+    kind: RemindKind,
+) -> SendOutcome {
+    let date = entries::today_in(timezone);
+
+    let thread_id = {
+        let conn = db.lock().expect("db mutex poisoned");
+        crate::reminders::thread_for(&conn, &date)
+    };
+    let thread_id = match thread_id {
+        Ok(Some(id)) => id,
+        Ok(None) => return SendOutcome::NoThread,
+        Err(e) => {
+            eprintln!("failed to look up standup thread for /team remind: {e}");
+            return SendOutcome::Failed;
+        }
+    };
+    let Ok(raw_id) = thread_id.parse::<u64>() else {
+        eprintln!("invalid stored thread_id {thread_id:?} for {date}");
+        return SendOutcome::Failed;
+    };
+
+    match ChannelId::new(raw_id)
+        .send_message(
+            http,
+            CreateMessage::new().content(kind.reminder_text(member_id)),
+        )
+        .await
+    {
+        Ok(_) => SendOutcome::Sent,
+        Err(e) if super::is_unknown_channel_error(&e) => SendOutcome::ThreadGone,
+        Err(e) => {
+            eprintln!("failed to post /team remind message: {e}");
+            SendOutcome::Failed
+        }
     }
 }
 
@@ -150,5 +235,33 @@ pub async fn handle_report(
         {
             eprintln!("failed to send /team report follow-up: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remind_kind_parses_known_values_only() {
+        assert!(matches!(RemindKind::parse("todo"), Some(RemindKind::Todo)));
+        assert!(matches!(
+            RemindKind::parse("progress"),
+            Some(RemindKind::Progress)
+        ));
+        assert!(RemindKind::parse("").is_none());
+        assert!(RemindKind::parse("TODO").is_none());
+        assert!(RemindKind::parse("nope").is_none());
+    }
+
+    #[test]
+    fn reminder_text_mentions_the_user_and_the_right_command() {
+        let todo = RemindKind::Todo.reminder_text("123");
+        assert!(todo.contains("<@123>"));
+        assert!(todo.contains("/todo"));
+
+        let progress = RemindKind::Progress.reminder_text("456");
+        assert!(progress.contains("<@456>"));
+        assert!(progress.contains("/progress"));
     }
 }
