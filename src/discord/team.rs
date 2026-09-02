@@ -3,19 +3,36 @@ use std::sync::{Arc, Mutex};
 use chrono_tz::Tz;
 use rusqlite::Connection;
 use serenity::all::{
-    CommandInteraction, Context as SerenityContext, CreateCommand, CreateInteractionResponse,
+    CommandDataOption, CommandDataOptionValue, CommandInteraction, CommandOptionType,
+    Context as SerenityContext, CreateCommand, CreateCommandOption, CreateInteractionResponse,
     CreateInteractionResponseMessage, Permissions,
 };
 
 use crate::{entries, members, status};
 
 pub fn command() -> CreateCommand {
-    CreateCommand::new("team-status")
-        .description("Show today's todo/progress status for the team")
+    CreateCommand::new("team")
+        .description("Tech-lead tools: status summary, full report, manual reminders")
         .default_member_permissions(Permissions::MANAGE_GUILD)
+        .add_option(CreateCommandOption::new(
+            CommandOptionType::SubCommand,
+            "status",
+            "One-line-per-member update summary for today",
+        ))
 }
 
-pub async fn handle_command(
+/// Discord nests a subcommand's own options one level under an entry named
+/// after the subcommand - this pulls out `(subcommand_name, its_options)`.
+/// (Same shape as `todo::subcommand`.)
+pub fn subcommand(options: &[CommandDataOption]) -> Option<(&str, &[CommandDataOption])> {
+    let top = options.first()?;
+    match &top.value {
+        CommandDataOptionValue::SubCommand(nested) => Some((top.name.as_str(), nested)),
+        _ => None,
+    }
+}
+
+pub async fn handle_status(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
@@ -56,6 +73,6 @@ pub async fn handle_command(
         .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
         .await
     {
-        eprintln!("failed to respond to /team-status: {e}");
+        eprintln!("failed to respond to /team status: {e}");
     }
 }

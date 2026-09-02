@@ -164,7 +164,7 @@ fn row_to_update_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateDetai
     })
 }
 
-/// Formats one `/team-status` line, e.g. `✅ Alice — 3/3 updated`, with
+/// Formats one `/team status` line, e.g. `✅ Alice — 3/3 updated`, with
 /// any SOW refs tagged on today's todos appended in parens, e.g.
 /// `✅ Alice — 3/3 updated (M1D1, M1D2, M2)`. A member with no todos posted
 /// shows no fraction (`0/0` reads as noise); one who posted todos but

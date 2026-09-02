@@ -92,7 +92,7 @@ pub fn seed(conn: &Connection) -> Result<usize> {
 }
 
 /// `false` for an unknown `discord_user_id`, not an error - the bot-side
-/// source-of-truth check for `/team-status`.
+/// source-of-truth check for `/team status`.
 pub fn is_lead(conn: &Connection, discord_user_id: &str) -> Result<bool> {
     Ok(conn
         .query_row(

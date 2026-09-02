@@ -1,6 +1,6 @@
 mod help;
 mod progress;
-mod team_status;
+mod team;
 mod ticker;
 mod todo;
 
@@ -34,7 +34,7 @@ impl EventHandler for Handler {
             help::command(),
             todo::command(),
             progress::command(),
-            team_status::command(),
+            team::command(),
         ];
         if let Err(e) = self.guild_id.set_commands(&ctx.http, commands).await {
             eprintln!("failed to register guild commands: {e}");
@@ -70,9 +70,15 @@ impl EventHandler for Handler {
                     _ => {}
                 },
                 "progress" => progress::handle_command(&ctx, &command).await,
-                "team-status" => {
-                    team_status::handle_command(&ctx, &command, &self.db, &self.timezone).await
-                }
+                // `match` (not `if let`) because Tasks 7 & 9 add `report` /
+                // `remind` arms here - allow the single-arm form until then.
+                #[allow(clippy::single_match)]
+                "team" => match team::subcommand(&command.data.options) {
+                    Some(("status", _)) => {
+                        team::handle_status(&ctx, &command, &self.db, &self.timezone).await
+                    }
+                    _ => {}
+                },
                 _ => {}
             },
             Interaction::Autocomplete(autocomplete) => match autocomplete.data.name.as_str() {
