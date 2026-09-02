@@ -3,9 +3,7 @@ use std::time::Duration;
 
 use chrono::{Datelike, NaiveTime, Weekday};
 use rusqlite::Connection;
-use serenity::all::{
-    ChannelId, ChannelType, CreateMessage, CreateThread, Error as SerenityError, Http, HttpError,
-};
+use serenity::all::{ChannelId, ChannelType, CreateMessage, CreateThread, Http};
 
 use crate::config::Config;
 use crate::{entries, followups, members, reminders};
@@ -18,31 +16,6 @@ fn is_due(now: NaiveTime, trigger: NaiveTime) -> bool {
 /// Pure weekday check - testable without a live clock or Discord types.
 fn is_weekend(day: Weekday) -> bool {
     matches!(day, Weekday::Sat | Weekday::Sun)
-}
-
-/// Discord's JSON error code for "Unknown Channel" - returned when a
-/// request targets a channel or thread that no longer exists (e.g.
-/// someone deleted today's standup thread mid-day).
-const UNKNOWN_CHANNEL_ERROR_CODE: isize = 10003;
-
-fn is_unknown_channel_code(code: isize) -> bool {
-    code == UNKNOWN_CHANNEL_ERROR_CODE
-}
-
-/// True when `err` is Discord reporting that the channel/thread a send
-/// targeted no longer exists, as opposed to a transient failure (rate
-/// limit, network blip, a permissions problem) that's worth retrying on
-/// the next tick. Not unit-tested like the pure helper above - building a
-/// real `serenity::Error` needs a `reqwest::Method`, and reqwest isn't (and
-/// shouldn't become) a direct dependency of this crate just for a test -
-/// same "can't exercise real Discord types without a live connection"
-/// limitation as the rest of this codebase's Discord-facing code.
-fn is_unknown_channel_error(err: &SerenityError) -> bool {
-    matches!(
-        err,
-        SerenityError::Http(HttpError::UnsuccessfulRequest(response))
-            if is_unknown_channel_code(response.error.code)
-    )
 }
 
 /// Runs forever, checking every `config.ticker_interval_seconds` whether
@@ -256,7 +229,7 @@ async fn maybe_fire_simple_reminder(
         .send_message(http, CreateMessage::new().content(message))
         .await
     {
-        if is_unknown_channel_error(&e) {
+        if super::is_unknown_channel_error(&e) {
             // The thread was deleted - marking sent anyway stops this from
             // retrying (and failing identically) every tick for the rest
             // of the day.
@@ -345,7 +318,7 @@ async fn maybe_sync_thread(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, date: 
             .send_message(http, CreateMessage::new().content(content))
             .await
         {
-            if is_unknown_channel_error(&e) {
+            if super::is_unknown_channel_error(&e) {
                 eprintln!(
                     "standup thread for {date} no longer exists (deleted?) - skipping sync for entry {}: {e}",
                     entry.id
@@ -473,7 +446,7 @@ async fn maybe_fire_followups(
                 .send_message(http, CreateMessage::new().content(content))
                 .await
             {
-                if is_unknown_channel_error(&e) {
+                if super::is_unknown_channel_error(&e) {
                     eprintln!(
                         "standup thread for {date} no longer exists (deleted?) - giving up on {kind} for the rest of today: {e}"
                     );

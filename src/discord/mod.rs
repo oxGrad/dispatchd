@@ -12,8 +12,8 @@ use rusqlite::Connection;
 use serenity::all::{
     ActionRowComponent, ChannelId, Client, CommandDataOption, CommandDataOptionValue,
     Context as SerenityContext, CreateCommand, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EventHandler, GatewayIntents, GuildId, Interaction,
-    ModalInteraction, Ready,
+    CreateInteractionResponseMessage, Error as SerenityError, EventHandler, GatewayIntents,
+    GuildId, HttpError, Interaction, ModalInteraction, Ready,
 };
 use serenity::async_trait;
 
@@ -103,6 +103,27 @@ impl EventHandler for Handler {
     }
 }
 
+/// Discord's JSON error code for "Unknown Channel" - returned when a
+/// request targets a channel or thread that no longer exists (e.g. a
+/// deleted standup thread).
+const UNKNOWN_CHANNEL_ERROR_CODE: isize = 10003;
+
+fn is_unknown_channel_code(code: isize) -> bool {
+    code == UNKNOWN_CHANNEL_ERROR_CODE
+}
+
+/// True when `err` is Discord reporting that the channel/thread a request
+/// targeted no longer exists, as opposed to a transient failure. Not
+/// unit-tested directly - building a real `serenity::Error` needs a
+/// `reqwest::Method`, which isn't a direct dependency of this crate.
+pub(crate) fn is_unknown_channel_error(err: &SerenityError) -> bool {
+    matches!(
+        err,
+        SerenityError::Http(HttpError::UnsuccessfulRequest(response))
+            if is_unknown_channel_code(response.error.code)
+    )
+}
+
 /// Extracts a text input's value from a submitted modal by its custom_id.
 pub(crate) fn modal_value(modal: &ModalInteraction, custom_id: &str) -> Option<String> {
     modal.data.components.iter().find_map(|row| {
@@ -163,4 +184,16 @@ pub async fn run(
 
     client.start().await.context("Discord client error")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_channel_code_matches_discords_10003() {
+        assert!(is_unknown_channel_code(UNKNOWN_CHANNEL_ERROR_CODE));
+        assert!(is_unknown_channel_code(10003));
+        assert!(!is_unknown_channel_code(10004));
+    }
 }
