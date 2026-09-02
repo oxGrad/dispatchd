@@ -17,6 +17,27 @@ two IDs and a token wired into its config. This walks through all of it.
 
 ## 2. Invite the bot to your server
 
+dispatchd is a server bot: it registers guild-scoped commands, posts to a
+standup channel, and creates threads there. It should be **Guild Install**
+only — **User Install** (where the app's commands travel with a user into
+DMs and other servers) would just produce a half-working bot with nowhere
+to post, so disable it.
+
+If your Developer Portal shows an **Installation** tab in the sidebar
+(newer portal):
+
+1. Open **Installation**.
+2. Under **Installation Contexts**, leave **Guild Install** checked and
+   uncheck **User Install**.
+3. Under **Default Install Settings → Guild Install**, set **Scopes** to
+   `bot` and `applications.commands`, and **Permissions** to at minimum:
+   `View Channel`, `Send Messages`, `Create Public Threads`,
+   `Send Messages in Threads`.
+4. Set **Install Link** to **Discord Provided Link**, copy it, open it in
+   a browser, and add the bot to your server.
+
+Older portal (no **Installation** tab) — use **OAuth2 → URL Generator**:
+
 1. In the sidebar, open **OAuth2 → URL Generator**.
 2. Under **Scopes**, check `bot` and `applications.commands`.
 3. Under **Bot Permissions**, check at minimum: `View Channel`,
@@ -31,9 +52,32 @@ two IDs and a token wired into its config. This walks through all of it.
 2. Right-click your server's icon → **Copy Server ID**. This is
    `discord_guild_id`.
 3. Right-click the channel you want the daily standup ritual to happen in
-   → **Copy Channel ID**. This is `discord_standup_channel_id` (not yet
-   used by anything — it's reserved for the daily-thread/reminder feature,
-   still to be built).
+   → **Copy Channel ID**. This is `discord_standup_channel_id` — the
+   channel the bot creates each day's standup thread in and posts the
+   9am/3pm/4pm reminders to. It must be a standard **text** channel;
+   forum, announcement, voice, and stage channels can't hold the public
+   threads dispatchd creates. Copy the ID of the channel itself, not the
+   category above it — a category or server ID here surfaces at runtime as
+   `failed to create standup thread: Unknown Channel`.
+
+### If the standup channel is private
+
+A private channel works, but it denies `View Channel` to `@everyone`, so:
+
+- **Add the bot to the channel** with `View Channel`, `Send Messages`,
+  `Create Public Threads`, and `Send Messages in Threads`. Without this
+  the bot gets `Unknown Channel` and no thread is ever created — the
+  server-wide invite permissions from step 2 don't override a private
+  channel's access list.
+- **Add every team member** in `members.toml` to the channel. The
+  `/todo` and `/progress` replies are ephemeral; the daily thread is the
+  only place the team sees each other's submissions, so anyone without
+  channel access is effectively cut out of the standup.
+
+The thread dispatchd creates is a "public thread" only in the Discord API
+sense (not a private thread) — its visibility still follows the parent
+channel, so in a private channel the thread stays private to that
+channel's members.
 
 ## 4. Configure dispatchd
 
