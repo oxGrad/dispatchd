@@ -116,7 +116,6 @@ pub fn all_member_ids(conn: &Connection) -> Result<Vec<String>> {
 
 /// Every member as `(discord_user_id, name)`, ordered by name. Backs the
 /// `/team remind` autocomplete.
-#[allow(dead_code)]
 pub fn roster(conn: &Connection) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare("SELECT discord_user_id, name FROM members ORDER BY name")?;
     let rows = stmt
@@ -126,7 +125,6 @@ pub fn roster(conn: &Connection) -> Result<Vec<(String, String)>> {
 }
 
 /// A member's display name, or `None` if `discord_user_id` isn't on the roster.
-#[allow(dead_code)]
 pub fn name_of(conn: &Connection, discord_user_id: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row(

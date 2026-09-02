@@ -3,13 +3,15 @@ use std::sync::{Arc, Mutex};
 use chrono_tz::Tz;
 use rusqlite::Connection;
 use serenity::all::{
-    ChannelId, CommandDataOption, CommandDataOptionValue, CommandInteraction, CommandOptionType,
-    Context as SerenityContext, CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage, Http,
-    Permissions,
+    AutocompleteChoice, ChannelId, CommandDataOption, CommandDataOptionValue, CommandInteraction,
+    CommandOptionType, Context as SerenityContext, CreateAutocompleteResponse, CreateCommand,
+    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, CreateMessage, Http, Permissions,
 };
 
 use crate::{entries, members, status};
+
+use super::get_option_string;
 
 pub fn command() -> CreateCommand {
     CreateCommand::new("team")
@@ -25,6 +27,28 @@ pub fn command() -> CreateCommand {
             "report",
             "Full detail: everyone's todos and progress for today",
         ))
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "remind",
+                "Remind a team member to submit a todo or progress update",
+            )
+            .add_sub_option(
+                CreateCommandOption::new(CommandOptionType::String, "member", "Who to remind")
+                    .required(true)
+                    .set_autocomplete(true),
+            )
+            .add_sub_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "kind",
+                    "What to remind them about",
+                )
+                .required(true)
+                .add_string_choice("Submit a todo", "todo")
+                .add_string_choice("Post a progress update", "progress"),
+            ),
+        )
 }
 
 /// Discord nests a subcommand's own options one level under an entry named
@@ -39,13 +63,11 @@ pub fn subcommand(options: &[CommandDataOption]) -> Option<(&str, &[CommandDataO
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // caller lands in Task 9 (/team remind handler)
 pub enum RemindKind {
     Todo,
     Progress,
 }
 
-#[allow(dead_code)] // caller lands in Task 9 (/team remind handler)
 impl RemindKind {
     pub fn parse(s: &str) -> Option<RemindKind> {
         match s {
@@ -68,7 +90,6 @@ impl RemindKind {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-#[allow(dead_code)] // caller lands in Task 9 (/team remind handler)
 pub enum SendOutcome {
     Sent,
     NoThread,
@@ -79,7 +100,6 @@ pub enum SendOutcome {
 /// Posts a manual reminder for `member_id` into today's standup thread.
 /// Independent of the ticker's automated follow-ups - never reads or
 /// writes `followups_sent`.
-#[allow(dead_code)] // caller lands in Task 9 (/team remind handler)
 pub async fn send_reminder(
     http: &Arc<Http>,
     db: &Arc<Mutex<Connection>>,
@@ -235,6 +255,111 @@ pub async fn handle_report(
         {
             eprintln!("failed to send /team report follow-up: {e}");
         }
+    }
+}
+
+pub async fn handle_autocomplete(
+    ctx: &SerenityContext,
+    autocomplete: &CommandInteraction,
+    db: &Arc<Mutex<Connection>>,
+) {
+    let partial = subcommand(&autocomplete.data.options)
+        .and_then(|(_, opts)| get_option_string(opts, "member"))
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let roster = {
+        let conn = db.lock().expect("db mutex poisoned");
+        members::roster(&conn)
+    };
+
+    let response = match roster {
+        Ok(rows) => {
+            let choices = rows
+                .into_iter()
+                .filter(|(_, name)| name.to_lowercase().contains(&partial))
+                .take(25)
+                .map(|(id, name)| AutocompleteChoice::new(name, id))
+                .collect();
+            CreateAutocompleteResponse::new().set_choices(choices)
+        }
+        Err(e) => {
+            eprintln!("failed to load roster for /team remind autocomplete: {e}");
+            CreateAutocompleteResponse::new()
+        }
+    };
+
+    if let Err(e) = autocomplete
+        .create_response(&ctx.http, CreateInteractionResponse::Autocomplete(response))
+        .await
+    {
+        eprintln!("failed to respond to /team remind autocomplete: {e}");
+    }
+}
+
+pub async fn handle_remind(
+    ctx: &SerenityContext,
+    command: &CommandInteraction,
+    options: &[CommandDataOption],
+    db: &Arc<Mutex<Connection>>,
+    timezone: &Tz,
+) {
+    let discord_user_id = command.user.id.to_string();
+    let member = get_option_string(options, "member");
+    let kind = get_option_string(options, "kind");
+
+    let reply_text = 'reply: {
+        let (member, kind) = match (member, kind) {
+            (Some(m), Some(k)) => (m, k),
+            _ => break 'reply "⚠️ Provide both a member and a kind.".to_string(),
+        };
+        let Some(kind) = RemindKind::parse(&kind) else {
+            break 'reply "⚠️ Unknown reminder kind.".to_string();
+        };
+
+        let name = {
+            let conn = db.lock().expect("db mutex poisoned");
+            match members::is_lead(&conn, &discord_user_id) {
+                Ok(false) => {
+                    break 'reply "⛔ This command is restricted to the tech lead.".to_string();
+                }
+                Ok(true) => {}
+                Err(e) => {
+                    eprintln!("failed to check is_lead: {e}");
+                    break 'reply "⚠️ Something went wrong checking permissions.".to_string();
+                }
+            }
+            match members::name_of(&conn, &member) {
+                Ok(Some(name)) => name,
+                Ok(None) => break 'reply "⚠️ That user isn't on the team roster.".to_string(),
+                Err(e) => {
+                    eprintln!("failed to look up member name: {e}");
+                    break 'reply "⚠️ Something went wrong looking up that member.".to_string();
+                }
+            }
+        };
+
+        match send_reminder(&ctx.http, db, timezone, &member, kind).await {
+            SendOutcome::Sent => format!("✅ Reminder sent to {name} in today's standup thread."),
+            SendOutcome::NoThread => {
+                "⚠️ Today's standup thread hasn't been created yet — try again once it's posted."
+                    .to_string()
+            }
+            SendOutcome::ThreadGone => {
+                "⚠️ Today's standup thread appears to have been deleted.".to_string()
+            }
+            SendOutcome::Failed => "⚠️ Something went wrong sending the reminder.".to_string(),
+        }
+    };
+
+    let reply = CreateInteractionResponseMessage::new()
+        .content(reply_text)
+        .ephemeral(true);
+    if let Err(e) = command
+        .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+        .await
+    {
+        eprintln!("failed to respond to /team remind: {e}");
     }
 }
 

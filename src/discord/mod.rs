@@ -78,6 +78,9 @@ impl EventHandler for Handler {
                     Some(("report", _)) => {
                         team::handle_report(&ctx, &command, &self.db, &self.timezone).await
                     }
+                    Some(("remind", opts)) => {
+                        team::handle_remind(&ctx, &command, opts, &self.db, &self.timezone).await
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -90,6 +93,7 @@ impl EventHandler for Handler {
                     progress::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone)
                         .await
                 }
+                "team" => team::handle_autocomplete(&ctx, &autocomplete, &self.db).await,
                 _ => {}
             },
             Interaction::Modal(modal) if modal.data.custom_id == todo::CREATE_MODAL_ID => {
