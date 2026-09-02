@@ -26,7 +26,7 @@ CREATE TABLE entries (
 -- so a bot restart never causes a double-post
 CREATE TABLE reminders_sent (
     date TEXT NOT NULL,
-    type TEXT NOT NULL,   -- 'todo_reminder' | 'update_reminder' | 'meeting_reminder' | 'thread_creation'
+    type TEXT NOT NULL,   -- 'todo_reminder' | 'update_reminder' | 'meeting_reminder' | 'meeting_skip' | 'thread_creation'
     PRIMARY KEY (date, type)
 );
 

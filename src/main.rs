@@ -170,9 +170,10 @@ async fn main() -> anyhow::Result<()> {
     println!("dispatchd effective schedule:");
     println!("  todo_time:                    {}", config.todo_time);
     println!("  update_time:                  {}", config.update_time);
+    println!("  meeting_time:                 {}", config.meeting_time);
     println!(
-        "  meeting_reminder_time:        {}",
-        config.meeting_reminder_time
+        "  meeting_reminder_lead_min:    {}",
+        config.meeting_reminder_lead_minutes
     );
     println!(
         "  todo_followup_delay_minutes:  {}",

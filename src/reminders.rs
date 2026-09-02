@@ -1,8 +1,9 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
-/// Whether a reminder of `kind` ("todo_reminder" | "update_reminder" |
-/// "meeting_reminder") already fired for `date`.
+/// Whether a `reminders_sent` marker of `kind` ("todo_reminder" |
+/// "update_reminder" | "meeting_reminder" | "meeting_skip" |
+/// "thread_creation") is already recorded for `date`.
 pub fn already_sent(conn: &Connection, date: &str, kind: &str) -> Result<bool> {
     Ok(conn
         .query_row(

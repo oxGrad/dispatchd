@@ -17,7 +17,8 @@ const DB_PATH_OVERRIDE_ENV: &str = "DISPATCHD_DB_PATH";
 const DEFAULT_THREAD_CREATION_TIME: &str = "08:30";
 const DEFAULT_TODO_TIME: &str = "09:00";
 const DEFAULT_UPDATE_TIME: &str = "15:00";
-const DEFAULT_MEETING_REMINDER_TIME: &str = "16:00";
+const DEFAULT_MEETING_TIME: &str = "16:00";
+const DEFAULT_MEETING_REMINDER_LEAD_MINUTES: u32 = 5;
 const DEFAULT_TODO_FOLLOWUP_DELAY_MINUTES: u32 = 30;
 const DEFAULT_UPDATE_FOLLOWUP_DELAY_MINUTES: u32 = 30;
 const DEFAULT_TICKER_INTERVAL_SECONDS: u64 = 60;
@@ -32,7 +33,10 @@ pub struct Config {
     pub thread_creation_time: NaiveTime,
     pub todo_time: NaiveTime,
     pub update_time: NaiveTime,
-    pub meeting_reminder_time: NaiveTime,
+    /// When the daily meeting actually starts.
+    pub meeting_time: NaiveTime,
+    /// How many minutes before `meeting_time` the pre-meeting reminder fires.
+    pub meeting_reminder_lead_minutes: u32,
     pub todo_followup_delay_minutes: u32,
     pub update_followup_delay_minutes: u32,
     pub ticker_interval_seconds: u64,
@@ -50,8 +54,8 @@ impl Default for Config {
                 .expect("default thread_creation_time is valid"),
             todo_time: parse_time(DEFAULT_TODO_TIME).expect("default todo_time is valid"),
             update_time: parse_time(DEFAULT_UPDATE_TIME).expect("default update_time is valid"),
-            meeting_reminder_time: parse_time(DEFAULT_MEETING_REMINDER_TIME)
-                .expect("default meeting_reminder_time is valid"),
+            meeting_time: parse_time(DEFAULT_MEETING_TIME).expect("default meeting_time is valid"),
+            meeting_reminder_lead_minutes: DEFAULT_MEETING_REMINDER_LEAD_MINUTES,
             todo_followup_delay_minutes: DEFAULT_TODO_FOLLOWUP_DELAY_MINUTES,
             update_followup_delay_minutes: DEFAULT_UPDATE_FOLLOWUP_DELAY_MINUTES,
             ticker_interval_seconds: DEFAULT_TICKER_INTERVAL_SECONDS,
@@ -83,7 +87,8 @@ struct RawSchedule {
     thread_creation_time: Option<String>,
     todo_time: Option<String>,
     update_time: Option<String>,
-    meeting_reminder_time: Option<String>,
+    meeting_time: Option<String>,
+    meeting_reminder_lead_minutes: Option<u32>,
     ticker_interval_seconds: Option<u64>,
     run_on_weekends: Option<bool>,
 }
@@ -133,10 +138,11 @@ impl Config {
             }
             None => defaults.update_time,
         };
-        let meeting_reminder_time = match raw.schedule.meeting_reminder_time {
-            Some(s) => parse_time(&s)
-                .with_context(|| format!("invalid schedule.meeting_reminder_time: {s:?}"))?,
-            None => defaults.meeting_reminder_time,
+        let meeting_time = match raw.schedule.meeting_time {
+            Some(s) => {
+                parse_time(&s).with_context(|| format!("invalid schedule.meeting_time: {s:?}"))?
+            }
+            None => defaults.meeting_time,
         };
         let timezone = match raw.timezone {
             Some(s) => parse_timezone(&s).with_context(|| format!("invalid timezone: {s:?}"))?,
@@ -151,7 +157,11 @@ impl Config {
             thread_creation_time,
             todo_time,
             update_time,
-            meeting_reminder_time,
+            meeting_time,
+            meeting_reminder_lead_minutes: raw
+                .schedule
+                .meeting_reminder_lead_minutes
+                .unwrap_or(defaults.meeting_reminder_lead_minutes),
             todo_followup_delay_minutes: raw
                 .followup
                 .todo_delay_minutes
@@ -265,7 +275,11 @@ mod tests {
         );
         assert_eq!(config.thread_creation_time, defaults.thread_creation_time);
         assert_eq!(config.todo_time, defaults.todo_time);
-        assert_eq!(config.meeting_reminder_time, defaults.meeting_reminder_time);
+        assert_eq!(config.meeting_time, defaults.meeting_time);
+        assert_eq!(
+            config.meeting_reminder_lead_minutes,
+            defaults.meeting_reminder_lead_minutes
+        );
         assert_eq!(
             config.todo_followup_delay_minutes,
             defaults.todo_followup_delay_minutes
@@ -324,7 +338,8 @@ mod tests {
             thread_creation_time = "08:00"
             todo_time = "08:15"
             update_time = "14:45"
-            meeting_reminder_time = "17:00"
+            meeting_time = "17:00"
+            meeting_reminder_lead_minutes = 10
             ticker_interval_seconds = 120
             run_on_weekends = true
 
@@ -346,9 +361,10 @@ mod tests {
             NaiveTime::from_hms_opt(14, 45, 0).unwrap()
         );
         assert_eq!(
-            config.meeting_reminder_time,
+            config.meeting_time,
             NaiveTime::from_hms_opt(17, 0, 0).unwrap()
         );
+        assert_eq!(config.meeting_reminder_lead_minutes, 10);
         assert_eq!(config.todo_followup_delay_minutes, 45);
         assert_eq!(config.update_followup_delay_minutes, 20);
         assert_eq!(config.ticker_interval_seconds, 120);
@@ -367,6 +383,18 @@ mod tests {
         let config = Config::from_raw(RawConfig::default()).unwrap();
         assert_eq!(config.discord_guild_id, None);
         assert_eq!(config.discord_standup_channel_id, None);
+    }
+
+    #[test]
+    fn meeting_reminder_lead_defaults_to_five_and_is_overridable() {
+        assert_eq!(Config::default().meeting_reminder_lead_minutes, 5);
+
+        let (_dir, path) = write_config("[schedule]\nmeeting_reminder_lead_minutes = 15\n");
+        let raw = read_raw_config(&path).unwrap();
+        let config = Config::from_raw(raw).unwrap();
+
+        assert_eq!(config.meeting_reminder_lead_minutes, 15);
+        assert_eq!(config.meeting_time, Config::default().meeting_time);
     }
 
     #[test]

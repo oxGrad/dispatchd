@@ -16,9 +16,11 @@ posts into a "Standup: YYYY-MM-DD" thread in the team's standup channel:
    prompted to submit their todo(s) for the day.
 3. **Afternoon** (15:00 by default) - a reminder to post progress against
    what you said you'd do.
-4. **Meeting reminder** (16:00 by default) - a plain heads-up about the
-   optional daily meeting; whether it actually happens is the tech lead's
-   call.
+4. **Pre-meeting ping** (5 minutes before the meeting by default, so 15:55
+   for a 16:00 meeting) - `@mentions` everyone that the daily meeting is
+   about to start. The meeting happens by default; the tech lead can cancel
+   it for the day with `/team skip-meeting` (see below), which posts a "no
+   meeting today" note and suppresses this ping if it hasn't fired yet.
 
 If you miss a step, dispatchd nags you with an `@mention` in the thread a
 while after each of the two prompts above (default 30 minutes) - once per
@@ -154,6 +156,14 @@ submit a `/todo` or a `/progress` update. It's separate from the
 automated follow-up nags - sending one by hand doesn't stop the scheduled
 one, and vice versa. If today's thread hasn't been created yet, the bot
 tells you so and posts nothing.
+
+## `/team skip-meeting` - tech lead only
+
+Cancels today's meeting. Posts a fixed note into the standup thread -
+*"No meeting today. I've reviewed everyone's progress and I'm all caught
+up..."* - with no `@mentions`, and marks the automated pre-meeting ping as
+sent so it won't also fire. Running it a second time the same day just
+tells you it's already skipped. Needs today's thread to exist.
 
 ## `/help` and `/ping`
 

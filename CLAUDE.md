@@ -260,12 +260,20 @@ src/
                     status::split_into_messages); `remind` - manual
                     tech-lead nudge that @-mentions one member in today's
                     standup thread to submit a /todo or /progress,
-                    independent of the automated followup nags. The parent
-                    command is MANAGE_GUILD-gated and every subcommand
-                    also does a bot-side members::is_lead check. Shares
-                    is_unknown_channel_error with ticker.rs (via mod.rs)
+                    independent of the automated followup nags; and
+                    `skip-meeting` - cancels today's meeting (fixed
+                    unmentioned note into the thread + marks meeting_skip
+                    and meeting_reminder sent). The parent command is
+                    MANAGE_GUILD-gated and every subcommand also does a
+                    bot-side members::is_lead check. `send_reminder` and
+                    `skip-meeting` share `post_to_standup_thread`, and the
+                    module shares is_unknown_channel_error with ticker.rs
+                    (via mod.rs)
     ticker.rs      creates today's thread early (thread_creation_time,
-                    default 08:30) ahead of the 9am/3pm/4pm reminders, then
+                    default 08:30) ahead of the todo/progress reminders
+                    and the pre-meeting ping (fires at meeting_time minus
+                    meeting_reminder_lead_minutes, @mentions everyone),
+                    then
                     every tick posts any new /todo|/progress submission
                     into it (entries::entries_since + a per-thread sync
                     cursor on daily_threads) since those commands' own
