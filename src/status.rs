@@ -63,6 +63,107 @@ pub fn team_status(conn: &Connection, date: &str) -> Result<Vec<MemberStatus>> {
     Ok(result)
 }
 
+/// Full per-member detail for `/team report`: every todo with its notes,
+/// SOW ref and matching progress report(s), plus any unplanned progress.
+#[derive(Debug, PartialEq, Eq)]
+pub struct UpdateDetail {
+    pub task: String,
+    pub status: String,
+    pub progress: String,
+    pub blocker: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct TodoDetail {
+    pub task: String,
+    pub notes: Option<String>,
+    pub sow_ref: Option<String>,
+    pub updates: Vec<UpdateDetail>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct MemberReport {
+    pub name: String,
+    pub todos: Vec<TodoDetail>,
+    pub ad_hoc: Vec<UpdateDetail>,
+}
+
+/// One `MemberReport` per roster row, ordered by name. Per-member queries
+/// rather than one big JOIN - same rationale as `team_status`: a 6-person
+/// team's worth of rows, easier to read and verify.
+#[allow(dead_code)]
+pub fn team_report(conn: &Connection, date: &str) -> Result<Vec<MemberReport>> {
+    let mut members_stmt =
+        conn.prepare("SELECT discord_user_id, name FROM members ORDER BY name")?;
+    let members = members_stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut reports = Vec::with_capacity(members.len());
+    for (discord_user_id, name) in members {
+        let mut todo_stmt = conn.prepare(
+            "SELECT id, task, notes, sow_ref FROM entries
+             WHERE type = 'todo' AND date = ?1 AND discord_user_id = ?2
+             ORDER BY id",
+        )?;
+        let todo_rows = todo_stmt
+            .query_map(params![date, discord_user_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut todos = Vec::with_capacity(todo_rows.len());
+        for (todo_id, task, notes, sow_ref) in todo_rows {
+            let mut upd_stmt = conn.prepare(
+                "SELECT task, status, progress, blocker FROM entries
+                 WHERE type = 'update' AND todo_id = ?1
+                 ORDER BY id",
+            )?;
+            let updates = upd_stmt
+                .query_map([todo_id], row_to_update_detail)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            todos.push(TodoDetail {
+                task,
+                notes,
+                sow_ref,
+                updates,
+            });
+        }
+
+        let mut adhoc_stmt = conn.prepare(
+            "SELECT task, status, progress, blocker FROM entries
+             WHERE type = 'update' AND date = ?1 AND discord_user_id = ?2 AND todo_id IS NULL
+             ORDER BY id",
+        )?;
+        let ad_hoc = adhoc_stmt
+            .query_map(params![date, discord_user_id], row_to_update_detail)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        reports.push(MemberReport {
+            name,
+            todos,
+            ad_hoc,
+        });
+    }
+    Ok(reports)
+}
+
+fn row_to_update_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateDetail> {
+    Ok(UpdateDetail {
+        task: row.get(0)?,
+        status: row.get(1)?,
+        progress: row.get(2)?,
+        blocker: row.get(3)?,
+    })
+}
+
 /// Formats one `/team-status` line, e.g. `✅ Alice — 3/3 updated`, with
 /// any SOW refs tagged on today's todos appended in parens, e.g.
 /// `✅ Alice — 3/3 updated (M1D1, M1D2, M2)`. A member with no todos posted
@@ -256,6 +357,124 @@ mod tests {
         let statuses = team_status(&conn, DATE).unwrap();
         assert!(statuses[0].sow_refs.is_empty());
         assert_eq!(format_status_line(&statuses[0]), "❌ Ida — 0/1 updated");
+    }
+
+    #[test]
+    fn team_report_nests_updates_under_their_todo_in_id_order() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice", "lead");
+        let todo = entries::insert_todo(
+            &conn,
+            "1",
+            DATE,
+            "Refactor auth",
+            Some("split it"),
+            Some("M1D2"),
+        )
+        .unwrap();
+        entries::insert_update(
+            &conn,
+            "1",
+            DATE,
+            "Refactor auth",
+            Some(todo),
+            "in_progress",
+            "started",
+            None,
+        )
+        .unwrap();
+        entries::insert_update(
+            &conn,
+            "1",
+            DATE,
+            "Refactor auth",
+            Some(todo),
+            "done",
+            "finished",
+            None,
+        )
+        .unwrap();
+
+        let reports = team_report(&conn, DATE).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].name, "Alice");
+        assert_eq!(reports[0].todos.len(), 1);
+        let t = &reports[0].todos[0];
+        assert_eq!(t.task, "Refactor auth");
+        assert_eq!(t.notes.as_deref(), Some("split it"));
+        assert_eq!(t.sow_ref.as_deref(), Some("M1D2"));
+        assert_eq!(
+            t.updates,
+            vec![
+                UpdateDetail {
+                    task: "Refactor auth".into(),
+                    status: "in_progress".into(),
+                    progress: "started".into(),
+                    blocker: None
+                },
+                UpdateDetail {
+                    task: "Refactor auth".into(),
+                    status: "done".into(),
+                    progress: "finished".into(),
+                    blocker: None
+                },
+            ]
+        );
+        assert!(reports[0].ad_hoc.is_empty());
+    }
+
+    #[test]
+    fn team_report_puts_unmatched_updates_in_ad_hoc() {
+        let conn = open_test_db();
+        seed_member(&conn, "2", "Budi", "designer");
+        entries::insert_update(
+            &conn,
+            "2",
+            DATE,
+            "Hotfix prod",
+            None,
+            "done",
+            "added an index",
+            Some("was waiting on DBA"),
+        )
+        .unwrap();
+
+        let reports = team_report(&conn, DATE).unwrap();
+        assert!(reports[0].todos.is_empty());
+        assert_eq!(
+            reports[0].ad_hoc,
+            vec![UpdateDetail {
+                task: "Hotfix prod".into(),
+                status: "done".into(),
+                progress: "added an index".into(),
+                blocker: Some("was waiting on DBA".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn team_report_includes_members_with_nothing_ordered_by_name() {
+        let conn = open_test_db();
+        seed_member(&conn, "9", "Zoya", "junior");
+        seed_member(&conn, "1", "Alice", "lead");
+
+        let reports = team_report(&conn, DATE).unwrap();
+        let names: Vec<&str> = reports.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["Alice", "Zoya"]);
+        assert!(reports[0].todos.is_empty() && reports[0].ad_hoc.is_empty());
+    }
+
+    #[test]
+    fn team_report_todo_with_no_update_has_empty_updates() {
+        let conn = open_test_db();
+        seed_member(&conn, "3", "Citra", "senior");
+        entries::insert_todo(&conn, "3", DATE, "Design audit", None, None).unwrap();
+
+        let reports = team_report(&conn, DATE).unwrap();
+        assert_eq!(reports[0].todos.len(), 1);
+        assert!(reports[0].todos[0].updates.is_empty());
+        assert!(reports[0].todos[0].notes.is_none());
+        assert!(reports[0].todos[0].sow_ref.is_none());
     }
 
     #[test]
