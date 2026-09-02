@@ -92,7 +92,7 @@ pub fn seed(conn: &Connection) -> Result<usize> {
 }
 
 /// `false` for an unknown `discord_user_id`, not an error - the bot-side
-/// source-of-truth check for `/team-status`.
+/// source-of-truth check for `/team status`.
 pub fn is_lead(conn: &Connection, discord_user_id: &str) -> Result<bool> {
     Ok(conn
         .query_row(
@@ -112,6 +112,27 @@ pub fn all_member_ids(conn: &Connection) -> Result<Vec<String>> {
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(ids)
+}
+
+/// Every member as `(discord_user_id, name)`, ordered by name. Backs the
+/// `/team remind` autocomplete.
+pub fn roster(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT discord_user_id, name FROM members ORDER BY name")?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// A member's display name, or `None` if `discord_user_id` isn't on the roster.
+pub fn name_of(conn: &Connection, discord_user_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT name FROM members WHERE discord_user_id = ?1",
+            [discord_user_id],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 #[cfg(test)]
@@ -145,6 +166,20 @@ mod tests {
     fn row_count(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM members", [], |row| row.get(0))
             .unwrap()
+    }
+
+    fn open_test_db() -> Connection {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.keep().join("d.sqlite3");
+        crate::db::open(&path).unwrap()
+    }
+
+    fn seed_member(conn: &Connection, id: &str, name: &str) {
+        conn.execute(
+            "INSERT INTO members (discord_user_id, name, role, is_lead) VALUES (?1, ?2, 'senior', 0)",
+            rusqlite::params![id, name],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -297,5 +332,32 @@ mod tests {
         let mut ids = all_member_ids(&conn).unwrap();
         ids.sort();
         assert_eq!(ids, vec!["1".to_string(), "2".to_string()]);
+    }
+
+    #[test]
+    fn roster_returns_every_member_ordered_by_name() {
+        let conn = open_test_db();
+        seed_member(&conn, "2", "Budi");
+        seed_member(&conn, "1", "Alice");
+        seed_member(&conn, "3", "Citra");
+
+        let roster = roster(&conn).unwrap();
+        assert_eq!(
+            roster,
+            vec![
+                ("1".to_string(), "Alice".to_string()),
+                ("2".to_string(), "Budi".to_string()),
+                ("3".to_string(), "Citra".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn name_of_finds_a_seeded_member_and_misses_an_unknown_id() {
+        let conn = open_test_db();
+        seed_member(&conn, "7", "Gita");
+
+        assert_eq!(name_of(&conn, "7").unwrap().as_deref(), Some("Gita"));
+        assert_eq!(name_of(&conn, "999").unwrap(), None);
     }
 }

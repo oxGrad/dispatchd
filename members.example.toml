@@ -9,7 +9,7 @@
 # restarting again later updates existing rows in place (matched by
 # discord_user_id), it won't create duplicates.
 #
-# name is just a display label used in bot output (e.g. /team-status lines) -
+# name is just a display label used in bot output (e.g. /team status lines) -
 # it doesn't need to match the person's actual Discord username.
 # role must be one of: lead | designer | senior | medior | junior
 

@@ -112,7 +112,7 @@ Example - unplanned work, nothing on your todo list matched:
   → ✅ Progress saved: Fixed a prod outage — Blocked
 ```
 
-## `/team-status` - tech lead only
+## `/team status` - tech lead only
 
 Shows one line per team member: how many of today's todos have a matching
 progress report, e.g. `✅ Alice — 3/3 updated`, `⚠️ Budi — 1/2 updated`,
@@ -122,6 +122,22 @@ updated (M1D1, M1D2, M2)` - handy for the tech lead to see which
 milestones/deliverables got touched today without opening `/todo list`
 for each person. Everyone else gets an "restricted to the tech lead"
 reply if they try it - it's not meant as a general team overview.
+
+## `/team report` - tech lead only
+
+The full picture in one message: every member's todos for today, each with
+its notes, SOW ref, and the progress report(s) filed against it, plus any
+unplanned work. Long reports are split across follow-up messages (Discord
+caps a message at 2000 characters). Ephemeral - only you see it.
+
+## `/team remind` - tech lead only
+
+`/team remind member:<name> kind:<todo|progress>` posts a reminder that
+mentions the chosen member in today's standup thread, asking them to
+submit a `/todo` or a `/progress` update. It's separate from the
+automated follow-up nags - sending one by hand doesn't stop the scheduled
+one, and vice versa. If today's thread hasn't been created yet, the bot
+tells you so and posts nothing.
 
 ## `/help` and `/ping`
 

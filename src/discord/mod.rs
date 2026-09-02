@@ -1,6 +1,6 @@
 mod help;
 mod progress;
-mod team_status;
+mod team;
 mod ticker;
 mod todo;
 
@@ -12,8 +12,8 @@ use rusqlite::Connection;
 use serenity::all::{
     ActionRowComponent, ChannelId, Client, CommandDataOption, CommandDataOptionValue,
     Context as SerenityContext, CreateCommand, CreateInteractionResponse,
-    CreateInteractionResponseMessage, EventHandler, GatewayIntents, GuildId, Interaction,
-    ModalInteraction, Ready,
+    CreateInteractionResponseMessage, Error as SerenityError, EventHandler, GatewayIntents,
+    GuildId, HttpError, Interaction, ModalInteraction, Ready,
 };
 use serenity::async_trait;
 
@@ -34,7 +34,7 @@ impl EventHandler for Handler {
             help::command(),
             todo::command(),
             progress::command(),
-            team_status::command(),
+            team::command(),
         ];
         if let Err(e) = self.guild_id.set_commands(&ctx.http, commands).await {
             eprintln!("failed to register guild commands: {e}");
@@ -70,9 +70,19 @@ impl EventHandler for Handler {
                     _ => {}
                 },
                 "progress" => progress::handle_command(&ctx, &command).await,
-                "team-status" => {
-                    team_status::handle_command(&ctx, &command, &self.db, &self.timezone).await
-                }
+                // Three subcommands, so `match` rather than `if let`.
+                "team" => match team::subcommand(&command.data.options) {
+                    Some(("status", _)) => {
+                        team::handle_status(&ctx, &command, &self.db, &self.timezone).await
+                    }
+                    Some(("report", _)) => {
+                        team::handle_report(&ctx, &command, &self.db, &self.timezone).await
+                    }
+                    Some(("remind", opts)) => {
+                        team::handle_remind(&ctx, &command, opts, &self.db, &self.timezone).await
+                    }
+                    _ => {}
+                },
                 _ => {}
             },
             Interaction::Autocomplete(autocomplete) => match autocomplete.data.name.as_str() {
@@ -83,6 +93,7 @@ impl EventHandler for Handler {
                     progress::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone)
                         .await
                 }
+                "team" => team::handle_autocomplete(&ctx, &autocomplete, &self.db).await,
                 _ => {}
             },
             Interaction::Modal(modal) if modal.data.custom_id == todo::CREATE_MODAL_ID => {
@@ -101,6 +112,27 @@ impl EventHandler for Handler {
             _ => {}
         }
     }
+}
+
+/// Discord's JSON error code for "Unknown Channel" - returned when a
+/// request targets a channel or thread that no longer exists (e.g. a
+/// deleted standup thread).
+const UNKNOWN_CHANNEL_ERROR_CODE: isize = 10003;
+
+fn is_unknown_channel_code(code: isize) -> bool {
+    code == UNKNOWN_CHANNEL_ERROR_CODE
+}
+
+/// True when `err` is Discord reporting that the channel/thread a request
+/// targeted no longer exists, as opposed to a transient failure. Not
+/// unit-tested directly - building a real `serenity::Error` needs a
+/// `reqwest::Method`, which isn't a direct dependency of this crate.
+pub(crate) fn is_unknown_channel_error(err: &SerenityError) -> bool {
+    matches!(
+        err,
+        SerenityError::Http(HttpError::UnsuccessfulRequest(response))
+            if is_unknown_channel_code(response.error.code)
+    )
 }
 
 /// Extracts a text input's value from a submitted modal by its custom_id.
@@ -163,4 +195,16 @@ pub async fn run(
 
     client.start().await.context("Discord client error")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_channel_code_matches_discords_10003() {
+        assert!(is_unknown_channel_code(UNKNOWN_CHANNEL_ERROR_CODE));
+        assert!(is_unknown_channel_code(10003));
+        assert!(!is_unknown_channel_code(10004));
+    }
 }
