@@ -12,10 +12,8 @@ holding three tech-lead-only subcommands:
 - `/team report` — full detail: every member's todos for today, each with its
   notes, SOW ref, and matching progress report(s), plus any unplanned progress.
 - `/team remind` — the tech lead sends a manual reminder (to submit a todo, or
-  to post a progress update) to one team member, posted into today's standup
-  thread. Works two ways: with slash-command arguments, or — when invoked with
-  no arguments — via an interactive ephemeral picker (member select + kind
-  select + Send button).
+  to post a progress update) to one team member via `member` + `kind`
+  arguments; the reminder is posted into today's standup thread.
 
 `/team-status` is removed. No database schema change.
 
@@ -40,7 +38,7 @@ holding three tech-lead-only subcommands:
 - `src/discord/mod.rs` — registers the command in the `ready` handler's
   `commands` vec; dispatches `"team-status"` in the `Interaction::Command` arm.
   Handles `Interaction::Command`, `Interaction::Autocomplete`, and
-  `Interaction::Modal` today — **not** `Interaction::Component`.
+  `Interaction::Modal` today.
 - `src/discord/todo.rs` — the existing precedent for a multi-subcommand command:
   `subcommand()` helper unwrapping `CommandDataOptionValue::SubCommand`, one
   `handle_*` per subcommand, autocomplete handler, modal custom_id encoding
@@ -82,23 +80,18 @@ holding three tech-lead-only subcommands:
               "Remind a team member to submit a todo or progress update")
           .add_sub_option(
               CreateCommandOption::new(String, "member", "Who to remind")
-                  .required(false).set_autocomplete(true))
+                  .required(true).set_autocomplete(true))
           .add_sub_option(
               CreateCommandOption::new(String, "kind", "What to remind them about")
-                  .required(false)
+                  .required(true)
                   .add_string_choice("Submit a todo", "todo")
                   .add_string_choice("Post a progress update", "progress")),
       )
   ```
 
-  Note: `member` and `kind` are **optional**. This is deliberate — it is what
-  makes Option B reachable. The handler branches on how many are supplied:
-
-  | `member` | `kind` | behaviour |
-  |----------|--------|-----------|
-  | set | set | Option A: send immediately |
-  | unset | unset | Option B: open the interactive picker |
-  | exactly one set | — | ephemeral `⚠️ Provide both member and kind, or neither to use the picker.` |
+  Both `member` and `kind` are **required** — Discord's client won't submit the
+  subcommand until they're filled, so the handler can assume both are present
+  (with a defensive fallback if not).
 
 - `team::subcommand(options) -> Option<(&str, &[CommandDataOption])>` — copy of
   `todo::subcommand`.
@@ -118,17 +111,9 @@ holding three tech-lead-only subcommands:
   ```
 
 - `Interaction::Autocomplete` arm: add `"team" => team::handle_autocomplete(&ctx, &autocomplete, &self.db).await`.
-- **New** arm for `Interaction::Component`:
 
-  ```rust
-  Interaction::Component(component)
-      if component.data.custom_id.starts_with(team::REMIND_COMPONENT_PREFIX) =>
-  {
-      team::handle_remind_component(&ctx, &component, &self.db, &self.timezone).await;
-  }
-  ```
-
-  Placed alongside the existing `Interaction::Modal(..) if ..` guarded arms.
+No `Interaction::Component` handling is added — `/team remind` is
+arguments-only.
 
 ### 3. `/team status`
 
@@ -225,7 +210,7 @@ pub fn split_into_messages(full: &str, limit: usize) -> Vec<String>;
   - Remaining chunks → `command.create_followup_message(.. .ephemeral(true))` in
     order. A follow-up send error is logged and does not abort the rest.
 
-### 5. `/team remind` — Option A (arguments)
+### 5. `/team remind`
 
 #### 5a. Autocomplete — `team::handle_autocomplete`
 
@@ -240,88 +225,19 @@ pub fn split_into_messages(full: &str, limit: usize) -> Vec<String>;
 
 - `is_lead` gate.
 - Read `member` (id string) and `kind` from `opts` via `get_option_string`.
-  - If **both** absent → Option B trigger: call
-    `team::open_remind_picker(&ctx, &command, &self.db).await` and return.
-  - If **exactly one** absent → `⚠️ Provide both member and kind, or neither to
-    use the picker.` ephemeral.
+  Both are `required`, so either missing → `⚠️ Provide both a member and a
+  kind.` ephemeral (defensive; not reachable from a normal client).
 - `RemindKind::parse(kind)` — unknown → `⚠️ Unknown reminder kind.` ephemeral.
 - Validate `member` id is on the roster (`members::name_of(conn, id)` returns
   `Some`). Not on roster → `⚠️ That user isn't on the team roster.` ephemeral.
-- Call the shared send path (§7). Reply ephemerally with the outcome:
+- Call the send path (§6). Reply ephemerally with the outcome:
   - `Sent` → `✅ Reminder sent to {name} in today's standup thread.`
   - `NoThread` → `⚠️ Today's standup thread hasn't been created yet — try again
     after it's posted.`
   - `ThreadGone` → `⚠️ Today's standup thread appears to have been deleted.`
   - `Failed` → `⚠️ Something went wrong sending the reminder.`
 
-### 6. `/team remind` — Option B (interactive picker)
-
-#### 6a. Constants (`team.rs`)
-
-```rust
-pub const REMIND_COMPONENT_PREFIX: &str = "team_remind:";
-const REMIND_MEMBER_SELECT: &str = "team_remind:member";
-const REMIND_KIND_SELECT:   &str = "team_remind:kind";
-const REMIND_SEND_PREFIX:   &str = "team_remind:send:";   // + "{member_id}:{kind}"
-```
-
-#### 6b. `team::open_remind_picker`
-
-Responds to the command with an **ephemeral** message:
-
-- content: `Pick who to remind and what for, then hit **Send reminder**.`
-- Row 1: `CreateSelectMenu::new(REMIND_MEMBER_SELECT, StringSelect)` with one
-  `CreateSelectMenuOption::new(name, id)` per roster member, placeholder
-  `"Team member"`.
-- Row 2: `CreateSelectMenu::new(REMIND_KIND_SELECT, StringSelect)` with options
-  `("Submit a todo", "todo")`, `("Post a progress update", "progress")`,
-  placeholder `"Reminder type"`.
-- Row 3: `CreateButton::new(build_send_custom_id(None, None))` primary, label
-  `"Send reminder"`.
-
-Empty roster → ephemeral `No team members configured yet - see members.toml.`
-instead (a string select must have ≥1 option).
-
-#### 6c. Stateless selection carrying
-
-```rust
-fn build_send_custom_id(member: Option<&str>, kind: Option<RemindKind>) -> String;
-// "team_remind:send:{member_or_empty}:{kind_str_or_empty}"
-
-fn parse_send_custom_id(id: &str) -> (Option<String>, Option<RemindKind>);
-```
-
-The Send button's custom_id is the single source of truth for the current
-selection. Max length ≈ `16 + 20 + 1 + 8` ≈ 45 chars, well under Discord's 100.
-Both helpers are pure and unit-tested (round-trip, empty halves, malformed).
-
-#### 6d. `team::handle_remind_component`
-
-Dispatch on `component.data.custom_id`:
-
-- **`REMIND_MEMBER_SELECT`**: `picked = component.data` selected value (first of
-  `ComponentInteractionDataKind::StringSelect { values }`). Read the current
-  `kind` by finding the Send button in `component.message.components` and
-  `parse_send_custom_id`ing it. Re-render all three rows (member option for
-  `picked` marked `.default_selection(true)`, kind option preserved) with the
-  Send button custom_id = `build_send_custom_id(Some(picked), kind)`. Respond
-  `CreateInteractionResponse::UpdateMessage`.
-- **`REMIND_KIND_SELECT`**: symmetric.
-- **`REMIND_SEND_PREFIX…`**: `parse_send_custom_id`.
-  - Either half `None` → `UpdateMessage` re-rendering the picker with an extra
-    line `⚠️ Pick both a member and a reminder type first.`
-  - Both present → re-check `is_lead` on `component.user.id` (defensive; the
-    ephemeral message is only visible to the invoker but the check is cheap).
-    Non-lead → `UpdateMessage` with `⛔ Restricted to the tech lead.` and no
-    components. Lead → run the shared send path (§7), then `UpdateMessage`
-    replacing the message with the outcome text (same wording as §5b) and
-    **no components**.
-
-`component.message.components` is read to recover the untouched select's value.
-If for any reason the button can't be found / parsed, treat both halves as
-`None` (falls into the "pick both first" path — safe).
-
-### 7. Shared send path — `team.rs`
+### 6. Send path — `team.rs`
 
 ```rust
 enum RemindKind { Todo, Progress }
@@ -365,18 +281,18 @@ async fn send_reminder(
 - `Todo` → `👋 <@{user_id}> — reminder from the tech lead: please submit your \`/todo\` for today.`
 - `Progress` → `👋 <@{user_id}> — reminder from the tech lead: please post a \`/progress\` update for today's todo(s).`
 
-### 8. `src/members.rs` additions
+### 7. `src/members.rs` additions
 
 ```rust
 /// Every member as (discord_user_id, name), ordered by name. For the
-/// `/team remind` autocomplete and picker.
+/// `/team remind` autocomplete.
 pub fn roster(conn: &Connection) -> Result<Vec<(String, String)>>;
 
 /// A member's display name, or None if the id isn't on the roster.
 pub fn name_of(conn: &Connection, discord_user_id: &str) -> Result<Option<String>>;
 ```
 
-### 9. Help + docs
+### 8. Help + docs
 
 - `src/discord/help.rs`: replace the `/team-status` line with
   `\`/team status\` - (tech lead) one line per member: who's updated today`,
@@ -401,12 +317,9 @@ pub fn name_of(conn: &Connection, discord_user_id: &str) -> Result<Option<String
     ~148) → `/team status` (and note `/team report`, `/team remind`).
   - Project-layout block: `status.rs` comment (add `team_report` / report
     formatting + chunking), `team_status.rs` entry → `team.rs` describing the
-    three subcommands and the component-interaction picker for `remind`.
-  - Note in the "live Discord testing" section that `/team remind`'s Option B
-    adds the first `Interaction::Component` path, still un-exercisable without a
-    live gateway.
+    three subcommands.
 
-### 10. Not in scope
+### 9. Not in scope
 
 - No DB schema migration (`entries` already has every needed column).
 - No change to `/todo`, `/progress`, `/help` behaviour, or the ticker's
@@ -414,8 +327,11 @@ pub fn name_of(conn: &Connection, discord_user_id: &str) -> Result<Option<String
 - `/team remind` targets exactly one member per invocation — no "remind everyone
   missing X" bulk path (deferred; could be added later as a `kind`-only
   invocation that fans out over `followups::members_missing_*`).
-- Multi-select in the Option B member picker — single-select only, for parity
-  with Option A.
+- **No no-args interactive picker.** A `/team remind` with select-menu dropdowns
+  was considered and dropped: modals can't hold dropdowns, and a select-menu
+  message would need an `Interaction::Component` state machine the bot otherwise
+  doesn't have. `member` autocomplete + the `kind` choice dropdown already give
+  a pick-from-a-list UX inside the command picker.
 - No persistence / audit log of manually-sent reminders.
 
 ## Testing
@@ -440,9 +356,6 @@ codebase — note this explicitly in the relevant modules).
 - **`src/discord/team.rs`**
   - `RemindKind::parse` round-trips `"todo"` / `"progress"`, `None` for junk.
   - `reminder_text` contains `<@{id}>` and the right command name.
-  - `build_send_custom_id` / `parse_send_custom_id`: `(Some, Some)`,
-    `(Some, None)`, `(None, Some)`, `(None, None)` round-trip; malformed input
-    (`"team_remind:send:"`, extra colons) → `(None, None)` or best-effort, asserted.
   - `is_unknown_channel_code` test relocated here or to `mod.rs` with the fn.
 - **`src/members.rs`**
   - `roster`: returns `(id, name)` for every seeded member, ordered by name.
@@ -466,10 +379,9 @@ None. All decisions resolved during brainstorming:
 - Report content: **full detail** (todos + notes + SOW ref + nested progress + ad-hoc).
 - Permission: **tech lead only** for all three (unchanged from `/team-status`).
 - `/team-status`: **removed** outright.
-- `/team remind` targeting: **single member per invocation, no bulk path**
-  (args are optional at the Discord level only so that "neither" can trigger
-  the picker; the handler requires both-or-neither).
+- `/team remind` targeting: **single member per invocation, no bulk path**;
+  `member` + `kind` are both required arguments.
 - Reminder destination: **today's standup thread**.
 - Manual vs automated follow-up: **independent** (no `followups_sent` interaction).
-- Option A + Option B: **both** — args when given, interactive picker when
-  invoked with no args.
+- Interactive picker: **dropped** — arguments-only (`member` autocomplete +
+  `kind` choice dropdown).
