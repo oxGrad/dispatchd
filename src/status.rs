@@ -249,6 +249,52 @@ pub fn format_report(report: &MemberReport) -> String {
     out
 }
 
+/// Packs member blocks (separated by "\n\n" in `full`) into chunks of at
+/// most `limit` characters, so `/team report` fits Discord's 2000-char
+/// message cap. A single block over `limit` is hard-wrapped at char
+/// boundaries. Empty input yields no chunks.
+#[allow(dead_code)]
+pub fn split_into_messages(full: &str, limit: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for block in full.split("\n\n") {
+        if block.is_empty() {
+            continue;
+        }
+        let sep_len = if current.is_empty() { 0 } else { 2 };
+        let fits = current.chars().count() + sep_len + block.chars().count() <= limit;
+        if fits {
+            if !current.is_empty() {
+                current.push_str("\n\n");
+            }
+            current.push_str(block);
+            continue;
+        }
+
+        if !current.is_empty() {
+            out.push(std::mem::take(&mut current));
+        }
+        if block.chars().count() > limit {
+            let mut chars = block.chars();
+            loop {
+                let chunk: String = chars.by_ref().take(limit).collect();
+                if chunk.is_empty() {
+                    break;
+                }
+                out.push(chunk);
+            }
+        } else {
+            current = block.to_string();
+        }
+    }
+
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +678,41 @@ mod tests {
             format_report(&report),
             "**Citra**\n• Thing\n\u{20}\u{20}• weird — hmm"
         );
+    }
+
+    #[test]
+    fn split_into_messages_empty_input_is_empty() {
+        assert_eq!(split_into_messages("", 2000), Vec::<String>::new());
+    }
+
+    #[test]
+    fn split_into_messages_keeps_a_small_report_as_one_chunk() {
+        let full = "**Alice**\n• a\n  ✅ done — x\n\n**Budi** — nothing posted today";
+        assert_eq!(split_into_messages(full, 2000), vec![full.to_string()]);
+    }
+
+    #[test]
+    fn split_into_messages_breaks_on_member_boundaries() {
+        let a = format!("**Alice**\n{}", "x".repeat(1200));
+        let b = format!("**Budi**\n{}", "y".repeat(1200));
+        let c = format!("**Citra**\n{}", "z".repeat(1200));
+        let full = format!("{a}\n\n{b}\n\n{c}");
+
+        let chunks = split_into_messages(&full, 2000);
+        assert_eq!(chunks, vec![a, b, c]);
+        for chunk in &split_into_messages(&full, 2000) {
+            assert!(chunk.chars().count() <= 2000);
+        }
+    }
+
+    #[test]
+    fn split_into_messages_hard_wraps_an_oversized_block() {
+        let full = format!("**Alice**\n{}", "x".repeat(4100));
+        let chunks = split_into_messages(&full, 2000);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].chars().count(), 2000);
+        assert_eq!(chunks[1].chars().count(), 2000);
+        assert!(chunks[2].chars().count() <= 2000);
+        assert_eq!(chunks.concat().chars().count(), full.chars().count());
     }
 }
