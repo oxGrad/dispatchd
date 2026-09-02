@@ -14,13 +14,14 @@ host.
 ## Install
 
 ```sh
-curl -fsSL https://dispatchd.graditya.com | sh
+curl -fsSL https://dispatchd.graditya.com | sudo sh
 ```
 
 Downloads the prebuilt binary for your platform (static `musl` on Linux
 x86_64/aarch64/armv7, macOS Apple Silicon), verifies its checksum, and
-drops it in `~/.local/bin`. No Rust toolchain needed. Full details,
-version pinning, and the `INSTALL_DIR` override are in
+installs it to `/usr/local/bin` (so `sudo dispatchd ...` and the systemd
+unit can find it). No Rust toolchain needed. For a local install without
+`sudo`, plus version pinning and the `INSTALL_DIR` override, see
 [`docs/installing.md`](docs/installing.md).
 
 To build from source instead: `cargo build --release`.

@@ -5,14 +5,16 @@
 #
 # Downloads the right prebuilt binary for this machine from the latest
 # (or $DISPATCHD_VERSION-pinned) GitHub Release, verifies its checksum,
-# and installs it to $INSTALL_DIR (default $HOME/.local/bin). Never
-# compiles anything, never touches config, never runs `dispatchd init`
-# for you - see the printed next steps at the end.
+# and installs it to $INSTALL_DIR (default /usr/local/bin, so `sudo
+# dispatchd ...` and the systemd unit can both find it - run the whole
+# one-liner under sudo, or set INSTALL_DIR to a path you own for a local
+# install). Never compiles anything, never touches config, never runs
+# `dispatchd init` for you - see the printed next steps at the end.
 set -eu
 
 REPO="oxGrad/dispatchd"
 BIN_NAME="dispatchd"
-INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 say() {
     printf '%s\n' "$1"
@@ -105,9 +107,12 @@ main() {
 
     tar -xzf "$tmp_dir/$asset" -C "$tmp_dir" "$BIN_NAME"
 
-    mkdir -p "$INSTALL_DIR"
-    if [ ! -w "$INSTALL_DIR" ]; then
-        err "$INSTALL_DIR isn't writable - re-run with sudo, or set INSTALL_DIR to somewhere you own"
+    mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+    if [ ! -d "$INSTALL_DIR" ] || [ ! -w "$INSTALL_DIR" ]; then
+        err "$INSTALL_DIR isn't writable. Re-run the whole command under sudo, e.g.
+       curl -fsSL https://dispatchd.graditya.com | sudo sh
+   or set INSTALL_DIR to a path you own for a local (non-service) install, e.g.
+       curl -fsSL https://dispatchd.graditya.com | INSTALL_DIR=\"\$HOME/.local/bin\" sh"
     fi
     mv "$tmp_dir/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
     chmod +x "$INSTALL_DIR/$BIN_NAME"
@@ -124,8 +129,9 @@ main() {
     esac
 
     say ""
-    say "Next: run \`dispatchd init\` to create config.toml/members.toml templates,"
-    say "then see docs/discord-setup.md in the repo for wiring up the Discord bot:"
+    say "Next: run \`dispatchd init\` (as your normal user, no sudo - it writes"
+    say "config.toml/members.toml templates under your \$HOME), then see"
+    say "docs/discord-setup.md for wiring up the Discord bot:"
     say "  https://github.com/$REPO/blob/main/docs/discord-setup.md"
 }
 
