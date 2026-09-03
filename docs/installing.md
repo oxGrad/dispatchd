@@ -62,6 +62,42 @@ Discord application, get a bot token, and wire up `discord_guild_id`/
 `discord_standup_channel_id`. `docs/user-guide.md` covers day-to-day
 usage once it's running.
 
+## Upgrading
+
+Re-run the installer - it overwrites the binary in place:
+
+```sh
+curl -fsSL https://dispatchd.graditya.com | sudo sh
+```
+
+Then, if you run it as a systemd service, restart it to pick up the new
+binary (systemd keeps running the old one until you do - the replaced
+file's inode stays open):
+
+```sh
+sudo systemctl restart dispatchd
+dispatchd --version   # confirm what's now running
+dispatchd status      # unit installed/enabled/active, Discord reachable
+```
+
+That's the whole upgrade. You do **not** need to re-run
+`dispatchd service install`, remove and re-add the unit, or
+`daemon-reload` - the unit's `ExecStart` is a fixed
+`/usr/local/bin/dispatchd` path with no version in it. Database schema
+migrations, if any ship in the new version, run automatically on the next
+start.
+
+The one exception: if a release note says the **systemd unit itself**
+changed, run
+
+```sh
+sudo dispatchd service install   # idempotent: rewrites the unit + daemon-reload, does not restart
+sudo systemctl restart dispatchd
+```
+
+To move between specific versions (including downgrades), pin with
+`DISPATCHD_VERSION` (see "Options") and restart the same way.
+
 ## Running on a cloud VM (Google Cloud free tier)
 
 dispatchd is a good fit for a tiny always-on VM: one static binary,
