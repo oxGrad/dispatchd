@@ -1,4 +1,8 @@
-name = "dispatchd-install"
+# Must match the Worker's name in Cloudflare. If you deploy via a
+# Git-connected build (Workers Builds), set that project's *Root directory*
+# to `cloudflare/` so Wrangler finds this file, and keep this `name` equal
+# to the connected Worker - Cloudflare will otherwise open a PR to sync it.
+name = "dispatchd"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 

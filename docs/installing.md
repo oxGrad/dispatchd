@@ -223,6 +223,22 @@ one-time setup step, not something dispatchd's CI does for you):
    rather than redirecting to GitHub), and `/tos` / `/privacy-policy`
    serve the two HTML pages.
 
+### Deploying via a Git-connected build (Workers Builds)
+
+If instead of pasting/`wrangler deploy` you connect the Worker to this
+GitHub repo (Worker → **Settings → Builds**), two settings matter, because
+`wrangler.toml` lives in `cloudflare/`, not the repo root:
+
+- **Root directory:** set it to `cloudflare`. Without this the build fails
+  with *"Missing entry-point to Worker script or to assets directory"* -
+  Wrangler is looking for a config file at the repo root and there isn't
+  one. (Alternatively, leave the root at `/` and set the deploy command to
+  `npx wrangler deploy --config cloudflare/wrangler.toml`.)
+- **Worker name:** `name` in `cloudflare/wrangler.toml` must equal the
+  connected Worker's name. If they differ, Cloudflare flags it after each
+  build and (Wrangler ≥ 3.109.0) opens a PR to rewrite the file to match -
+  so pick the name when you create the Worker and keep the file in sync.
+
 The Worker fetches each route's file from the `main` branch on every
 request (cached at Cloudflare's edge for 5 minutes), so it always mirrors
 whatever's actually in the repo - merging a change to `install.sh`,
