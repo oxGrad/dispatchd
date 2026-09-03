@@ -13,20 +13,58 @@
 # belonging to that table instead of the root - keep that ordering if you
 # reorder this file.
 
+# IANA timezone name. Every clock time below (and weekend detection) is
+# interpreted in this zone, so set it to your team's working timezone.
 # timezone = "UTC"
+
+# Where the SQLite database lives. Defaults to
+# $XDG_DATA_HOME/dispatchd/dispatchd.sqlite3 (~/.local/share/... ). Override
+# via DISPATCHD_DB_PATH takes precedence over this key.
 # db_path = "/home/pi/.local/share/dispatchd/dispatchd.sqlite3"
+
+# Discord server (guild) the bot operates in. No default - required to
+# connect. See docs/discord-setup.md.
 # discord_guild_id = 123456789012345678
+
+# Channel where the daily "Standup: <date>" thread is created and all
+# reminders/sync messages are posted. No default - required to connect.
 # discord_standup_channel_id = 123456789012345679
 
 [schedule]
-# thread_creation_time = "08:30"
+# Time of day the standup thread is created, ahead of the morning todo
+# ping, so early submissions already have somewhere to land.
+# thread_creation_time = "07:00"
+
+# Time the morning todo reminder fires - @mentions everyone in the thread
+# to submit their /todo for the day.
 # todo_time = "09:00"
+
+# Time the afternoon reminder fires, prompting everyone to submit a
+# /progress report against their todos.
 # update_time = "15:00"
-# meeting_time = "16:00"                 # when the daily meeting starts
-# meeting_reminder_lead_minutes = 5      # pre-meeting ping fires this many minutes before meeting_time
+
+# When the daily team meeting actually starts.
+# meeting_time = "16:00"
+
+# How many minutes before meeting_time the pre-meeting ping fires
+# (@mentions everyone in the thread). Skipped if the meeting was cancelled
+# with /team skip-meeting.
+# meeting_reminder_lead_minutes = 5
+
+# How often the background ticker wakes up to check whether any reminder,
+# followup, or thread sync is due, and to post new submissions into the
+# thread. Lower = snappier sync, more Discord API calls.
 # ticker_interval_seconds = 60
+
+# Whether the whole ritual (thread, reminders, followups, meeting ping)
+# runs on Saturdays and Sundays. Off by default.
 # run_on_weekends = false
 
 [followup]
+# Minutes after todo_time to nag anyone who still hasn't submitted a /todo
+# (a private per-member reminder, separate from the group ping).
 # todo_delay_minutes = 30
+
+# Minutes after update_time to nag anyone who still hasn't submitted a
+# /progress report.
 # update_delay_minutes = 30

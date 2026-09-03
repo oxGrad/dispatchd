@@ -14,7 +14,7 @@ pub const CONFIG_PATH_OVERRIDE_ENV: &str = "DISPATCHD_CONFIG_PATH";
 /// bypassing the XDG data-dir default.
 const DB_PATH_OVERRIDE_ENV: &str = "DISPATCHD_DB_PATH";
 
-const DEFAULT_THREAD_CREATION_TIME: &str = "08:30";
+const DEFAULT_THREAD_CREATION_TIME: &str = "07:00";
 const DEFAULT_TODO_TIME: &str = "09:00";
 const DEFAULT_UPDATE_TIME: &str = "15:00";
 const DEFAULT_MEETING_TIME: &str = "16:00";
