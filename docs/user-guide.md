@@ -9,7 +9,7 @@ it, see `docs/discord-setup.md` instead.)
 Every weekday (unless the tech lead has enabled weekend runs), dispatchd
 posts into a "Standup: YYYY-MM-DD" thread in the team's standup channel:
 
-1. **Thread opens** (8:30 by default) - the day's thread is created
+1. **Thread opens** (7:00 by default) - the day's thread is created
    quietly, before the morning ping. You can already submit `/todo` at
    this point; see "Your submissions show up in the thread" below.
 2. **Morning** (9:00 by default) - everyone gets pinged in that thread and
