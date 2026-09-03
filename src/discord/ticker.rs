@@ -60,7 +60,7 @@ async fn tick(
             db,
             &date,
             "update_reminder",
-            "⏰ Time for your afternoon progress report! Submit via `/progress`.",
+            "⏰ Time for your afternoon progress report! Submit via `/progress add`.",
         )
         .await;
     }
@@ -93,7 +93,7 @@ async fn tick(
             &date,
             "update_followup",
             followups::members_missing_update,
-            "⏰ don't forget to submit a `/progress` report for today's todo(s)!",
+            "⏰ don't forget to submit a `/progress add` report for today's todo(s)!",
         )
         .await;
     }
@@ -144,7 +144,7 @@ async fn maybe_create_thread(
     }
 }
 
-/// Pings the team in today's thread with the `/todo create` prompt. The
+/// Pings the team in today's thread with the `/todo add` prompt. The
 /// thread itself is created separately by `maybe_create_thread` above (at
 /// the earlier, independently configurable `thread_creation_time`) - this
 /// only looks one up, skipping with a log line if none exists yet (bot was
@@ -162,7 +162,7 @@ async fn maybe_fire_todo_reminder(http: &Arc<Http>, db: &Arc<Mutex<Connection>>,
 
     let mentions = all_member_mentions(db);
     let message =
-        format!("{mentions}\n📋 Time for today's standup! Submit your todo with `/todo create`.");
+        format!("{mentions}\n📋 Time for today's standup! Submit your todo with `/todo add`.");
     maybe_fire_simple_reminder(http, db, date, "todo_reminder", &message).await;
 }
 

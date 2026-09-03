@@ -14,7 +14,7 @@ use crate::entries::{self, DeleteTodoOutcome, TodoForEdit};
 
 use super::{get_option_string, modal_value};
 
-pub const CREATE_MODAL_ID: &str = "todo_modal";
+pub const ADD_MODAL_ID: &str = "todo_modal";
 pub const EDIT_MODAL_PREFIX: &str = "todo_edit_modal:";
 const TASK_INPUT_ID: &str = "task";
 const NOTES_INPUT_ID: &str = "notes";
@@ -23,7 +23,7 @@ const SOW_REF_MAX_LEN: u16 = 30;
 
 const TODO_HELP_TEXT: &str = "\
 **/todo subcommands**
-`/todo create` - submit a new todo for today (optionally tag it with an SOW ref like M1D2)
+`/todo add` - submit a new todo for today (optionally tag it with an SOW ref like M1D2)
 `/todo edit id:<...>` - edit one of today's todos, SOW ref included (autocomplete over today's)
 `/todo delete id:<...>` - delete one of today's todos
 `/todo list` - list today's todos with their ids
@@ -34,7 +34,7 @@ pub fn command() -> CreateCommand {
         .description("Manage your todos")
         .add_option(CreateCommandOption::new(
             CommandOptionType::SubCommand,
-            "create",
+            "add",
             "Submit a new todo for today",
         ))
         .add_option(
@@ -101,8 +101,8 @@ async fn reply_ephemeral(
     }
 }
 
-pub async fn handle_create(ctx: &SerenityContext, command: &CommandInteraction) {
-    let modal = CreateModal::new(CREATE_MODAL_ID, "Submit today's todo").components(vec![
+pub async fn handle_add(ctx: &SerenityContext, command: &CommandInteraction) {
+    let modal = CreateModal::new(ADD_MODAL_ID, "Submit today's todo").components(vec![
         CreateActionRow::InputText(
             CreateInputText::new(InputTextStyle::Short, "Task", TASK_INPUT_ID).required(true),
         ),
@@ -128,7 +128,7 @@ pub async fn handle_create(ctx: &SerenityContext, command: &CommandInteraction) 
         .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
         .await
     {
-        eprintln!("failed to open /todo create modal: {e}");
+        eprintln!("failed to open /todo add modal: {e}");
     }
 }
 
@@ -171,7 +171,7 @@ pub async fn handle_modal_submission(
         .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
         .await
     {
-        eprintln!("failed to respond to /todo create modal submission: {e}");
+        eprintln!("failed to respond to /todo add modal submission: {e}");
     }
 }
 
@@ -394,7 +394,7 @@ pub async fn handle_list(
 
     let reply_text = match todos {
         Ok(rows) if rows.is_empty() => {
-            "You haven't submitted a todo today yet - use `/todo create`.".to_string()
+            "You haven't submitted a todo today yet - use `/todo add`.".to_string()
         }
         Ok(rows) => {
             let lines: Vec<String> = rows
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn todo_help_text_mentions_every_subcommand() {
         for needle in [
-            "/todo create",
+            "/todo add",
             "/todo edit",
             "/todo delete",
             "/todo list",

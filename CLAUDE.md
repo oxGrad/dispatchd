@@ -160,7 +160,8 @@ before treating a Discord-facing change as verified.
 Everything DB-layer (`src/db.rs`, `src/entries.rs`, `src/members.rs`,
 `src/status.rs`) and the pure encode/decode helpers in
 `src/discord/progress.rs` (`status_code`, `encode_task_for_modal`,
-`parse_custom_id`, etc.) are fully unit-tested and don't have this
+`parse_custom_id`, `parse_edit_custom_id`, `summarize`,
+`format_progress_list`, etc.) are fully unit-tested and don't have this
 limitation.
 
 ## Testing conventions worth preserving
@@ -196,7 +197,11 @@ src/
   db/            SQLite connection + embedded migrations
   entries.rs     todo/update row DB logic, incl. entries.sow_ref - a
                  purely informational, unvalidated cross-reference into
-                 an external scope-of-work doc (e.g. "M1D2"), todo-only
+                 an external scope-of-work doc (e.g. "M1D2"), todo-only.
+                 update rows: insert_update (append), plus list_updates /
+                 update_for_edit / update_update backing /progress
+                 list|edit (edit revises status/progress/blocker in place,
+                 leaving task + the todo_id link alone)
   members.rs     roster seeding + is_lead check + all_member_ids +
                  roster/name_of (used by /team remind's member autocomplete)
   status.rs      /team status DB queries + formatting (team_status /
@@ -237,7 +242,7 @@ src/
                     - the last moved here from ticker.rs, now shared by
                     ticker + team), spawns the ticker alongside the client
     help.rs        /help - static overview of every command
-    todo.rs        /todo create|edit|delete|list|help - create/edit share
+    todo.rs        /todo add|edit|delete|list|help - add/edit share
                     one modal shape (edit's pre-filled with current
                     values, now incl. an optional SOW Ref field); edit/
                     delete/list all operate on any of today's todos (not
@@ -246,11 +251,19 @@ src/
                     entries.todo_id's FOREIGN KEY (surfaced as a friendly
                     reply, not a raw DB error) if a /progress report
                     already references the todo
-    progress.rs    /progress (autocomplete + modal custom_id encoding) -
-                    named for the report it submits, not the underlying
-                    'update' DB row type (entries.type/reminders_sent.type/
-                    etc. keep that name - it's the data concept, not the
-                    command surface)
+    progress.rs    /progress add|edit|list|help - `add` (was the flat
+                    /progress command) opens the report modal and always
+                    inserts a new 'update' row; `edit` (report autocomplete
+                    over entries::list_updates + optional status override,
+                    "keep current" when omitted) revises one report row in
+                    place via entries::update_update and does NOT re-sync
+                    to the thread (same one-way rule as /todo edit); `list`
+                    is the member's own reports for today. Two modal
+                    prefixes: MODAL_PREFIX (add) and EDIT_MODAL_PREFIX
+                    (edit, custom_id carries the resolved status + row id).
+                    "progress" is the command name, not the 'update' DB row
+                    type - entries.type/reminders_sent.type/etc. keep that
+                    name, it's the data concept not the command surface
     team.rs        the `/team` command group (was team_status.rs):
                     `status` - the old standalone summary command moved
                     here verbatim, one line per member showing who's
