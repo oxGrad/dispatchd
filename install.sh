@@ -114,8 +114,25 @@ main() {
    or set INSTALL_DIR to a path you own for a local (non-service) install, e.g.
        curl -fsSL https://dispatchd.graditya.com | INSTALL_DIR=\"\$HOME/.local/bin\" sh"
     fi
-    mv "$tmp_dir/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
-    chmod +x "$INSTALL_DIR/$BIN_NAME"
+    # Use `install` when available: it sets the mode and, crucially, lets the
+    # destination directory's default SELinux context apply to the new file.
+    # A plain `mv` preserves the label from $tmp_dir (under /tmp, so
+    # `user_tmp_t`), which systemd then refuses to exec as `User=` on an
+    # SELinux-enforcing host ("Unable to locate executable: Permission
+    # denied"). Fall back to mv+chmod where `install` is missing.
+    if command -v install >/dev/null 2>&1; then
+        install -m 0755 "$tmp_dir/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME" \
+            || err "failed to install $BIN_NAME to $INSTALL_DIR"
+    else
+        mv "$tmp_dir/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+        chmod 0755 "$INSTALL_DIR/$BIN_NAME"
+    fi
+
+    # Belt-and-braces: if the box has SELinux tooling, force the label to the
+    # directory's policy default regardless of how the file got here.
+    if command -v restorecon >/dev/null 2>&1; then
+        restorecon "$INSTALL_DIR/$BIN_NAME" 2>/dev/null || true
+    fi
 
     say "Installed $BIN_NAME $version to $INSTALL_DIR/$BIN_NAME"
 
