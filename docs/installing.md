@@ -70,13 +70,26 @@ Re-run the installer - it overwrites the binary in place:
 curl -fsSL https://dispatchd.graditya.com | sudo sh
 ```
 
-Then, if you run it as a systemd service, restart it to pick up the new
-binary (systemd keeps running the old one until you do - the replaced
-file's inode stays open):
+systemd keeps running the old binary until the service is restarted (the
+replaced file's inode stays open). If `dispatchd.service` is active when
+the installer finishes, it detects that and prompts:
+
+```text
+dispatchd.service is running. Restart it now to run v0.4.0? [y/N]
+```
+
+Answer `y` and it runs the restart for you. When there's no terminal to
+prompt on (piped in CI, another script), it never restarts on its own -
+it just prints the command to run:
 
 ```sh
 sudo systemctl restart dispatchd
-dispatchd --version   # confirm what's now running
+```
+
+Afterwards, confirm what's running:
+
+```sh
+dispatchd --version   # the version now on disk
 dispatchd status      # unit installed/enabled/active, Discord reachable
 ```
 

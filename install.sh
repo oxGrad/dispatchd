@@ -25,6 +25,62 @@ err() {
     exit 1
 }
 
+# Runs `systemctl restart dispatchd`, via sudo when we aren't already root.
+restart_service() {
+    if [ "$(id -u)" -eq 0 ]; then
+        systemctl restart dispatchd
+    else
+        sudo systemctl restart dispatchd
+    fi
+}
+
+# After the binary is replaced, a running dispatchd.service keeps executing
+# the old code until it's restarted. If the service is active, offer to do
+# it - prompting on /dev/tty (stdin is the piped script, not a terminal).
+# With no tty (CI, another script), we only print the command and never
+# restart on our own. Returns 0 whether or not a restart happened; a failed
+# restart is reported, not fatal.
+maybe_restart_service() {
+    command -v systemctl >/dev/null 2>&1 || return 0
+    systemctl is-active --quiet dispatchd 2>/dev/null || return 0
+
+    hint="systemctl restart dispatchd"
+    if [ "$(id -u)" -ne 0 ]; then
+        if command -v sudo >/dev/null 2>&1; then
+            hint="sudo systemctl restart dispatchd"
+        else
+            say ""
+            say "dispatchd.service is running the previous binary. Restart it as root:"
+            say "  $hint"
+            return 0
+        fi
+    fi
+
+    if [ ! -r /dev/tty ]; then
+        say ""
+        say "dispatchd.service is running the previous binary. Restart to apply:"
+        say "  $hint"
+        return 0
+    fi
+
+    say ""
+    printf 'dispatchd.service is running. Restart it now to run %s? [y/N] ' "$version" > /dev/tty
+    read -r reply < /dev/tty || reply=""
+    case "$reply" in
+        [yY] | [yY][eE][sS])
+            if restart_service; then
+                say "Restarted dispatchd.service (now running $version)."
+            else
+                say "Restart failed - run \`$hint\` yourself."
+            fi
+            ;;
+        *)
+            say "Left it running the old binary. Restart when ready:"
+            say "  $hint"
+            ;;
+    esac
+}
+
 detect_target() {
     os=$(uname -s)
     arch=$(uname -m)
@@ -145,11 +201,17 @@ main() {
             ;;
     esac
 
-    say ""
-    say "Next: run \`dispatchd init\` (as your normal user, no sudo - it writes"
-    say "config.toml/members.toml templates under your \$HOME), then see"
-    say "docs/discord-setup.md for wiring up the Discord bot:"
-    say "  https://github.com/$REPO/blob/main/docs/discord-setup.md"
+    # An active service means this is an upgrade of a configured deployment,
+    # not a first install - offer the restart and skip the setup pointer.
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet dispatchd 2>/dev/null; then
+        maybe_restart_service
+    else
+        say ""
+        say "Next: run \`dispatchd init\` (as your normal user, no sudo - it writes"
+        say "config.toml/members.toml templates under your \$HOME), then see"
+        say "docs/discord-setup.md for wiring up the Discord bot:"
+        say "  https://github.com/$REPO/blob/main/docs/discord-setup.md"
+    fi
 }
 
 main "$@"
