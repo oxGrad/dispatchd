@@ -141,32 +141,70 @@ pub fn decrypt_cred_file(cred_path: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// `dispatchd status`'s Discord half: resolves a token (the same way the
-/// bot itself does at startup, or by decrypting the credential file
-/// directly - see `decrypt_cred_file`), then pings Discord's API and
-/// reports round-trip latency.
-pub async fn ping() {
-    println!("discord:");
+pub struct PingOk {
+    pub name: String,
+    pub id: String,
+    pub latency_ms: u128,
+}
+
+pub struct DiscordPing {
+    pub token_found: bool,
+    pub result: Option<Result<PingOk, String>>,
+}
+
+/// `dispatchd status`'s Discord half, as structured data: resolves a token
+/// (the same way the bot itself does at startup, or by decrypting the
+/// credential file directly - see `decrypt_cred_file`), then pings
+/// Discord's API and records round-trip latency. Rendered by `format_ping`
+/// so `/admin status` can reuse the same data.
+pub async fn ping_report() -> DiscordPing {
     let token =
         match crate::discord_token().or_else(|| decrypt_cred_file(crate::service::CRED_PATH)) {
-            Some(token) => token,
+            Some(t) => t,
             None => {
-                println!("  token:                not found - run: sudo dispatchd discord login");
-                return;
+                return DiscordPing {
+                    token_found: false,
+                    result: None,
+                };
             }
         };
-
     let start = std::time::Instant::now();
     let http = serenity::http::Http::new(&token);
-    match http.get_current_user().await {
-        Ok(user) => println!(
-            "  ping:                 ok - logged in as {} ({}), {}ms",
-            user.name,
-            user.id,
-            start.elapsed().as_millis()
-        ),
-        Err(e) => println!("  ping:                 failed - {e}"),
+    let result = match http.get_current_user().await {
+        Ok(user) => Ok(PingOk {
+            name: user.name.clone(),
+            id: user.id.to_string(),
+            latency_ms: start.elapsed().as_millis(),
+        }),
+        Err(e) => Err(e.to_string()),
+    };
+    DiscordPing {
+        token_found: true,
+        result: Some(result),
     }
+}
+
+pub fn format_ping(p: &DiscordPing) -> String {
+    let mut out = String::from("discord:\n");
+    if !p.token_found {
+        out.push_str("  token:                not found - run: sudo dispatchd discord login\n");
+        return out;
+    }
+    match &p.result {
+        Some(Ok(ok)) => out.push_str(&format!(
+            "  ping:                 ok - logged in as {} ({}), {}ms\n",
+            ok.name, ok.id, ok.latency_ms
+        )),
+        Some(Err(e)) => out.push_str(&format!("  ping:                 failed - {e}\n")),
+        None => out.push_str("  ping:                 not attempted\n"),
+    }
+    out
+}
+
+/// `dispatchd status`'s Discord half: resolves a token, pings Discord's
+/// API and reports round-trip latency.
+pub async fn ping() {
+    print!("{}", format_ping(&ping_report().await));
 }
 
 #[cfg(test)]
@@ -195,5 +233,37 @@ mod tests {
         let path = dir.path().join("discord_token.cred");
 
         logout_at(path.to_str().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn format_ping_ok() {
+        let p = DiscordPing {
+            token_found: true,
+            result: Some(Ok(PingOk {
+                name: "bot".into(),
+                id: "42".into(),
+                latency_ms: 84,
+            })),
+        };
+        let out = format_ping(&p);
+        assert!(out.contains("ok - logged in as bot (42), 84ms"));
+    }
+
+    #[test]
+    fn format_ping_failed() {
+        let p = DiscordPing {
+            token_found: true,
+            result: Some(Err("401 Unauthorized".into())),
+        };
+        assert!(format_ping(&p).contains("failed - 401 Unauthorized"));
+    }
+
+    #[test]
+    fn format_ping_no_token() {
+        let p = DiscordPing {
+            token_found: false,
+            result: None,
+        };
+        assert!(format_ping(&p).contains("not found"));
     }
 }

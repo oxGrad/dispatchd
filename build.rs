@@ -26,7 +26,13 @@ fn main() {
         format!("{pkg_version} ({sha})")
     };
 
+    // The exact target triple this binary is built for - `dispatchd
+    // upgrade` uses it to pick the matching release asset
+    // (dispatchd-<triple>.tar.gz). Cargo sets TARGET for build scripts.
+    let target = std::env::var("TARGET").unwrap_or_default();
+
     println!("cargo:rustc-env=DISPATCHD_GIT_SHA={sha}");
+    println!("cargo:rustc-env=DISPATCHD_TARGET={target}");
     println!("cargo:rustc-env=DISPATCHD_IS_TAGGED={is_tagged}");
     println!("cargo:rustc-env=DISPATCHD_VERSION={version}");
     println!("cargo:rerun-if-changed=.git/HEAD");

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::config::xdg_dirs;
 
 pub(crate) const MEMBERS_PATH_OVERRIDE_ENV: &str = "DISPATCHD_MEMBERS_PATH";
-const VALID_ROLES: &[&str] = &["lead", "designer", "senior", "medior", "junior"];
+const VALID_ROLES: &[&str] = &["admin", "lead", "designer", "senior", "medior", "junior"];
 
 #[derive(Debug, Default, Deserialize)]
 struct MembersFile {
@@ -75,15 +75,23 @@ pub fn seed(conn: &Connection) -> Result<usize> {
     }
 
     for member in &file.members {
-        let is_lead = member.role == "lead";
+        let is_lead = matches!(member.role.as_str(), "lead" | "admin");
+        let is_admin = member.role == "admin";
         conn.execute(
-            "INSERT INTO members (discord_user_id, name, role, is_lead)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO members (discord_user_id, name, role, is_lead, is_admin)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(discord_user_id) DO UPDATE SET
                  name = excluded.name,
                  role = excluded.role,
-                 is_lead = excluded.is_lead",
-            rusqlite::params![member.discord_user_id, member.name, member.role, is_lead],
+                 is_lead = excluded.is_lead,
+                 is_admin = excluded.is_admin",
+            rusqlite::params![
+                member.discord_user_id,
+                member.name,
+                member.role,
+                is_lead,
+                is_admin
+            ],
         )
         .with_context(|| format!("failed to upsert member {:?}", member.discord_user_id))?;
     }
@@ -91,12 +99,27 @@ pub fn seed(conn: &Connection) -> Result<usize> {
     Ok(file.members.len())
 }
 
-/// `false` for an unknown `discord_user_id`, not an error - the bot-side
-/// source-of-truth check for `/team status`.
+/// `true` when the member has tech-lead privileges - role `lead` or
+/// `admin`. `false` for an unknown `discord_user_id`, not an error - the
+/// bot-side source-of-truth check for `/team`.
 pub fn is_lead(conn: &Connection, discord_user_id: &str) -> Result<bool> {
     Ok(conn
         .query_row(
             "SELECT is_lead FROM members WHERE discord_user_id = ?1",
+            [discord_user_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// `true` when the member has bot-operator privileges (role `admin`).
+/// `false` for an unknown `discord_user_id`, not an error - the bot-side
+/// source-of-truth check for `/admin`.
+pub fn is_admin(conn: &Connection, discord_user_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT is_admin FROM members WHERE discord_user_id = ?1",
             [discord_user_id],
             |row| row.get(0),
         )
@@ -350,6 +373,82 @@ mod tests {
                 ("3".to_string(), "Citra".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn admin_role_seeds_both_is_admin_and_is_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("d.sqlite3")).unwrap();
+        seed_from(
+            &conn,
+            r#"
+            [[members]]
+            discord_user_id = "1"
+            name = "Ops"
+            role = "admin"
+            "#,
+        )
+        .unwrap();
+
+        let (is_lead, is_admin): (bool, bool) = conn
+            .query_row(
+                "SELECT is_lead, is_admin FROM members WHERE discord_user_id = '1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(is_lead, "admin must inherit lead privileges");
+        assert!(is_admin);
+    }
+
+    #[test]
+    fn is_admin_is_true_only_for_admins() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("d.sqlite3")).unwrap();
+        seed_from(
+            &conn,
+            r#"
+            [[members]]
+            discord_user_id = "1"
+            name = "Ops"
+            role = "admin"
+
+            [[members]]
+            discord_user_id = "2"
+            name = "Lead"
+            role = "lead"
+            "#,
+        )
+        .unwrap();
+
+        assert!(is_admin(&conn, "1").unwrap());
+        assert!(!is_admin(&conn, "2").unwrap());
+        assert!(!is_admin(&conn, "999").unwrap());
+    }
+
+    #[test]
+    fn reseeding_admin_to_senior_clears_both_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("d.sqlite3")).unwrap();
+        seed_from(
+            &conn,
+            "[[members]]\ndiscord_user_id = \"1\"\nname = \"X\"\nrole = \"admin\"\n",
+        )
+        .unwrap();
+        seed_from(
+            &conn,
+            "[[members]]\ndiscord_user_id = \"1\"\nname = \"X\"\nrole = \"senior\"\n",
+        )
+        .unwrap();
+        let (is_lead, is_admin): (bool, bool) = conn
+            .query_row(
+                "SELECT is_lead, is_admin FROM members WHERE discord_user_id = '1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(!is_lead);
+        assert!(!is_admin);
     }
 
     #[test]

@@ -107,10 +107,20 @@ dispatchd maintenance run   # the handover doc's weekly cron: prunes
                      # and VACUUMs. entries is never pruned - it's the
                      # retained history the biweekly recap depends on.
 dispatchd status     # reports the systemd side (version, unit
-                     # installed/enabled/active, encrypted token present)
-                     # and the Discord side (resolves a token the same way
-                     # the bot itself would, pings Discord's API, reports
-                     # round-trip latency).
+                     # installed/enabled/active, upgrade helper installed,
+                     # encrypted token present) and the Discord side
+                     # (resolves a token the same way the bot itself would,
+                     # pings Discord's API, reports round-trip latency).
+dispatchd upgrade    # resolves the latest GitHub release; if newer,
+                     # downloads the matching prebuilt, verifies its
+                     # SHA-256 against the release SHA256SUMS, atomically
+                     # swaps the binary, restarts dispatchd. Flags: --check
+                     # (report current vs latest, do nothing), --no-restart
+                     # (swap only, print the restart command), --version
+                     # <tag> (install any tag, incl. older = downgrade).
+                     # Needs root. Also the engine behind Discord's
+                     # /admin upgrade, via the hidden `upgrade --from-request`
+                     # helper mode that dispatchd-upgrade.service runs.
 dispatchd --version  # prints the crate version (from Cargo.toml, baked
                      # in at compile time by build.rs) - useful for
                      # confirming what a `curl | sh` install actually
@@ -158,11 +168,19 @@ bot token + guild set up per `docs/discord-setup.md` and confirm end-to-end
 before treating a Discord-facing change as verified.
 
 Everything DB-layer (`src/db.rs`, `src/entries.rs`, `src/members.rs`,
-`src/status.rs`) and the pure encode/decode helpers in
-`src/discord/progress.rs` (`status_code`, `encode_task_for_modal`,
-`parse_custom_id`, `parse_edit_custom_id`, `summarize`,
-`format_progress_list`, etc.) are fully unit-tested and don't have this
-limitation.
+`src/status.rs`) and the pure helpers in `src/discord/progress.rs`
+(`status_code`, `encode_task_for_modal`, `parse_custom_id`,
+`parse_edit_custom_id`, `summarize`, `format_progress_list`, etc.),
+`src/discord/admin.rs` (`permission_denied_reply`, `version_line`,
+`format_admin_status`, `render_steps`), `src/upgrade.rs` (`Version`,
+`sha256_for`, `verify_sha256`, `parse_latest_tag`, `parse_status`,
+`RequestGuard` cleanup, the request/status serde), and the
+`format_status` / `format_ping` renderers in `service.rs` /
+`discord_login.rs` are fully unit-tested and don't have this limitation.
+The reqwest/tar I/O in `upgrade.rs` (`download_and_stage`, `check`) and
+the `--from-request` helper flow are not - they need a real GitHub
+release and a systemd host, same "confirm end-to-end yourself" rule as
+the gateway code.
 
 ## Testing conventions worth preserving
 
@@ -194,7 +212,8 @@ limitation.
 src/
   main.rs        CLI entry point, Config/DB/seed wiring, Discord gating
   config.rs      Config struct, XDG lookup + env-var overrides, TOML merge
-  db/            SQLite connection + embedded migrations
+  db/            SQLite connection + embedded migrations (0005 adds
+                 members.is_admin)
   entries.rs     todo/update row DB logic, incl. entries.sow_ref - a
                  purely informational, unvalidated cross-reference into
                  an external scope-of-work doc (e.g. "M1D2"), todo-only.
@@ -203,7 +222,10 @@ src/
                  list|edit (edit revises status/progress/blocker in place,
                  leaving task + the todo_id link alone)
   members.rs     roster seeding + is_lead check + all_member_ids +
-                 roster/name_of (used by /team remind's member autocomplete)
+                 roster/name_of (used by /team remind's member autocomplete).
+                 Role `admin` is a superset of `lead`: seeding it sets both
+                 is_admin=1 and is_lead=1, so every is_lead gate admits
+                 admins unchanged; is_admin() is the /admin-only check
   status.rs      /team status DB queries + formatting (team_status /
                  format_status_line), incl. each member's deduped sow_ref
                  tag list appended to their line; also team_report /
@@ -222,7 +244,10 @@ src/
                  non-Linux stub that bails, same split as `service.rs` -
                  systemd-creds is Linux-only, and the macOS release build
                  has to compile. `ping`/`logout`/`decrypt_cred_file` stay
-                 cross-platform (used by `dispatchd status`)
+                 cross-platform (used by `dispatchd status`). `ping_report()`
+                 returns a `DiscordPing` struct and `format_ping()` renders
+                 it - the same pair `/admin status` reuses (`ping()` is now
+                 just `print!(format_ping(ping_report()))`)
   lock.rs        single-instance guard (`std::fs::File::try_lock`), held
                  for the process's lifetime; used by the main run (`<db>.lock`,
                  so two processes never race the ticker), `maintenance run`
@@ -233,15 +258,49 @@ src/
                  (`/etc/dispatchd/service-install.lock`) - each guards only
                  against a second instance of that same subcommand
   maintenance.rs `dispatchd maintenance run` DB logic (weekly prune + VACUUM)
+  upgrade.rs     self-upgrade. Pure helpers (`Version` compare, `sha256_for`
+                 / `verify_sha256`, `parse_latest_tag`, `Request` /
+                 `StatusLine` serde, `parse_status`) + reqwest/flate2/tar
+                 I/O (`fetch_latest_tag`, `check`, `download_and_stage`,
+                 `install_staged` - atomic rename over the running binary)
+                 + the `dispatchd upgrade` CLI (`run`). `--from-request` is
+                 the root-helper mode `dispatchd-upgrade.service` runs: it
+                 reads /run/dispatchd/upgrade.request, streams `StatusLine`s
+                 to /run/dispatchd/upgrade.status, and always deletes the
+                 request (a `RequestGuard` Drop impl) so the `.path` unit
+                 re-arms. DISPATCHD_TARGET (baked by build.rs) picks the
+                 release asset
   service.rs     `dispatchd service install` (systemd unit, Linux only,
                  requires systemd >= 250 for LoadCredentialEncrypted=) and
-                 `dispatchd status`'s systemd-side checks
+                 `dispatchd status`'s systemd-side checks. `install()` also
+                 writes dispatchd-upgrade.service (root oneshot) +
+                 dispatchd-upgrade.path (watches upgrade.request) and adds
+                 RuntimeDirectory=dispatchd (+ Preserve=yes) to the main
+                 unit - the writable /run/dispatchd the unprivileged bot
+                 needs for /admin upgrade, kept across the upgrade restart.
+                 `status_report()` returns a `ServiceStatus` struct and
+                 `format_status()` renders it - the pair `/admin status`
+                 reuses; `status()` is now just their composition
   discord/       serenity Handler, one file per slash command
     mod.rs         EventHandler impl, interaction dispatch, shared helpers
                     (modal_value, get_option_string, is_unknown_channel_error
                     - the last moved here from ticker.rs, now shared by
-                    ticker + team), spawns the ticker alongside the client
+                    ticker + team), spawns the ticker alongside the client;
+                    calls admin::post_upgrade_confirmation on `ready`
     help.rs        /help - static overview of every command
+    admin.rs       the `/admin` command group (members with role=admin):
+                    `status` - `dispatchd status`'s systemd + Discord health
+                    (via service::status_report / discord_login::ping_report)
+                    plus a current-vs-latest version line from
+                    upgrade::check; `upgrade` - writes upgrade.request, then
+                    tails upgrade.status editing the ephemeral per step for
+                    up to 120s, stopping at `Restarting`;
+                    post_upgrade_confirmation (run once on `ready`) reads
+                    the last terminal StatusLine and, if it carries a
+                    non-empty channel_id, posts the cross-restart
+                    `✅ dispatchd upgraded ...` message, then clears both
+                    files. MANAGE_GUILD-gated + bot-side members::is_admin
+                    check per subcommand, same dual gate as `/team`
     todo.rs        /todo add|edit|delete|list|help - add/edit share
                     one modal shape (edit's pre-filled with current
                     values, now incl. an optional SOW Ref field); edit/

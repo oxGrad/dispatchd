@@ -1,3 +1,4 @@
+mod admin;
 mod help;
 mod progress;
 mod team;
@@ -35,10 +36,13 @@ impl EventHandler for Handler {
             todo::command(),
             progress::command(),
             team::command(),
+            admin::command(),
         ];
         if let Err(e) = self.guild_id.set_commands(&ctx.http, commands).await {
             eprintln!("failed to register guild commands: {e}");
         }
+
+        admin::post_upgrade_confirmation(&ctx).await;
     }
 
     async fn interaction_create(&self, ctx: SerenityContext, interaction: Interaction) {
@@ -94,6 +98,14 @@ impl EventHandler for Handler {
                     Some(("skip-meeting", _)) => {
                         team::handle_skip_meeting(&ctx, &command, &self.db, &self.timezone).await
                     }
+                    _ => {}
+                },
+                "admin" => match admin::subcommand(&command.data.options) {
+                    Some(("status", _)) => admin::handle_status(&ctx, &command, &self.db).await,
+                    Some(("upgrade", opts)) => {
+                        admin::handle_upgrade(&ctx, &command, opts, &self.db).await
+                    }
+                    Some(("help", _)) => admin::handle_help(&ctx, &command, &self.db).await,
                     _ => {}
                 },
                 _ => {}

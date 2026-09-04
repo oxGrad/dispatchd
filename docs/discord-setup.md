@@ -101,6 +101,14 @@ generates a unit that loads the token via `LoadCredentialEncrypted=`, so
 it never sits on disk unencrypted. It won't start the service yet - there's
 no token configured until the next step.
 
+`service install` also writes the `dispatchd-upgrade.path` /
+`dispatchd-upgrade.service` helper units that back Discord's
+`/admin upgrade`. It's idempotent - a deployment that predates those
+units just needs `sudo dispatchd service install` re-run once, then
+`sudo systemctl restart dispatchd`, to pick them up. The restart matters:
+the bot's `/run/dispatchd` runtime directory is created by the unit at
+start, not by `service install`, and `/admin upgrade` needs it.
+
 Then log the bot in. This is also where the token gets encrypted - unlike
 a typical "paste your token here" prompt, `dispatchd` runs the encryption
 itself:
@@ -146,8 +154,9 @@ see:
 dispatchd connected to Discord as <your bot's name>
 ```
 
-and `/ping`, `/todo`, `/progress`, and `/team` (with its `status` /
-`report` / `remind` subcommands) will show up in your server within
+and `/ping`, `/todo`, `/progress`, `/team` (with its `status` / `report` /
+`remind` / `skip-meeting` subcommands), and `/admin` (`status` / `upgrade`,
+for members with `role = "admin"`) will show up in your server within
 seconds (guild-scoped commands take effect immediately, unlike global
 ones). Run `/ping` in the server — dispatchd should reply
 "pong! dispatchd is alive."
@@ -190,3 +199,16 @@ Settings → Integrations → dispatchd → team**, where each of `status`,
 `report`, `remind`, and `skip-meeting` can be restricted to the role(s)
 you want. This is
 optional — the bot-side check is the real gate either way.
+
+### The `admin` role
+
+`members.toml` roles are `admin | lead | designer | senior | medior |
+junior`. `admin` is a superset of `lead` — someone with `role = "admin"`
+passes every `is_lead` check (so all of `/team` works for them) and also
+gets the `/admin` command group: `/admin status` (systemd + Discord
+health plus a version check) and `/admin upgrade` (self-upgrade from
+Discord). `/admin` is `Manage Server`-gated and bot-side `is_admin`-checked,
+same dual gate as `/team`. Enabling `/admin upgrade` needs the
+`dispatchd-upgrade.path` helper from `sudo dispatchd service install`
+plus a `sudo systemctl restart dispatchd` afterwards (see step 4).
+Day-to-day use of both is in `docs/user-guide.md`.
