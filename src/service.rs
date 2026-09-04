@@ -256,54 +256,98 @@ fn systemctl_query(args: &[&str]) -> String {
     }
 }
 
+/// `dispatchd status`'s systemd half, as structured data: whether this host
+/// can even support token encryption, and whether the service is
+/// installed/enabled/active. Gathered here, rendered by `format_status` -
+/// so `/admin status` (which can't `println!`) can reuse the same data.
+pub struct ServiceStatus {
+    pub systemd_version: Option<u32>,
+    pub min_systemd_version: u32,
+    pub unit_installed: bool,
+    pub unit_enabled: Option<String>,
+    pub unit_active: Option<String>,
+    pub upgrade_helper_installed: bool,
+    pub cred_present: bool,
+}
+
+#[cfg(target_os = "linux")]
+pub fn status_report() -> ServiceStatus {
+    let unit_installed = std::path::Path::new(UNIT_PATH).exists();
+    ServiceStatus {
+        systemd_version: systemd_version().ok(),
+        min_systemd_version: MIN_SYSTEMD_VERSION,
+        unit_installed,
+        unit_enabled: unit_installed.then(|| systemctl_query(&["is-enabled", "dispatchd.service"])),
+        unit_active: unit_installed.then(|| systemctl_query(&["is-active", "dispatchd.service"])),
+        upgrade_helper_installed: std::path::Path::new(UPGRADE_PATH_PATH).exists(),
+        cred_present: std::path::Path::new(CRED_PATH).exists(),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn status_report() -> ServiceStatus {
+    ServiceStatus {
+        systemd_version: None,
+        min_systemd_version: MIN_SYSTEMD_VERSION,
+        unit_installed: false,
+        unit_enabled: None,
+        unit_active: None,
+        upgrade_helper_installed: false,
+        cred_present: false,
+    }
+}
+
+pub fn format_status(r: &ServiceStatus) -> String {
+    let mut out = String::from("systemd:\n");
+    match r.systemd_version {
+        Some(v) if v >= r.min_systemd_version => out.push_str(&format!(
+            "  version:              {v} (>= {}, ok)\n",
+            r.min_systemd_version
+        )),
+        Some(v) => out.push_str(&format!(
+            "  version:              {v} (< {} - token encryption unavailable)\n",
+            r.min_systemd_version
+        )),
+        None => out.push_str("  version:              unknown\n"),
+    }
+    if r.unit_installed {
+        out.push_str(&format!(
+            "  dispatchd.service:    installed, enabled={}, active={}\n",
+            r.unit_enabled.as_deref().unwrap_or("unknown"),
+            r.unit_active.as_deref().unwrap_or("unknown"),
+        ));
+    } else {
+        out.push_str(
+            "  dispatchd.service:    not installed - run: sudo dispatchd service install\n",
+        );
+    }
+    if r.upgrade_helper_installed {
+        out.push_str("  upgrade helper:       installed\n");
+    } else {
+        out.push_str(
+            "  upgrade helper:       not installed - run: sudo dispatchd service install\n",
+        );
+    }
+    if r.cred_present {
+        out.push_str(&format!(
+            "  discord token:        encrypted credential present ({CRED_PATH})\n"
+        ));
+    } else {
+        out.push_str("  discord token:        not set - run: sudo dispatchd discord login\n");
+    }
+    out
+}
+
 /// `dispatchd status`'s systemd half: whether this host can even support
 /// token encryption, and whether the service is installed/enabled/active.
-/// Prints directly rather than returning structured data, matching
-/// `install`'s style - there's no other consumer of this today.
-#[cfg(target_os = "linux")]
 pub fn status() -> anyhow::Result<()> {
-    println!("systemd:");
-    match systemd_version() {
-        Ok(v) if v >= MIN_SYSTEMD_VERSION => {
-            println!("  version:              {v} (>= {MIN_SYSTEMD_VERSION}, ok)")
-        }
-        Ok(v) => println!(
-            "  version:              {v} (< {MIN_SYSTEMD_VERSION} - token encryption unavailable)"
-        ),
-        Err(e) => println!("  version:              unknown ({e})"),
-    }
-
-    let unit_installed = std::path::Path::new(UNIT_PATH).exists();
-    if unit_installed {
-        println!(
-            "  dispatchd.service:    installed, enabled={}, active={}",
-            systemctl_query(&["is-enabled", "dispatchd.service"]),
-            systemctl_query(&["is-active", "dispatchd.service"])
-        );
-    } else {
-        println!("  dispatchd.service:    not installed - run: sudo dispatchd service install");
-    }
-
-    let cred_exists = std::path::Path::new(CRED_PATH).exists();
-    if cred_exists {
-        println!("  discord token:        encrypted credential present ({CRED_PATH})");
-    } else {
-        println!("  discord token:        not set - run: sudo dispatchd discord login");
-    }
-
+    print!("{}", format_status(&status_report()));
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn install() -> anyhow::Result<()> {
     anyhow::bail!("`dispatchd service install` is only supported on Linux (systemd)");
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn status() -> anyhow::Result<()> {
-    println!("systemd:");
-    println!("  systemd status checks are only supported on Linux");
-    Ok(())
 }
 
 #[cfg(test)]
@@ -389,5 +433,42 @@ mod tests {
         assert!(path.contains("PathExists=/run/dispatchd/upgrade.request"));
         assert!(path.contains("Unit=dispatchd-upgrade.service"));
         assert!(path.contains("WantedBy=paths.target"));
+    }
+
+    fn base_status() -> ServiceStatus {
+        ServiceStatus {
+            systemd_version: Some(252),
+            min_systemd_version: MIN_SYSTEMD_VERSION,
+            unit_installed: true,
+            unit_enabled: Some("enabled".into()),
+            unit_active: Some("active".into()),
+            upgrade_helper_installed: true,
+            cred_present: true,
+        }
+    }
+
+    #[test]
+    fn format_status_reports_a_healthy_install() {
+        let out = format_status(&base_status());
+        assert!(out.contains("dispatchd.service:"));
+        assert!(out.contains("enabled=enabled"));
+        assert!(out.contains("active=active"));
+        assert!(out.contains("upgrade helper:") && out.contains("installed"));
+        assert!(out.contains("encrypted credential present"));
+    }
+
+    #[test]
+    fn format_status_reports_missing_pieces() {
+        let s = ServiceStatus {
+            unit_installed: false,
+            unit_enabled: None,
+            unit_active: None,
+            upgrade_helper_installed: false,
+            cred_present: false,
+            ..base_status()
+        };
+        let out = format_status(&s);
+        assert!(out.contains("not installed"));
+        assert!(out.contains("service install"));
     }
 }
