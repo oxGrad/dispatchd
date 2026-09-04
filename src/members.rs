@@ -116,9 +116,6 @@ pub fn is_lead(conn: &Connection, discord_user_id: &str) -> Result<bool> {
 /// `true` when the member has bot-operator privileges (role `admin`).
 /// `false` for an unknown `discord_user_id`, not an error - the bot-side
 /// source-of-truth check for `/admin`.
-// The `/admin` command group that consumes this lands in a later change;
-// until then only the unit tests exercise it.
-#[allow(dead_code)]
 pub fn is_admin(conn: &Connection, discord_user_id: &str) -> Result<bool> {
     Ok(conn
         .query_row(

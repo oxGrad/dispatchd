@@ -183,8 +183,6 @@ async fn fetch_latest_tag() -> Result<String> {
     parse_latest_tag(&body)
 }
 
-// consumed by Task 7 (/admin status version_line)
-#[expect(dead_code)]
 pub struct UpgradeCheck {
     pub current: String,
     pub latest: String,
@@ -192,8 +190,6 @@ pub struct UpgradeCheck {
 }
 
 /// Resolves the latest release tag and compares it to the running version.
-// consumed by Task 7 (/admin status)
-#[expect(dead_code)]
 pub async fn check() -> Result<UpgradeCheck> {
     let latest = fetch_latest_tag().await?;
     let current = current_version().to_string();
