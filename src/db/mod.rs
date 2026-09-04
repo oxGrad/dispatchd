@@ -10,6 +10,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("migrations/0002_daily_threads.sql")),
         M::up(include_str!("migrations/0003_thread_sync_cursor.sql")),
         M::up(include_str!("migrations/0004_sow_ref.sql")),
+        M::up(include_str!("migrations/0005_members_is_admin.sql")),
     ])
 }
 
@@ -88,6 +89,25 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .unwrap();
         assert_eq!(journal_mode.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn members_has_is_admin_defaulting_to_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("dispatchd.sqlite3")).unwrap();
+        conn.execute(
+            "INSERT INTO members (discord_user_id, name, role, is_lead) VALUES ('1', 'A', 'senior', 0)",
+            [],
+        )
+        .unwrap();
+        let is_admin: bool = conn
+            .query_row(
+                "SELECT is_admin FROM members WHERE discord_user_id = '1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!is_admin);
     }
 
     #[test]

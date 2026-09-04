@@ -11,7 +11,14 @@
 #
 # name is just a display label used in bot output (e.g. /team status lines) -
 # it doesn't need to match the person's actual Discord username.
-# role must be one of: lead | designer | senior | medior | junior
+# role must be one of: admin | lead | designer | senior | medior | junior
+# 'admin' has every /team capability plus the /admin command group
+# (see docs/user-guide.md).
+
+# [[members]]
+# discord_user_id = "000000000000000000"
+# name = "Bot Operator's Name"
+# role = "admin"
 
 # [[members]]
 # discord_user_id = "000000000000000001"
