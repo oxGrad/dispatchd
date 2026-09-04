@@ -68,7 +68,7 @@ usage once it's running.
 
 ```sh
 sudo dispatchd upgrade                    # download latest, verify, swap, restart
-sudo dispatchd upgrade --check            # report current vs latest, do nothing
+dispatchd upgrade --check                 # report current vs latest, do nothing (read-only, no sudo)
 sudo dispatchd upgrade --no-restart       # swap the binary, print the restart command
 sudo dispatchd upgrade --version v0.4.0   # install a specific tag (pin / downgrade)
 ```
@@ -85,6 +85,11 @@ service, hence `sudo`.
 As with the installer, this covers the "binary changed" case. If a
 release note says the **systemd unit itself** changed, still run
 `sudo dispatchd service install` (see below).
+
+`dispatchd upgrade` only works for a binary installed from a GitHub
+release. A build-from-source install has a `DISPATCHD_TARGET` that won't
+match any release asset, so there's nothing for it to download - rebuild
+from source to update instead.
 
 ### Or re-run the installer
 
@@ -135,7 +140,9 @@ sudo systemctl restart dispatchd
 The `dispatchd-upgrade.path` / `dispatchd-upgrade.service` helper units
 (which back Discord's `/admin upgrade`) are also (re)written by
 `service install` - a deployment that predates them needs one
-`sudo dispatchd service install` after upgrading to pick them up.
+`sudo dispatchd service install` followed by `sudo systemctl restart
+dispatchd` after upgrading to pick them up (the restart is what creates
+the bot's `/run/dispatchd` runtime directory).
 
 To move between specific versions (including downgrades), use
 `sudo dispatchd upgrade --version <tag>` (above), or pin the installer

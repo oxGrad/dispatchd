@@ -104,8 +104,10 @@ no token configured until the next step.
 `service install` also writes the `dispatchd-upgrade.path` /
 `dispatchd-upgrade.service` helper units that back Discord's
 `/admin upgrade`. It's idempotent - a deployment that predates those
-units just needs `sudo dispatchd service install` re-run once to pick
-them up.
+units just needs `sudo dispatchd service install` re-run once, then
+`sudo systemctl restart dispatchd`, to pick them up. The restart matters:
+the bot's `/run/dispatchd` runtime directory is created by the unit at
+start, not by `service install`, and `/admin upgrade` needs it.
 
 Then log the bot in. This is also where the token gets encrypted - unlike
 a typical "paste your token here" prompt, `dispatchd` runs the encryption
@@ -208,4 +210,5 @@ health plus a version check) and `/admin upgrade` (self-upgrade from
 Discord). `/admin` is `Manage Server`-gated and bot-side `is_admin`-checked,
 same dual gate as `/team`. Enabling `/admin upgrade` needs the
 `dispatchd-upgrade.path` helper from `sudo dispatchd service install`
-(see step 4). Day-to-day use of both is in `docs/user-guide.md`.
+plus a `sudo systemctl restart dispatchd` afterwards (see step 4).
+Day-to-day use of both is in `docs/user-guide.md`.

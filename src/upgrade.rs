@@ -140,6 +140,7 @@ pub fn parse_status(contents: &str) -> Vec<StatusLine> {
 }
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -147,28 +148,55 @@ fn user_agent() -> String {
     format!("dispatchd/{}", current_version())
 }
 
-/// Ensures a leading `v` so release URLs
-/// (`/releases/download/v0.6.0/...`) build correctly.
-fn normalize_tag(v: &str) -> String {
-    if v.starts_with('v') {
-        v.to_string()
-    } else {
-        format!("v{v}")
-    }
+/// A `reqwest` client with connect + overall timeouts, so a hung GitHub /
+/// CDN connection can't wedge `/admin status` or a CLI upgrade forever.
+fn http_client(timeout: std::time::Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(timeout)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// GET `url` with dispatchd's User-Agent (GitHub requires one), turning a
+/// transport failure or non-2xx status into an error tagged with `what`.
+/// The caller reads the body (`.text()` / `.bytes()`) with its own context.
+async fn github_get(client: &reqwest::Client, url: &str, what: &str) -> Result<reqwest::Response> {
+    client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, user_agent())
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .with_context(|| format!("failed to download {what}"))?
+        .error_for_status()
+        .with_context(|| format!("{what} is missing or returned an error status"))
+}
+
+/// Validates + canonicalises a version tag to `vMAJOR.MINOR.PATCH`. Called
+/// from both the CLI (`--version`) and the root helper (from the
+/// bot-written request file - the untrusted boundary), so a malformed or
+/// hostile value (`../../../x`, `v1.x.0`) is rejected here rather than
+/// flowing into a release URL.
+fn normalize_tag(v: &str) -> anyhow::Result<String> {
+    let core = v.strip_prefix('v').unwrap_or(v);
+    let ok = core.split('.').count() == 3
+        && core
+            .split('.')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    anyhow::ensure!(
+        ok,
+        "invalid version tag {v:?} - expected vMAJOR.MINOR.PATCH"
+    );
+    Ok(format!("v{core}"))
 }
 
 /// GETs the GitHub `releases/latest` endpoint and returns its `tag_name`.
 async fn fetch_latest_tag() -> Result<String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let body = reqwest::Client::new()
-        .get(&url)
-        .header(reqwest::header::USER_AGENT, user_agent())
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .send()
-        .await
-        .context("failed to reach the GitHub releases API")?
-        .error_for_status()
-        .context("GitHub releases API returned an error status")?
+    let client = http_client(Duration::from_secs(20));
+    let body = github_get(&client, &url, "the GitHub releases API")
+        .await?
         .text()
         .await
         .context("failed to read the GitHub releases API response")?;
@@ -193,36 +221,63 @@ pub async fn check() -> Result<UpgradeCheck> {
     })
 }
 
+/// Unlinks a staged upgrade binary (~15MB) on drop unless `disarm`ed,
+/// so a failure between staging and the atomic rename-in doesn't orphan
+/// `.dispatchd.upgrade.<pid>` next to the real binary.
+struct StagedBinary {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagedBinary {
+    fn new(path: PathBuf) -> Self {
+        StagedBinary { path, armed: true }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Call once `install_staged` has consumed the file by renaming it in.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagedBinary {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Downloads `dispatchd-<target>.tar.gz` + `SHA256SUMS` for `tag`, verifies
 /// the checksum, extracts the `dispatchd` entry to a uniquely-named temp
 /// file inside `dest_dir` (same filesystem as the real binary, so the
-/// later rename is atomic), chmod 0755. Returns the staged path.
-async fn download_and_stage(tag: &str, dest_dir: &Path) -> Result<PathBuf> {
-    let tag = normalize_tag(tag);
+/// later rename is atomic), chmod 0755. Returns the staged file, guarded
+/// so it's cleaned up unless the caller `disarm`s it after installing.
+async fn download_and_stage(tag: &str, dest_dir: &Path) -> Result<StagedBinary> {
+    let tag = normalize_tag(tag)?;
     let asset = asset_name();
     let base = format!("https://github.com/{REPO}/releases/download/{tag}");
-    let client = reqwest::Client::new();
+    // A generous timeout for the tarball (slow armv7 / Pi links), a tight
+    // one for the tiny SHA256SUMS file.
+    let tarball_client = http_client(Duration::from_secs(600));
+    let meta_client = http_client(Duration::from_secs(20));
 
-    let tarball = client
-        .get(format!("{base}/{asset}"))
-        .header(reqwest::header::USER_AGENT, user_agent())
-        .send()
-        .await
-        .with_context(|| format!("failed to download {asset} for {tag}"))?
-        .error_for_status()
-        .with_context(|| format!("no {asset} in release {tag}"))?
-        .bytes()
-        .await
-        .context("failed to read the release tarball")?;
+    let tarball = github_get(
+        &tarball_client,
+        &format!("{base}/{asset}"),
+        &format!("{asset} for {tag}"),
+    )
+    .await?
+    .bytes()
+    .await
+    .context("failed to read the release tarball")?;
 
-    let sums = client
-        .get(format!("{base}/SHA256SUMS"))
-        .header(reqwest::header::USER_AGENT, user_agent())
-        .send()
-        .await
-        .context("failed to download SHA256SUMS")?
-        .error_for_status()
-        .context("SHA256SUMS missing from the release")?
+    let sums = github_get(&meta_client, &format!("{base}/SHA256SUMS"), "SHA256SUMS")
+        .await?
         .text()
         .await
         .context("failed to read SHA256SUMS")?;
@@ -235,7 +290,8 @@ async fn download_and_stage(tag: &str, dest_dir: &Path) -> Result<PathBuf> {
         anyhow::bail!("checksum verification failed for {asset}");
     }
 
-    let staged = dest_dir.join(format!(".dispatchd.upgrade.{}", std::process::id()));
+    let staged =
+        StagedBinary::new(dest_dir.join(format!(".dispatchd.upgrade.{}", std::process::id())));
     {
         let gz = flate2::read::GzDecoder::new(&tarball[..]);
         let mut archive = tar::Archive::new(gz);
@@ -244,9 +300,14 @@ async fn download_and_stage(tag: &str, dest_dir: &Path) -> Result<PathBuf> {
             let mut entry = entry.context("corrupt release tarball entry")?;
             let path = entry.path().context("bad path in release tarball")?;
             if path.file_name().and_then(|n| n.to_str()) == Some("dispatchd") {
-                let mut out = std::fs::File::create(&staged)
-                    .with_context(|| format!("failed to create {}", staged.display()))?;
+                let mut out = std::fs::File::create(staged.path())
+                    .with_context(|| format!("failed to create {}", staged.path().display()))?;
                 std::io::copy(&mut entry, &mut out).context("failed to unpack the binary")?;
+                // Durably flush before the later atomic rename: an SD-card
+                // Pi losing power between rename and writeback would
+                // otherwise leave a truncated binary in place.
+                out.sync_all()
+                    .context("failed to flush the staged binary")?;
                 wrote = true;
                 break;
             }
@@ -255,7 +316,7 @@ async fn download_and_stage(tag: &str, dest_dir: &Path) -> Result<PathBuf> {
             anyhow::bail!("release tarball did not contain a `dispatchd` binary");
         }
     }
-    set_executable(&staged)?;
+    set_executable(staged.path())?;
     Ok(staged)
 }
 
@@ -342,7 +403,7 @@ pub async fn run(args: UpgradeArgs) -> Result<()> {
 
     let current = current_version().to_string();
     let target = match &args.version {
-        Some(v) => normalize_tag(v),
+        Some(v) => normalize_tag(v)?,
         None => fetch_latest_tag().await?,
     };
 
@@ -370,9 +431,10 @@ pub async fn run(args: UpgradeArgs) -> Result<()> {
         .context("dispatchd's path has no parent directory")?;
 
     println!("downloading {} ...", asset_name());
-    let staged = download_and_stage(&target, dir).await?;
+    let mut staged = download_and_stage(&target, dir).await?;
     println!("verified. installing to {} ...", exe.display());
-    install_staged(&staged, &exe)?;
+    install_staged(staged.path(), &exe)?;
+    staged.disarm();
     println!("installed {target}.");
 
     if args.no_restart {
@@ -468,7 +530,7 @@ async fn perform_from_request(request: &Request) -> Result<()> {
 
     append_status(&StatusLine::Checking);
     let target = match &request.target_version {
-        Some(v) => normalize_tag(v),
+        Some(v) => normalize_tag(v)?,
         None => fetch_latest_tag().await?,
     };
     append_status(&StatusLine::Found {
@@ -496,9 +558,10 @@ async fn perform_from_request(request: &Request) -> Result<()> {
     append_status(&StatusLine::Downloading {
         asset: asset_name(),
     });
-    let staged = download_and_stage(&target, dir).await?;
+    let mut staged = download_and_stage(&target, dir).await?;
     append_status(&StatusLine::Verified);
-    install_staged(&staged, &exe)?;
+    install_staged(staged.path(), &exe)?;
+    staged.disarm();
     append_status(&StatusLine::Swapped);
 
     append_status(&StatusLine::Restarting);
@@ -653,8 +716,44 @@ bbbb  dispatchd-aarch64-unknown-linux-musl.tar.gz
 
     #[test]
     fn normalize_tag_adds_a_leading_v() {
-        assert_eq!(normalize_tag("0.6.0"), "v0.6.0");
-        assert_eq!(normalize_tag("v0.6.0"), "v0.6.0");
+        assert_eq!(normalize_tag("0.6.0").unwrap(), "v0.6.0");
+        assert_eq!(normalize_tag("v0.6.0").unwrap(), "v0.6.0");
+    }
+
+    #[test]
+    fn normalize_tag_rejects_anything_that_is_not_v_major_minor_patch() {
+        for good in ["0.6.0", "v0.6.0", "10.20.30", "v0.0.0"] {
+            assert!(normalize_tag(good).is_ok(), "{good} should be accepted");
+        }
+        for bad in [
+            "../../../x",
+            "v1.2",
+            "1.2.3.4",
+            "v1.x.0",
+            "",
+            "v",
+            "0..0",
+            "0.6.0-rc1",
+        ] {
+            assert!(normalize_tag(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn staged_binary_unlinks_on_drop_unless_disarmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(".dispatchd.upgrade.test");
+
+        std::fs::write(&p, b"x").unwrap();
+        drop(StagedBinary::new(p.clone()));
+        assert!(!p.exists(), "an armed guard unlinks on drop");
+
+        std::fs::write(&p, b"x").unwrap();
+        {
+            let mut g = StagedBinary::new(p.clone());
+            g.disarm();
+        }
+        assert!(p.exists(), "a disarmed guard leaves the file alone");
     }
 
     #[test]

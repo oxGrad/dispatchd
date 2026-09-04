@@ -105,7 +105,7 @@ impl EventHandler for Handler {
                     Some(("upgrade", opts)) => {
                         admin::handle_upgrade(&ctx, &command, opts, &self.db).await
                     }
-                    Some(("help", _)) => admin::handle_help(&ctx, &command).await,
+                    Some(("help", _)) => admin::handle_help(&ctx, &command, &self.db).await,
                     _ => {}
                 },
                 _ => {}

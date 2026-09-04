@@ -230,9 +230,11 @@ the upgrade did not complete - check `journalctl -u dispatchd-upgrade` on
 the host.
 
 Guards: if `/admin upgrade` replies that the helper isn't installed, run
-`sudo dispatchd service install` on the host once (also needed on any
-deployment that predates this feature). If an upgrade is already running,
-it refuses a second one.
+`sudo dispatchd service install` on the host once, then `sudo systemctl
+restart dispatchd` (the restart is what creates the bot's
+`/run/dispatchd` runtime directory - `service install` alone doesn't).
+This is also needed on any deployment that predates this feature. If an
+upgrade is already running, it refuses a second one.
 
 ## `/help` and `/ping`
 

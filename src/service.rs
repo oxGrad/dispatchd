@@ -261,6 +261,8 @@ fn systemctl_query(args: &[&str]) -> String {
 /// installed/enabled/active. Gathered here, rendered by `format_status` -
 /// so `/admin status` (which can't `println!`) can reuse the same data.
 pub struct ServiceStatus {
+    /// `false` on non-Linux, where none of the systemd checks can run.
+    pub supported: bool,
     pub systemd_version: Option<u32>,
     pub min_systemd_version: u32,
     pub unit_installed: bool,
@@ -274,6 +276,7 @@ pub struct ServiceStatus {
 pub fn status_report() -> ServiceStatus {
     let unit_installed = std::path::Path::new(UNIT_PATH).exists();
     ServiceStatus {
+        supported: true,
         systemd_version: systemd_version().ok(),
         min_systemd_version: MIN_SYSTEMD_VERSION,
         unit_installed,
@@ -287,6 +290,7 @@ pub fn status_report() -> ServiceStatus {
 #[cfg(not(target_os = "linux"))]
 pub fn status_report() -> ServiceStatus {
     ServiceStatus {
+        supported: false,
         systemd_version: None,
         min_systemd_version: MIN_SYSTEMD_VERSION,
         unit_installed: false,
@@ -298,6 +302,9 @@ pub fn status_report() -> ServiceStatus {
 }
 
 pub fn format_status(r: &ServiceStatus) -> String {
+    if !r.supported {
+        return String::from("systemd:\n  systemd status checks are only supported on Linux\n");
+    }
     let mut out = String::from("systemd:\n");
     match r.systemd_version {
         Some(v) if v >= r.min_systemd_version => out.push_str(&format!(
@@ -416,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn render_upgrade_service_is_a_rootless_oneshot_helper() {
+    fn render_upgrade_service_is_a_root_oneshot_helper() {
         let unit = render_upgrade_service("/usr/local/bin/dispatchd");
         assert!(unit.contains("ExecStart=/usr/local/bin/dispatchd upgrade --from-request"));
         assert!(unit.contains("Type=oneshot"));
@@ -437,6 +444,7 @@ mod tests {
 
     fn base_status() -> ServiceStatus {
         ServiceStatus {
+            supported: true,
             systemd_version: Some(252),
             min_systemd_version: MIN_SYSTEMD_VERSION,
             unit_installed: true,
@@ -470,5 +478,18 @@ mod tests {
         let out = format_status(&s);
         assert!(out.contains("not installed"));
         assert!(out.contains("service install"));
+    }
+
+    #[test]
+    fn format_status_on_an_unsupported_platform_says_so() {
+        let s = ServiceStatus {
+            supported: false,
+            ..base_status()
+        };
+        let out = format_status(&s);
+        assert_eq!(
+            out,
+            "systemd:\n  systemd status checks are only supported on Linux\n"
+        );
     }
 }

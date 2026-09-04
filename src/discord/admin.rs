@@ -76,13 +76,13 @@ fn permission_denied_reply() -> &'static str {
 fn version_line(check: Result<upgrade::UpgradeCheck, String>) -> String {
     match check {
         Ok(c) if c.update_available => format!(
-            "  version:              {} — update available: {}",
+            "  version:              {} - update available: {}",
             c.current,
             c.latest.trim_start_matches('v')
         ),
         Ok(c) => format!("  version:              {} (up to date)", c.current),
         Err(e) => format!(
-            "  version:              {} — latest unknown ({e})",
+            "  version:              {} - latest unknown ({e})",
             upgrade::current_version()
         ),
     }
@@ -113,7 +113,29 @@ async fn ephemeral(
     }
 }
 
-pub async fn handle_help(ctx: &SerenityContext, command: &CommandInteraction) {
+pub async fn handle_help(
+    ctx: &SerenityContext,
+    command: &CommandInteraction,
+    db: &Arc<Mutex<Connection>>,
+) {
+    let discord_user_id = command.user.id.to_string();
+    let allowed = {
+        let conn = db.lock().expect("db mutex poisoned");
+        members::is_admin(&conn, &discord_user_id)
+    };
+    match allowed {
+        Ok(true) => {}
+        Ok(false) => return ephemeral(ctx, command, permission_denied_reply()).await,
+        Err(e) => {
+            eprintln!("failed to check is_admin: {e}");
+            return ephemeral(
+                ctx,
+                command,
+                "⚠️ Something went wrong checking permissions.",
+            )
+            .await;
+        }
+    }
     ephemeral(ctx, command, ADMIN_HELP_TEXT).await;
 }
 
@@ -141,11 +163,21 @@ pub async fn handle_status(
         }
     }
 
+    // Defer before the network round-trips (systemd probe + Discord ping +
+    // GitHub release check) - together they can easily exceed Discord's
+    // 3-second initial-response window.
+    let defer =
+        CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new().ephemeral(true));
+    if let Err(e) = command.create_response(&ctx.http, defer).await {
+        eprintln!("failed to defer /admin status: {e}");
+        return;
+    }
+
     let svc = service::status_report();
     let ping = discord_login::ping_report().await;
     let check = upgrade::check().await.map_err(|e| e.to_string());
     let body = format_admin_status(&svc, &ping, &version_line(check));
-    ephemeral(ctx, command, body).await;
+    edit(ctx, command, body).await;
 }
 
 /// Renders the tail of the helper's progress into the ephemeral reply.
@@ -205,7 +237,7 @@ pub async fn handle_upgrade(
         return ephemeral(
             ctx,
             command,
-            "⚠️ The upgrade helper isn't installed. Run `sudo dispatchd service install` on the host once, then retry.",
+            "⚠️ The upgrade helper isn't installed. Run `sudo dispatchd service install` and then `sudo systemctl restart dispatchd` on the host, then retry.",
         )
         .await;
     }
@@ -224,6 +256,10 @@ pub async fn handle_upgrade(
         .unwrap_or(true);
 
     ephemeral(ctx, command, "🔎 Checking for updates…").await;
+
+    // Clear any status file left by a previous run so the poll loop below
+    // can't latch onto its stale terminal line.
+    let _ = std::fs::remove_file(upgrade::STATUS_PATH);
 
     let request = Request {
         requested_by: discord_user_id,
@@ -258,10 +294,14 @@ pub async fn handle_upgrade(
         if !lines.is_empty() {
             edit(ctx, command, render_steps(&lines)).await;
         }
-        if lines
-            .iter()
-            .any(|l| matches!(l, StatusLine::Restarting) || l.is_terminal())
-        {
+        // A `Restarting` line means the new instance will read this file to
+        // post its confirmation - leave it in place. Any other terminal
+        // line (noop `Done`, `Error`) is fully handled here, so clear it.
+        if lines.iter().any(|l| matches!(l, StatusLine::Restarting)) {
+            return;
+        }
+        if lines.iter().any(|l| l.is_terminal()) {
+            let _ = std::fs::remove_file(upgrade::STATUS_PATH);
             return;
         }
         if std::time::Instant::now() >= deadline {
@@ -419,6 +459,7 @@ mod tests {
     #[test]
     fn format_admin_status_wraps_all_three_sections_in_one_code_block() {
         let svc = ServiceStatus {
+            supported: true,
             systemd_version: Some(252),
             min_systemd_version: 250,
             unit_installed: true,
