@@ -11,6 +11,7 @@ mod members;
 mod reminders;
 mod service;
 mod status;
+mod upgrade;
 
 use std::env;
 use std::sync::{Arc, Mutex};
