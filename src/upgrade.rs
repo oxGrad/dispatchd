@@ -10,8 +10,6 @@
 use serde::{Deserialize, Serialize};
 
 pub const REPO: &str = "oxGrad/dispatchd";
-// consumed by Task 8 (admin upgrade tailing)
-#[expect(dead_code)]
 pub const RUN_DIR: &str = "/run/dispatchd";
 pub const REQUEST_PATH: &str = "/run/dispatchd/upgrade.request";
 pub const STATUS_PATH: &str = "/run/dispatchd/upgrade.status";
@@ -127,18 +125,12 @@ pub enum StatusLine {
 
 impl StatusLine {
     /// `Done` / `Error` end the sequence.
-    // consumed by Task 8 (post_upgrade_confirmation / tail loop); exercised
-    // by the unit tests, so the guard is non-test builds only
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn is_terminal(&self) -> bool {
         matches!(self, StatusLine::Done { .. } | StatusLine::Error { .. })
     }
 }
 
 /// Parses `STATUS_PATH`'s contents, skipping blank and unparseable lines.
-// consumed by Task 8 (admin upgrade tailing); exercised by the unit tests,
-// so the guard is non-test builds only
-#[cfg_attr(not(test), expect(dead_code))]
 pub fn parse_status(contents: &str) -> Vec<StatusLine> {
     contents
         .lines()
