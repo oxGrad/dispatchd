@@ -10,12 +10,10 @@
 use serde::{Deserialize, Serialize};
 
 pub const REPO: &str = "oxGrad/dispatchd";
-// consumed by Task 4 (run_from_request) and Task 8 (admin upgrade tailing)
+// consumed by Task 8 (admin upgrade tailing)
 #[expect(dead_code)]
 pub const RUN_DIR: &str = "/run/dispatchd";
-#[expect(dead_code)]
 pub const REQUEST_PATH: &str = "/run/dispatchd/upgrade.request";
-#[expect(dead_code)]
 pub const STATUS_PATH: &str = "/run/dispatchd/upgrade.status";
 
 /// The crate version this binary was built from (e.g. "0.5.0"), no `v`.
@@ -86,9 +84,6 @@ pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> bool {
 }
 
 /// What `/admin upgrade` writes to `REQUEST_PATH` for the root helper.
-// consumed by Task 4 (run_from_request) and Task 8 (admin upgrade); the
-// unit tests already construct it, so the guard is non-test builds only
-#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub requested_by: String,
@@ -141,8 +136,8 @@ impl StatusLine {
 }
 
 /// Parses `STATUS_PATH`'s contents, skipping blank and unparseable lines.
-// consumed by Task 4 (run_from_request) and Task 8 (admin upgrade tailing);
-// exercised by the unit tests, so the guard is non-test builds only
+// consumed by Task 8 (admin upgrade tailing); exercised by the unit tests,
+// so the guard is non-test builds only
 #[cfg_attr(not(test), expect(dead_code))]
 pub fn parse_status(contents: &str) -> Vec<StatusLine> {
     contents
@@ -406,9 +401,136 @@ pub async fn run(args: UpgradeArgs) -> Result<()> {
     Ok(())
 }
 
-// Placeholder until Task 4; keeps `run()` compiling.
+/// Deletes its path on drop - guarantees `REQUEST_PATH` is removed on
+/// every exit path of the helper, so the `.path` unit re-arms instead of
+/// re-triggering in a loop.
+struct RequestGuard {
+    path: PathBuf,
+}
+
+impl RequestGuard {
+    fn new(path: PathBuf) -> Self {
+        RequestGuard { path }
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Appends one `StatusLine` as JSON + newline to `path`. Best-effort - a
+/// failed status write must not abort the upgrade.
+fn append_status_to(path: &Path, line: &StatusLine) {
+    use std::io::Write;
+    if let Ok(json) = serde_json::to_string(line)
+        && let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    {
+        let _ = writeln!(f, "{json}");
+    }
+}
+
+fn append_status(line: &StatusLine) {
+    append_status_to(Path::new(STATUS_PATH), line);
+}
+
+/// The `dispatchd-upgrade.service` (root oneshot) entry point. Reads the
+/// request `/admin upgrade` wrote, streams progress to `STATUS_PATH`, does
+/// the upgrade, and (unless the request said not to) restarts the bot.
+/// `REQUEST_PATH` is deleted no matter how this returns.
 async fn run_from_request(_args: UpgradeArgs) -> Result<()> {
-    anyhow::bail!("--from-request is implemented in a later task")
+    let _guard = RequestGuard::new(PathBuf::from(REQUEST_PATH));
+
+    let raw = std::fs::read_to_string(REQUEST_PATH)
+        .with_context(|| format!("no upgrade request at {REQUEST_PATH}"))?;
+    let request: Request = match serde_json::from_str(&raw) {
+        Ok(r) => r,
+        Err(e) => {
+            append_status(&StatusLine::Error {
+                message: format!("unreadable upgrade request: {e}"),
+                channel_id: String::new(),
+            });
+            anyhow::bail!("unreadable upgrade request: {e}");
+        }
+    };
+
+    // Fresh status file for this run.
+    let _ = std::fs::write(STATUS_PATH, b"");
+    let chan = request.channel_id.clone();
+
+    let result = perform_from_request(&request).await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            append_status(&StatusLine::Error {
+                message: e.to_string(),
+                channel_id: chan,
+            });
+            Err(e)
+        }
+    }
+}
+
+async fn perform_from_request(request: &Request) -> Result<()> {
+    let current = current_version().to_string();
+
+    append_status(&StatusLine::Checking);
+    let target = match &request.target_version {
+        Some(v) => normalize_tag(v),
+        None => fetch_latest_tag().await?,
+    };
+    append_status(&StatusLine::Found {
+        current: current.clone(),
+        latest: target.clone(),
+    });
+
+    if request.target_version.is_none() && !is_newer(&target, &current) {
+        append_status(&StatusLine::Done {
+            from: current.clone(),
+            to: current.clone(),
+            channel_id: request.channel_id.clone(),
+            requested_by: request.requested_by.clone(),
+            requested_by_name: request.requested_by_name.clone(),
+            noop: true,
+        });
+        return Ok(());
+    }
+
+    let exe = resolve_exe()?;
+    let dir = exe
+        .parent()
+        .context("dispatchd's path has no parent directory")?;
+
+    append_status(&StatusLine::Downloading {
+        asset: asset_name(),
+    });
+    let staged = download_and_stage(&target, dir).await?;
+    append_status(&StatusLine::Verified);
+    install_staged(&staged, &exe)?;
+    append_status(&StatusLine::Swapped);
+
+    append_status(&StatusLine::Restarting);
+    // Delete the request now, before the restart, so a crash mid-restart
+    // can't leave a re-triggering request behind. The guard is a backstop.
+    let _ = std::fs::remove_file(REQUEST_PATH);
+
+    append_status(&StatusLine::Done {
+        from: current,
+        to: target.trim_start_matches('v').to_string(),
+        channel_id: request.channel_id.clone(),
+        requested_by: request.requested_by.clone(),
+        requested_by_name: request.requested_by_name.clone(),
+        noop: false,
+    });
+
+    if request.restart {
+        restart_dispatchd()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -545,6 +667,39 @@ bbbb  dispatchd-aarch64-unknown-linux-musl.tar.gz
     fn normalize_tag_adds_a_leading_v() {
         assert_eq!(normalize_tag("0.6.0"), "v0.6.0");
         assert_eq!(normalize_tag("v0.6.0"), "v0.6.0");
+    }
+
+    #[test]
+    fn request_guard_deletes_the_file_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let req = dir.path().join("upgrade.request");
+        std::fs::write(&req, "{}").unwrap();
+        {
+            let _g = RequestGuard::new(req.clone());
+            assert!(req.exists());
+        }
+        assert!(!req.exists(), "guard must unlink the request on drop");
+    }
+
+    #[test]
+    fn request_guard_drop_is_fine_when_file_already_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let req = dir.path().join("upgrade.request");
+        {
+            let _g = RequestGuard::new(req.clone());
+            // never created
+        }
+        assert!(!req.exists());
+    }
+
+    #[test]
+    fn append_status_writes_one_json_line_per_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = dir.path().join("upgrade.status");
+        append_status_to(&status, &StatusLine::Checking);
+        append_status_to(&status, &StatusLine::Verified);
+        let parsed = parse_status(&std::fs::read_to_string(&status).unwrap());
+        assert_eq!(parsed, vec![StatusLine::Checking, StatusLine::Verified]);
     }
 
     #[test]
