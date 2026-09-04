@@ -64,6 +64,30 @@ usage once it's running.
 
 ## Upgrading
 
+### `dispatchd upgrade` (recommended)
+
+```sh
+sudo dispatchd upgrade                    # download latest, verify, swap, restart
+sudo dispatchd upgrade --check            # report current vs latest, do nothing
+sudo dispatchd upgrade --no-restart       # swap the binary, print the restart command
+sudo dispatchd upgrade --version v0.4.0   # install a specific tag (pin / downgrade)
+```
+
+`dispatchd upgrade` resolves the latest GitHub release, and if it's newer
+than the running binary, downloads the right prebuilt for this machine,
+verifies its SHA-256 against the release `SHA256SUMS`, swaps it in place,
+and runs `systemctl restart dispatchd`. `--no-restart` skips the restart
+and prints the command instead; a restart that fails is reported, not
+fatal. `--version` installs any tag, including an older one to downgrade.
+It needs root to write `/usr/local/bin/dispatchd` and to restart the
+service, hence `sudo`.
+
+As with the installer, this covers the "binary changed" case. If a
+release note says the **systemd unit itself** changed, still run
+`sudo dispatchd service install` (see below).
+
+### Or re-run the installer
+
 Re-run the installer - it overwrites the binary in place:
 
 ```sh
@@ -108,8 +132,14 @@ sudo dispatchd service install   # idempotent: rewrites the unit + daemon-reload
 sudo systemctl restart dispatchd
 ```
 
-To move between specific versions (including downgrades), pin with
-`DISPATCHD_VERSION` (see "Options") and restart the same way.
+The `dispatchd-upgrade.path` / `dispatchd-upgrade.service` helper units
+(which back Discord's `/admin upgrade`) are also (re)written by
+`service install` - a deployment that predates them needs one
+`sudo dispatchd service install` after upgrading to pick them up.
+
+To move between specific versions (including downgrades), use
+`sudo dispatchd upgrade --version <tag>` (above), or pin the installer
+with `DISPATCHD_VERSION` (see "Options") and restart the same way.
 
 ## Running on a cloud VM (Google Cloud free tier)
 

@@ -182,6 +182,58 @@ up..."* - with no `@mentions`, and marks the automated pre-meeting ping as
 sent so it won't also fire. Running it a second time the same day just
 tells you it's already skipped. Needs today's thread to exist.
 
+## Bot operator - the `admin` role
+
+A member with `role = "admin"` in `members.toml` has **every `/team`
+capability** (they count as a tech lead for all of them) **plus** the
+`/admin` command group. `/admin` is for whoever operates the bot's host,
+and is hidden from everyone else.
+
+### `/admin status` - admin only
+
+Ephemeral. The same systemd + Discord health `dispatchd status` prints on
+the host (unit installed / enabled / active, whether the upgrade helper
+is installed, Discord round-trip latency), plus a version line: the
+running version against the latest GitHub release -
+`0.5.0 (up to date)` or `0.5.0 - update available: 0.6.0`. Each part
+degrades on its own if something can't be reached (e.g. `latest unknown`
+when GitHub is unreachable) rather than failing the whole reply.
+
+### `/admin upgrade [version] [restart]` - admin only
+
+Upgrades dispatchd to the latest release, or to the `version` tag you pin
+(which may be older, to downgrade). `restart` defaults to true.
+
+The bot runs unprivileged, so it hands the actual work to a root systemd
+helper installed by `sudo dispatchd service install`. You watch per-step
+progress in the ephemeral reply:
+
+```
+**Upgrade progress**
+✓ checking for updates
+✓ latest is 0.6.0 (current 0.5.0)
+✓ downloading dispatchd-aarch64-unknown-linux-musl.tar.gz
+✓ checksum verified
+✓ binary swapped
+↻ Restarting dispatchd now — the new instance will confirm in this channel.
+```
+
+A successful upgrade restarts the bot, so the **freshly-started instance**
+posts a public confirmation into the channel you ran the command in:
+
+```
+✅ dispatchd upgraded v0.5.0 → v0.6.0 (requested by @you).
+```
+
+**If that confirmation never appears** after "Restarting dispatchd now",
+the upgrade did not complete - check `journalctl -u dispatchd-upgrade` on
+the host.
+
+Guards: if `/admin upgrade` replies that the helper isn't installed, run
+`sudo dispatchd service install` on the host once (also needed on any
+deployment that predates this feature). If an upgrade is already running,
+it refuses a second one.
+
 ## `/help` and `/ping`
 
 `/help` lists every command in one place; `/ping` just confirms dispatchd
