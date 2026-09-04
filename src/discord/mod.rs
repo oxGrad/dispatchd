@@ -56,7 +56,7 @@ impl EventHandler for Handler {
                 }
                 "help" => help::handle_command(&ctx, &command).await,
                 "todo" => match todo::subcommand(&command.data.options) {
-                    Some(("create", _)) => todo::handle_create(&ctx, &command).await,
+                    Some(("add", _)) => todo::handle_add(&ctx, &command).await,
                     Some(("edit", opts)) => {
                         todo::handle_edit(&ctx, &command, opts, &self.db, &self.timezone).await
                     }
@@ -69,7 +69,17 @@ impl EventHandler for Handler {
                     Some(("help", _)) => todo::handle_help(&ctx, &command).await,
                     _ => {}
                 },
-                "progress" => progress::handle_command(&ctx, &command).await,
+                "progress" => match progress::subcommand(&command.data.options) {
+                    Some(("add", opts)) => progress::handle_add(&ctx, &command, opts).await,
+                    Some(("edit", opts)) => {
+                        progress::handle_edit(&ctx, &command, opts, &self.db, &self.timezone).await
+                    }
+                    Some(("list", _)) => {
+                        progress::handle_list(&ctx, &command, &self.db, &self.timezone).await
+                    }
+                    Some(("help", _)) => progress::handle_help(&ctx, &command).await,
+                    _ => {}
+                },
                 // Three subcommands, so `match` rather than `if let`.
                 "team" => match team::subcommand(&command.data.options) {
                     Some(("status", _)) => {
@@ -99,13 +109,22 @@ impl EventHandler for Handler {
                 "team" => team::handle_autocomplete(&ctx, &autocomplete, &self.db).await,
                 _ => {}
             },
-            Interaction::Modal(modal) if modal.data.custom_id == todo::CREATE_MODAL_ID => {
+            Interaction::Modal(modal) if modal.data.custom_id == todo::ADD_MODAL_ID => {
                 todo::handle_modal_submission(&ctx, &modal, &self.db, &self.timezone).await;
             }
             Interaction::Modal(modal)
                 if modal.data.custom_id.starts_with(todo::EDIT_MODAL_PREFIX) =>
             {
                 todo::handle_edit_modal_submission(&ctx, &modal, &self.db, &self.timezone).await;
+            }
+            Interaction::Modal(modal)
+                if modal
+                    .data
+                    .custom_id
+                    .starts_with(progress::EDIT_MODAL_PREFIX) =>
+            {
+                progress::handle_edit_modal_submission(&ctx, &modal, &self.db, &self.timezone)
+                    .await;
             }
             Interaction::Modal(modal)
                 if modal.data.custom_id.starts_with(progress::MODAL_PREFIX) =>

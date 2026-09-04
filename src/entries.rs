@@ -232,6 +232,102 @@ pub fn delete_todo(
     }
 }
 
+/// One of this user's `type = 'update'` rows for `date`. Backs `/progress
+/// list` (full detail) and `/progress edit`'s autocomplete (which uses
+/// only `id`/`task`/`status`). Filtered by a `task` substring like the
+/// todo listers, capped at 25.
+#[derive(Debug, PartialEq, Eq)]
+pub struct UpdateRow {
+    pub id: i64,
+    pub task: String,
+    pub status: String,
+    pub progress: String,
+    pub blocker: Option<String>,
+}
+
+pub fn list_updates(
+    conn: &Connection,
+    discord_user_id: &str,
+    date: &str,
+    partial: &str,
+) -> Result<Vec<UpdateRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, task, status, progress, blocker FROM entries
+         WHERE type = 'update' AND discord_user_id = ?1 AND date = ?2
+           AND task LIKE '%' || ?3 || '%'
+         ORDER BY id
+         LIMIT 25",
+    )?;
+    let rows = stmt
+        .query_map(params![discord_user_id, date, partial], |row| {
+            Ok(UpdateRow {
+                id: row.get(0)?,
+                task: row.get(1)?,
+                status: row.get(2)?,
+                progress: row.get(3)?,
+                blocker: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// An update row's current editable fields, scoped to
+/// owner+date+type='update' - pre-fills `/progress edit`'s modal, and
+/// supplies the fallback `status` when the command's `status` option is
+/// omitted (meaning "keep the current status").
+#[derive(Debug, PartialEq, Eq)]
+pub struct UpdateForEdit {
+    pub status: String,
+    pub progress: String,
+    pub blocker: Option<String>,
+}
+
+pub fn update_for_edit(
+    conn: &Connection,
+    update_id: i64,
+    discord_user_id: &str,
+    date: &str,
+) -> Result<Option<UpdateForEdit>> {
+    Ok(conn
+        .query_row(
+            "SELECT status, progress, blocker FROM entries
+             WHERE id = ?1 AND type = 'update' AND discord_user_id = ?2 AND date = ?3",
+            params![update_id, discord_user_id, date],
+            |row| {
+                Ok(UpdateForEdit {
+                    status: row.get(0)?,
+                    progress: row.get(1)?,
+                    blocker: row.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Revises an existing progress report's status/progress/blocker in place,
+/// scoped to owner+date+type='update' (same defensive scoping as
+/// `update_todo`). Returns `false` if no matching row was found (wrong
+/// owner, not from today, unknown id, or a `todo` row). `task` and the
+/// `todo_id` link are deliberately left untouched - an edit revises what
+/// was reported, not which todo it was against.
+pub fn update_update(
+    conn: &Connection,
+    update_id: i64,
+    discord_user_id: &str,
+    date: &str,
+    status: &str,
+    progress: &str,
+    blocker: Option<&str>,
+) -> Result<bool> {
+    let rows = conn.execute(
+        "UPDATE entries SET status = ?1, progress = ?2, blocker = ?3
+         WHERE id = ?4 AND type = 'update' AND discord_user_id = ?5 AND date = ?6",
+        params![status, progress, blocker, update_id, discord_user_id, date],
+    )?;
+    Ok(rows > 0)
+}
+
 /// One row for the ticker's periodic thread-sync pass. `sow_ref` is only
 /// ever set on `'todo'` rows (`update` rows always read `None` here).
 #[derive(Debug, PartialEq, Eq)]
@@ -735,6 +831,194 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn list_updates_returns_owners_updates_for_date_filtered_by_substring() {
+        let conn = open_test_db();
+        let todo_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
+        let u1 = insert_update(
+            &conn,
+            "42",
+            "2026-08-29",
+            "Write tests",
+            Some(todo_id),
+            "done",
+            "all green",
+            None,
+        )
+        .unwrap();
+        let u2 = insert_update(
+            &conn,
+            "42",
+            "2026-08-29",
+            "Fix prod outage",
+            None,
+            "blocked",
+            "rolled back",
+            Some("waiting on ops"),
+        )
+        .unwrap();
+        // other user, other date, and a todo row: none should appear
+        insert_update(
+            &conn,
+            "99",
+            "2026-08-29",
+            "Write tests",
+            None,
+            "done",
+            "x",
+            None,
+        )
+        .unwrap();
+        insert_update(
+            &conn,
+            "42",
+            "2026-08-30",
+            "Tomorrow",
+            None,
+            "in_progress",
+            "y",
+            None,
+        )
+        .unwrap();
+
+        let all = list_updates(&conn, "42", "2026-08-29", "").unwrap();
+        assert_eq!(
+            all,
+            vec![
+                UpdateRow {
+                    id: u1,
+                    task: "Write tests".to_string(),
+                    status: "done".to_string(),
+                    progress: "all green".to_string(),
+                    blocker: None,
+                },
+                UpdateRow {
+                    id: u2,
+                    task: "Fix prod outage".to_string(),
+                    status: "blocked".to_string(),
+                    progress: "rolled back".to_string(),
+                    blocker: Some("waiting on ops".to_string()),
+                },
+            ]
+        );
+
+        let filtered = list_updates(&conn, "42", "2026-08-29", "prod").unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, u2);
+
+        assert!(
+            list_updates(&conn, "42", "2026-08-29", "nomatch")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn update_for_edit_returns_current_fields_scoped_to_owner_and_date() {
+        let conn = open_test_db();
+        let id = insert_update(
+            &conn,
+            "42",
+            "2026-08-29",
+            "Fix prod outage",
+            None,
+            "blocked",
+            "rolled back the deploy",
+            Some("waiting on ops"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            update_for_edit(&conn, id, "42", "2026-08-29").unwrap(),
+            Some(UpdateForEdit {
+                status: "blocked".to_string(),
+                progress: "rolled back the deploy".to_string(),
+                blocker: Some("waiting on ops".to_string()),
+            })
+        );
+        assert_eq!(
+            update_for_edit(&conn, id, "99", "2026-08-29").unwrap(),
+            None
+        );
+        assert_eq!(
+            update_for_edit(&conn, id, "42", "2026-08-30").unwrap(),
+            None
+        );
+        assert_eq!(
+            update_for_edit(&conn, 999_999, "42", "2026-08-29").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn update_for_edit_does_not_match_todo_rows() {
+        let conn = open_test_db();
+        let todo_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
+        assert_eq!(
+            update_for_edit(&conn, todo_id, "42", "2026-08-29").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn update_update_revises_status_progress_and_blocker_in_place() {
+        let conn = open_test_db();
+        let todo_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
+        let id = insert_update(
+            &conn,
+            "42",
+            "2026-08-29",
+            "Write tests",
+            Some(todo_id),
+            "blocked",
+            "stuck on the parser",
+            Some("need review"),
+        )
+        .unwrap();
+
+        let changed = update_update(
+            &conn,
+            id,
+            "42",
+            "2026-08-29",
+            "done",
+            "parser landed, all tests green",
+            None,
+        )
+        .unwrap();
+        assert!(changed);
+
+        let (_, _, _, task, _, linked_todo_id, status, progress, blocker) = row(&conn, id);
+        assert_eq!(status.as_deref(), Some("done"));
+        assert_eq!(progress.as_deref(), Some("parser landed, all tests green"));
+        assert_eq!(blocker, None);
+        // task and the todo link are untouched by an edit
+        assert_eq!(task, "Write tests");
+        assert_eq!(linked_todo_id, Some(todo_id));
+    }
+
+    #[test]
+    fn update_update_returns_false_for_wrong_owner_date_or_id_and_for_todo_rows() {
+        let conn = open_test_db();
+        let todo_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
+        let id = insert_update(
+            &conn,
+            "42",
+            "2026-08-29",
+            "Write tests",
+            Some(todo_id),
+            "done",
+            "x",
+            None,
+        )
+        .unwrap();
+
+        assert!(!update_update(&conn, id, "99", "2026-08-29", "done", "y", None).unwrap());
+        assert!(!update_update(&conn, id, "42", "2026-08-30", "done", "y", None).unwrap());
+        assert!(!update_update(&conn, 999_999, "42", "2026-08-29", "done", "y", None).unwrap());
+        assert!(!update_update(&conn, todo_id, "42", "2026-08-29", "done", "y", None).unwrap());
     }
 
     #[test]
