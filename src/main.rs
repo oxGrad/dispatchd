@@ -16,7 +16,7 @@ mod upgrade;
 use std::env;
 use std::sync::{Arc, Mutex};
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use config::Config;
 
 #[cfg(test)]
@@ -58,6 +58,35 @@ enum Command {
     },
     /// Check the systemd service and Discord connectivity
     Status,
+    /// Download and install the latest dispatchd release
+    Upgrade(UpgradeArgs),
+}
+
+#[derive(Args)]
+struct UpgradeArgs {
+    /// Report the current and latest version, then exit
+    #[arg(long)]
+    check: bool,
+    /// Swap the binary but don't restart the service
+    #[arg(long)]
+    no_restart: bool,
+    /// Install a specific tag (allows downgrades), e.g. v0.4.0
+    #[arg(long, value_name = "TAG")]
+    version: Option<String>,
+    /// Internal: run as the root dispatchd-upgrade.service helper
+    #[arg(long, hide = true)]
+    from_request: bool,
+}
+
+impl From<UpgradeArgs> for upgrade::UpgradeArgs {
+    fn from(a: UpgradeArgs) -> Self {
+        upgrade::UpgradeArgs {
+            check: a.check,
+            no_restart: a.no_restart,
+            version: a.version,
+            from_request: a.from_request,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -156,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
             action: MaintenanceCommand::Run,
         }) => return run_maintenance(),
         Some(Command::Status) => return run_status().await,
+        Some(Command::Upgrade(args)) => return upgrade::run(args.into()).await,
         None => {}
     }
 

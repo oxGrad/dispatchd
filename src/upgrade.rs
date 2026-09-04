@@ -7,16 +7,15 @@
 //! serde) are unit-tested. The reqwest/tar I/O is not, same as the
 //! `src/discord/*` gateway code - see CLAUDE.md's testing notes.
 
-// The reqwest/tar I/O and the `dispatchd upgrade` CLI that consume these
-// helpers land in a follow-up change; until then the pure helpers here are
-// only exercised by the unit tests below.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 pub const REPO: &str = "oxGrad/dispatchd";
+// consumed by Task 4 (run_from_request) and Task 8 (admin upgrade tailing)
+#[expect(dead_code)]
 pub const RUN_DIR: &str = "/run/dispatchd";
+#[expect(dead_code)]
 pub const REQUEST_PATH: &str = "/run/dispatchd/upgrade.request";
+#[expect(dead_code)]
 pub const STATUS_PATH: &str = "/run/dispatchd/upgrade.status";
 
 /// The crate version this binary was built from (e.g. "0.5.0"), no `v`.
@@ -87,6 +86,9 @@ pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> bool {
 }
 
 /// What `/admin upgrade` writes to `REQUEST_PATH` for the root helper.
+// consumed by Task 4 (run_from_request) and Task 8 (admin upgrade); the
+// unit tests already construct it, so the guard is non-test builds only
+#[cfg_attr(not(test), expect(dead_code))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub requested_by: String,
@@ -130,18 +132,283 @@ pub enum StatusLine {
 
 impl StatusLine {
     /// `Done` / `Error` end the sequence.
+    // consumed by Task 8 (post_upgrade_confirmation / tail loop); exercised
+    // by the unit tests, so the guard is non-test builds only
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn is_terminal(&self) -> bool {
         matches!(self, StatusLine::Done { .. } | StatusLine::Error { .. })
     }
 }
 
 /// Parses `STATUS_PATH`'s contents, skipping blank and unparseable lines.
+// consumed by Task 4 (run_from_request) and Task 8 (admin upgrade tailing);
+// exercised by the unit tests, so the guard is non-test builds only
+#[cfg_attr(not(test), expect(dead_code))]
 pub fn parse_status(contents: &str) -> Vec<StatusLine> {
     contents
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<StatusLine>(l).ok())
         .collect()
+}
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+
+fn user_agent() -> String {
+    format!("dispatchd/{}", current_version())
+}
+
+/// Ensures a leading `v` so release URLs
+/// (`/releases/download/v0.6.0/...`) build correctly.
+fn normalize_tag(v: &str) -> String {
+    if v.starts_with('v') {
+        v.to_string()
+    } else {
+        format!("v{v}")
+    }
+}
+
+/// GETs the GitHub `releases/latest` endpoint and returns its `tag_name`.
+async fn fetch_latest_tag() -> Result<String> {
+    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    let body = reqwest::Client::new()
+        .get(&url)
+        .header(reqwest::header::USER_AGENT, user_agent())
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .context("failed to reach the GitHub releases API")?
+        .error_for_status()
+        .context("GitHub releases API returned an error status")?
+        .text()
+        .await
+        .context("failed to read the GitHub releases API response")?;
+    parse_latest_tag(&body)
+}
+
+// consumed by Task 7 (/admin status version_line)
+#[expect(dead_code)]
+pub struct UpgradeCheck {
+    pub current: String,
+    pub latest: String,
+    pub update_available: bool,
+}
+
+/// Resolves the latest release tag and compares it to the running version.
+// consumed by Task 7 (/admin status)
+#[expect(dead_code)]
+pub async fn check() -> Result<UpgradeCheck> {
+    let latest = fetch_latest_tag().await?;
+    let current = current_version().to_string();
+    let update_available = is_newer(&latest, &current);
+    Ok(UpgradeCheck {
+        current,
+        latest,
+        update_available,
+    })
+}
+
+/// Downloads `dispatchd-<target>.tar.gz` + `SHA256SUMS` for `tag`, verifies
+/// the checksum, extracts the `dispatchd` entry to a uniquely-named temp
+/// file inside `dest_dir` (same filesystem as the real binary, so the
+/// later rename is atomic), chmod 0755. Returns the staged path.
+async fn download_and_stage(tag: &str, dest_dir: &Path) -> Result<PathBuf> {
+    let tag = normalize_tag(tag);
+    let asset = asset_name();
+    let base = format!("https://github.com/{REPO}/releases/download/{tag}");
+    let client = reqwest::Client::new();
+
+    let tarball = client
+        .get(format!("{base}/{asset}"))
+        .header(reqwest::header::USER_AGENT, user_agent())
+        .send()
+        .await
+        .with_context(|| format!("failed to download {asset} for {tag}"))?
+        .error_for_status()
+        .with_context(|| format!("no {asset} in release {tag}"))?
+        .bytes()
+        .await
+        .context("failed to read the release tarball")?;
+
+    let sums = client
+        .get(format!("{base}/SHA256SUMS"))
+        .header(reqwest::header::USER_AGENT, user_agent())
+        .send()
+        .await
+        .context("failed to download SHA256SUMS")?
+        .error_for_status()
+        .context("SHA256SUMS missing from the release")?
+        .text()
+        .await
+        .context("failed to read SHA256SUMS")?;
+
+    // The two-space separator is `sha256sum` text-mode output, which is what
+    // dispatchd's own release pipeline writes - not an arbitrary format.
+    let expected = sha256_for(&sums, &asset)
+        .with_context(|| format!("no checksum entry for {asset} in SHA256SUMS"))?;
+    if !verify_sha256(&tarball, &expected) {
+        anyhow::bail!("checksum verification failed for {asset}");
+    }
+
+    let staged = dest_dir.join(format!(".dispatchd.upgrade.{}", std::process::id()));
+    {
+        let gz = flate2::read::GzDecoder::new(&tarball[..]);
+        let mut archive = tar::Archive::new(gz);
+        let mut wrote = false;
+        for entry in archive.entries().context("corrupt release tarball")? {
+            let mut entry = entry.context("corrupt release tarball entry")?;
+            let path = entry.path().context("bad path in release tarball")?;
+            if path.file_name().and_then(|n| n.to_str()) == Some("dispatchd") {
+                let mut out = std::fs::File::create(&staged)
+                    .with_context(|| format!("failed to create {}", staged.display()))?;
+                std::io::copy(&mut entry, &mut out).context("failed to unpack the binary")?;
+                wrote = true;
+                break;
+            }
+        }
+        if !wrote {
+            anyhow::bail!("release tarball did not contain a `dispatchd` binary");
+        }
+    }
+    set_executable(&staged)?;
+    Ok(staged)
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).context("failed to chmod the staged binary")
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Atomically moves `staged` onto `dest`. On Linux this is fine even while
+/// `dest` is the running binary - the old inode keeps serving until the
+/// process restarts (same as `install.sh`). Best-effort `restorecon`.
+pub fn install_staged(staged: &Path, dest: &Path) -> Result<()> {
+    set_executable(staged)?;
+    std::fs::rename(staged, dest).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            anyhow::anyhow!(
+                "cannot write {} - re-run with sudo (sudo dispatchd upgrade)",
+                dest.display()
+            )
+        } else {
+            anyhow::anyhow!("failed to install {}: {e}", dest.display())
+        }
+    })?;
+    if which_restorecon() {
+        let _ = std::process::Command::new("restorecon").arg(dest).status();
+    }
+    Ok(())
+}
+
+fn which_restorecon() -> bool {
+    std::process::Command::new("restorecon")
+        .arg("-h")
+        .output()
+        .map(|_| true)
+        .unwrap_or(false)
+}
+
+/// The running binary's real path (following the
+/// `/usr/local/bin/dispatchd` symlink if there is one).
+pub fn resolve_exe() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("failed to resolve dispatchd's own path")?;
+    Ok(exe.canonicalize().unwrap_or(exe))
+}
+
+#[cfg(target_os = "linux")]
+fn restart_dispatchd() -> Result<()> {
+    let status = std::process::Command::new("systemctl")
+        .args(["restart", "dispatchd"])
+        .status()
+        .context("failed to run `systemctl restart dispatchd`")?;
+    if !status.success() {
+        anyhow::bail!("`systemctl restart dispatchd` failed ({status})");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn restart_dispatchd() -> Result<()> {
+    anyhow::bail!("service restart is only supported on Linux (systemd)")
+}
+
+#[derive(Debug, Clone)]
+pub struct UpgradeArgs {
+    pub check: bool,
+    pub no_restart: bool,
+    pub version: Option<String>,
+    pub from_request: bool,
+}
+
+/// `dispatchd upgrade`. `from_request` (the root helper mode) is handled
+/// in `run_from_request`; this function is the interactive/CLI path.
+pub async fn run(args: UpgradeArgs) -> Result<()> {
+    if args.from_request {
+        return run_from_request(args).await;
+    }
+
+    let current = current_version().to_string();
+    let target = match &args.version {
+        Some(v) => normalize_tag(v),
+        None => fetch_latest_tag().await?,
+    };
+
+    if args.check {
+        if args.version.is_some() {
+            println!("current: {current}\nrequested: {target}");
+        } else if is_newer(&target, &current) {
+            println!(
+                "current: {current}\nlatest:  {target}\nupdate available - run `dispatchd upgrade`"
+            );
+        } else {
+            println!("current: {current}\nlatest:  {target}\nup to date");
+        }
+        return Ok(());
+    }
+
+    if args.version.is_none() && !is_newer(&target, &current) {
+        println!("already on the latest version ({current})");
+        return Ok(());
+    }
+
+    let exe = resolve_exe()?;
+    let dir = exe
+        .parent()
+        .context("dispatchd's path has no parent directory")?;
+
+    println!("downloading {} ...", asset_name());
+    let staged = download_and_stage(&target, dir).await?;
+    println!("verified. installing to {} ...", exe.display());
+    install_staged(&staged, &exe)?;
+    println!("installed {target}.");
+
+    if args.no_restart {
+        println!("run `sudo systemctl restart dispatchd` to apply.");
+        return Ok(());
+    }
+    match restart_dispatchd() {
+        Ok(()) => println!("restarted dispatchd.service (now running {target})."),
+        Err(e) => {
+            println!("binary installed, but the restart didn't run: {e}");
+            println!("run `sudo systemctl restart dispatchd` yourself.");
+        }
+    }
+    Ok(())
+}
+
+// Placeholder until Task 4; keeps `run()` compiling.
+async fn run_from_request(_args: UpgradeArgs) -> Result<()> {
+    anyhow::bail!("--from-request is implemented in a later task")
 }
 
 #[cfg(test)]
@@ -255,6 +522,29 @@ bbbb  dispatchd-aarch64-unknown-linux-musl.tar.gz
         buf.push_str("this is not json\n\n");
         let parsed = parse_status(&buf);
         assert_eq!(parsed, lines);
+    }
+
+    #[test]
+    fn install_staged_replaces_the_destination_and_sets_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dispatchd");
+        std::fs::write(&dest, b"OLD").unwrap();
+        let staged = dir.path().join(".dispatchd.upgrade.test");
+        std::fs::write(&staged, b"NEW").unwrap();
+
+        install_staged(&staged, &dest).unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"NEW");
+        assert!(!staged.exists(), "staged file is consumed by the rename");
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+    }
+
+    #[test]
+    fn normalize_tag_adds_a_leading_v() {
+        assert_eq!(normalize_tag("0.6.0"), "v0.6.0");
+        assert_eq!(normalize_tag("v0.6.0"), "v0.6.0");
     }
 
     #[test]
