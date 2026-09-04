@@ -22,8 +22,16 @@ pub(crate) const CRED_PATH: &str = "/etc/dispatchd/discord_token.cred";
 /// silently handling the token unencrypted.
 pub(crate) const MIN_SYSTEMD_VERSION: u32 = 250;
 
+const UPGRADE_SERVICE_PATH: &str = "/etc/systemd/system/dispatchd-upgrade.service";
+pub(crate) const UPGRADE_PATH_PATH: &str = "/etc/systemd/system/dispatchd-upgrade.path";
+
 /// Pure string rendering, no I/O - compiles and is unit-tested on any
 /// platform even though what it produces is Linux/systemd-specific.
+///
+/// `RuntimeDirectory=dispatchd` gives the unprivileged bot a writable
+/// `/run/dispatchd` for the `/admin upgrade` request/status files;
+/// `RuntimeDirectoryPreserve=yes` keeps it across the upgrade restart so
+/// the status file survives for the bot to read back afterward.
 fn render_unit(exe_path: &str, user: &str) -> String {
     format!(
         "[Unit]\n\
@@ -36,6 +44,8 @@ fn render_unit(exe_path: &str, user: &str) -> String {
          User={user}\n\
          ExecStart={exe_path}\n\
          LoadCredentialEncrypted=discord_token:{CRED_PATH}\n\
+         RuntimeDirectory=dispatchd\n\
+         RuntimeDirectoryPreserve=yes\n\
          Restart=on-failure\n\
          RestartSec=5\n\
          \n\
@@ -73,6 +83,37 @@ fn render_maintenance_timer() -> &'static str {
      \n\
      [Install]\n\
      WantedBy=timers.target\n"
+}
+
+/// The root oneshot the `dispatchd-upgrade.path` unit triggers when
+/// `/admin upgrade` drops a request file. No `User=` - it needs root to
+/// overwrite the binary in `/usr/local/bin` and `systemctl restart`. No
+/// `[Install]` section: it is never enabled or started directly.
+fn render_upgrade_service(exe_path: &str) -> String {
+    format!(
+        "[Unit]\n\
+         Description=dispatchd self-upgrade (triggered by /admin upgrade)\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         ExecStart={exe_path} upgrade --from-request\n"
+    )
+}
+
+/// Watches for the request file the unprivileged bot writes into its
+/// `RuntimeDirectory`. When it appears, systemd starts
+/// `dispatchd-upgrade.service`; the helper deletes the file when done, so
+/// this re-arms.
+fn render_upgrade_path() -> &'static str {
+    "[Unit]\n\
+     Description=Watch for a dispatchd upgrade request\n\
+     \n\
+     [Path]\n\
+     PathExists=/run/dispatchd/upgrade.request\n\
+     Unit=dispatchd-upgrade.service\n\
+     \n\
+     [Install]\n\
+     WantedBy=paths.target\n"
 }
 
 /// Parses the version number out of `systemctl --version`'s first line,
@@ -154,15 +195,24 @@ pub fn install() -> anyhow::Result<()> {
         .with_context(|| format!("failed to write {MAINTENANCE_TIMER_PATH}"))?;
     println!("wrote {MAINTENANCE_SERVICE_PATH} and {MAINTENANCE_TIMER_PATH}");
 
+    std::fs::write(UPGRADE_SERVICE_PATH, render_upgrade_service(exe))
+        .with_context(|| format!("failed to write {UPGRADE_SERVICE_PATH}"))?;
+    std::fs::write(UPGRADE_PATH_PATH, render_upgrade_path())
+        .with_context(|| format!("failed to write {UPGRADE_PATH_PATH}"))?;
+    println!("wrote {UPGRADE_SERVICE_PATH} and {UPGRADE_PATH_PATH}");
+
     run_systemctl(&["daemon-reload"])?;
     run_systemctl(&["enable", "dispatchd.service"])?;
     // The maintenance timer only prunes old reminders_sent/followups_sent
     // rows and VACUUMs - safe to start immediately, unlike the main
     // service, which shouldn't run before Discord is actually configured.
     run_systemctl(&["enable", "--now", "dispatchd-maintenance.timer"])?;
+    // Path-activated: sits idle until `/admin upgrade` writes a request.
+    run_systemctl(&["enable", "--now", "dispatchd-upgrade.path"])?;
 
     println!("dispatchd.service installed and enabled to start at boot.");
     println!("dispatchd-maintenance.timer installed and started (runs weekly).");
+    println!("dispatchd-upgrade.path installed and started (enables /admin upgrade).");
     println!(
         "Once {CRED_PATH} (see `dispatchd discord login`) and config.toml/members.toml (see \
          `dispatchd init`) are set up, start the bot with:"
@@ -312,5 +362,32 @@ mod tests {
         assert!(timer.contains("OnCalendar=weekly"));
         assert!(timer.contains("Persistent=true"));
         assert!(timer.contains("WantedBy=timers.target"));
+    }
+
+    #[test]
+    fn render_unit_declares_a_preserved_runtime_directory() {
+        let unit = render_unit("/usr/local/bin/dispatchd", "pi");
+        assert!(unit.contains("RuntimeDirectory=dispatchd"));
+        assert!(unit.contains("RuntimeDirectoryPreserve=yes"));
+    }
+
+    #[test]
+    fn render_upgrade_service_is_a_rootless_oneshot_helper() {
+        let unit = render_upgrade_service("/usr/local/bin/dispatchd");
+        assert!(unit.contains("ExecStart=/usr/local/bin/dispatchd upgrade --from-request"));
+        assert!(unit.contains("Type=oneshot"));
+        assert!(!unit.contains("User="), "helper runs as root");
+        assert!(
+            !unit.contains("[Install]"),
+            "only ever started by the .path unit"
+        );
+    }
+
+    #[test]
+    fn render_upgrade_path_watches_the_request_file() {
+        let path = render_upgrade_path();
+        assert!(path.contains("PathExists=/run/dispatchd/upgrade.request"));
+        assert!(path.contains("Unit=dispatchd-upgrade.service"));
+        assert!(path.contains("WantedBy=paths.target"));
     }
 }
