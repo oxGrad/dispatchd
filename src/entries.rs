@@ -199,6 +199,33 @@ pub fn carryover_todos(
     Ok(rows)
 }
 
+/// Count of this user's still-open carried-over todos (see
+/// `carryover_todos`). `0` when `lookback_days <= 0`.
+#[allow(dead_code)]
+pub fn carryover_count(
+    conn: &Connection,
+    discord_user_id: &str,
+    today: &str,
+    lookback_days: i64,
+) -> Result<i64> {
+    if lookback_days <= 0 {
+        return Ok(0);
+    }
+    let window_start = format!("-{lookback_days} days");
+    let n = conn.query_row(
+        "SELECT COUNT(*) FROM entries t
+         WHERE t.type = 'todo' AND t.discord_user_id = ?1
+           AND t.date >= date(?2, ?3) AND t.date < ?2
+           AND NOT EXISTS (
+             SELECT 1 FROM entries u
+             WHERE u.type = 'update' AND u.todo_id = t.id AND u.status = 'done'
+           )",
+        params![discord_user_id, today, window_start],
+        |row| row.get(0),
+    )?;
+    Ok(n)
+}
+
 /// A todo's current editable fields, scoped to owner+date+type='todo' -
 /// used to pre-fill `/todo edit`'s modal. A struct rather than a tuple:
 /// with two same-typed `Option<String>` fields (`notes`, `sow_ref`), a
@@ -1272,5 +1299,39 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn carryover_count_matches_the_list_length() {
+        let conn = open_test_db();
+        let today = "2026-09-08";
+        insert_todo(&conn, "42", "2026-09-07", "Alpha", None, None).unwrap();
+        let b = insert_todo(&conn, "42", "2026-09-06", "Bravo", None, None).unwrap();
+        insert_update(
+            &conn,
+            "42",
+            "2026-09-06",
+            "Bravo",
+            Some(b),
+            "in_progress",
+            "wip",
+            None,
+        )
+        .unwrap();
+        let c = insert_todo(&conn, "42", "2026-09-05", "Charlie", None, None).unwrap();
+        insert_update(
+            &conn,
+            "42",
+            "2026-09-05",
+            "Charlie",
+            Some(c),
+            "done",
+            "done",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(carryover_count(&conn, "42", today, 7).unwrap(), 2);
+        assert_eq!(carryover_count(&conn, "42", today, 0).unwrap(), 0);
     }
 }
