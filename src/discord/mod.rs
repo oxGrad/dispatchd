@@ -131,8 +131,14 @@ impl EventHandler for Handler {
                     todo::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone).await
                 }
                 "progress" => {
-                    progress::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone)
-                        .await
+                    progress::handle_autocomplete(
+                        &ctx,
+                        &autocomplete,
+                        &self.db,
+                        &self.timezone,
+                        self.carryover_lookback_days,
+                    )
+                    .await
                 }
                 "team" => team::handle_autocomplete(&ctx, &autocomplete, &self.db).await,
                 _ => {}

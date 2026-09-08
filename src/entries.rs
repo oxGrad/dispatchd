@@ -142,7 +142,6 @@ pub fn short_date(ymd: &str) -> String {
 
 /// A still-open todo from a recent past day, carried forward into today's
 /// `/progress add` autocomplete and `/todo list`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CarryoverTodo {
     pub id: i64,

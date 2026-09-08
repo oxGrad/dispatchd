@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use chrono_tz::Tz;
@@ -213,6 +214,43 @@ fn encode_task_for_modal(task_value: &str) -> (String, bool) {
     }
 }
 
+/// Merges today's open todos with carried-over ones for the `/progress
+/// add` task autocomplete: today's first, then carry-over, deduped by
+/// todo id, capped at Discord's 25-choice limit. Returns
+/// `(label, option_value)` pairs; carry-over labels carry the origin
+/// date. Pure - no serenity types.
+fn merge_task_choices(
+    today: Vec<(i64, String)>,
+    carried: Vec<entries::CarryoverTodo>,
+) -> Vec<(String, String)> {
+    let mut seen: HashSet<i64> = HashSet::new();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (id, task) in today {
+        if out.len() >= 25 {
+            break;
+        }
+        if seen.insert(id) {
+            out.push((task, format!("id:{id}")));
+        }
+    }
+    for c in carried {
+        if out.len() >= 25 {
+            break;
+        }
+        if seen.insert(c.id) {
+            out.push((
+                format!(
+                    "{} · carried from {}",
+                    c.task,
+                    entries::short_date(&c.origin_date)
+                ),
+                format!("id:{}", c.id),
+            ));
+        }
+    }
+    out
+}
+
 /// Parses `"progress_modal:<status_code>:<task_encoded>"` into
 /// `(status_code, task_encoded)`. `None` if malformed.
 fn parse_custom_id(custom_id: &str) -> Option<(&str, &str)> {
@@ -251,6 +289,7 @@ pub async fn handle_autocomplete(
     autocomplete: &AutocompleteInteraction,
     db: &Arc<Mutex<Connection>>,
     timezone: &Tz,
+    carryover_lookback_days: u32,
 ) {
     let Some((sub, options)) = subcommand(&autocomplete.data.options) else {
         return;
@@ -261,18 +300,27 @@ pub async fn handle_autocomplete(
     let response = match sub {
         "add" => {
             let partial = get_option_string(options, "task").unwrap_or_default();
-            let choices = {
+            let result = {
                 let conn = db.lock().expect("db mutex poisoned");
-                entries::list_open_todos(&conn, &discord_user_id, &date, &partial)
+                let today = entries::list_open_todos(&conn, &discord_user_id, &date, &partial);
+                let carried = entries::carryover_todos(
+                    &conn,
+                    &discord_user_id,
+                    &date,
+                    carryover_lookback_days as i64,
+                    &partial,
+                );
+                today.and_then(|t| carried.map(|c| (t, c)))
             };
-            match choices {
-                Ok(rows) => CreateAutocompleteResponse::new().set_choices(
-                    rows.into_iter()
-                        .map(|(id, task)| AutocompleteChoice::new(task, format!("id:{id}")))
+            match result {
+                Ok((today, carried)) => CreateAutocompleteResponse::new().set_choices(
+                    merge_task_choices(today, carried)
+                        .into_iter()
+                        .map(|(label, value)| AutocompleteChoice::new(label, value))
                         .collect(),
                 ),
                 Err(e) => {
-                    eprintln!("failed to list open todos for autocomplete: {e}");
+                    eprintln!("failed to list todos for /progress add autocomplete: {e}");
                     CreateAutocompleteResponse::new()
                 }
             }
@@ -597,6 +645,42 @@ pub async fn handle_edit_modal_submission(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_task_choices_puts_today_first_then_carried_labelled() {
+        let today = vec![(1, "Write parser".to_string())];
+        let carried = vec![crate::entries::CarryoverTodo {
+            id: 2,
+            task: "Refactor auth".to_string(),
+            sow_ref: Some("M2".to_string()),
+            origin_date: "2026-08-27".to_string(),
+        }];
+        let got = merge_task_choices(today, carried);
+        assert_eq!(
+            got,
+            vec![
+                ("Write parser".to_string(), "id:1".to_string()),
+                (
+                    "Refactor auth · carried from Aug 27".to_string(),
+                    "id:2".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_task_choices_dedups_by_id_and_caps_at_25() {
+        let today: Vec<(i64, String)> = (0..30).map(|i| (i, format!("t{i}"))).collect();
+        let carried = vec![crate::entries::CarryoverTodo {
+            id: 0, // already in `today`
+            task: "dup".to_string(),
+            sow_ref: None,
+            origin_date: "2026-08-27".to_string(),
+        }];
+        let got = merge_task_choices(today, carried);
+        assert_eq!(got.len(), 25);
+        assert_eq!(got.iter().filter(|(_, v)| v == "id:0").count(), 1);
+    }
 
     #[test]
     fn status_code_and_decode_round_trip() {
