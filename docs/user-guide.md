@@ -46,7 +46,7 @@ show up publicly a little after your private confirmation. An SOW ref
 - and any Notes you added show up as a quoted line below it:
 ```
 📋 <@you> added a todo: **Write tests** [M1D2]
-> start with the parser, then the encoder
+> _start with the parser, then the encoder_
 ```
 Same idea for `/progress add` (which never shows the SOW ref, even if the
 todo it's against has one) - the Progress writeup, and the Blocker if you
@@ -72,6 +72,7 @@ doesn't change or remove that post.
 - **`/todo list`** - shows today's todos with their ids, and their SOW
   ref if one was set, e.g.:
   ```
+  **Today's todos:**
   `12` Write tests [M1D2]
   `13` Ship the release
   ```
@@ -116,6 +117,7 @@ doesn't change or remove that post.
 
 - **`/progress list`** - your progress reports for today, with their ids:
   ```
+  **Today's progress reports:**
   `41` ✅ Write tests — all the unit tests pass now
   `42` ⛔ Fix prod outage — rolled back the deploy (blocker: waiting on ops)
   ```
@@ -235,6 +237,10 @@ restart dispatchd` (the restart is what creates the bot's
 `/run/dispatchd` runtime directory - `service install` alone doesn't).
 This is also needed on any deployment that predates this feature. If an
 upgrade is already running, it refuses a second one.
+
+### `/admin help` - admin only
+
+Ephemeral. A quick in-Discord reminder of the `/admin` subcommands above.
 
 ## `/help` and `/ping`
 

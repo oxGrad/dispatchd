@@ -385,10 +385,13 @@ fn format_sync_message(entry: &entries::SyncEntry) -> String {
             message
         }
         _ => {
+            // Same glyphs as `/progress list` and `/team report`
+            // (status.rs / progress.rs) so a status reads identically
+            // wherever it's shown.
             let (emoji, label) = match entry.status.as_deref() {
                 Some("done") => ("✅", "Done"),
-                Some("blocked") => ("⚠️", "Blocked"),
-                _ => ("🔧", "In Progress"),
+                Some("blocked") => ("⛔", "Blocked"),
+                _ => ("⏳", "In Progress"),
             };
             let mut message = format!(
                 "{emoji} <@{}> progress on **{}**: {label}",
@@ -682,7 +685,7 @@ mod tests {
         let entry = sync_entry("update", "Ship release", None, Some("in_progress"), None);
         assert_eq!(
             format_sync_message(&entry),
-            "🔧 <@42> progress on **Ship release**: In Progress"
+            "⏳ <@42> progress on **Ship release**: In Progress"
         );
     }
 
@@ -696,7 +699,7 @@ mod tests {
         );
         assert_eq!(
             format_sync_message(&entry),
-            "🔧 <@42> progress on **Ship release**: In Progress\n> cut the RC, smoke tests green"
+            "⏳ <@42> progress on **Ship release**: In Progress\n> cut the RC, smoke tests green"
         );
     }
 
@@ -710,7 +713,7 @@ mod tests {
         );
         assert_eq!(
             format_sync_message(&entry),
-            "⚠️ <@42> progress on **Fix bug**: Blocked\n> traced it to the cache\n> blocked on: waiting on ops"
+            "⛔ <@42> progress on **Fix bug**: Blocked\n> traced it to the cache\n> blocked on: waiting on ops"
         );
     }
 
@@ -743,7 +746,7 @@ mod tests {
         );
         assert_eq!(
             format_sync_message(&entry),
-            "⚠️ <@42> progress on **Fix bug**: Blocked\n> blocked on: waiting on ops"
+            "⛔ <@42> progress on **Fix bug**: Blocked\n> blocked on: waiting on ops"
         );
     }
 
@@ -752,7 +755,7 @@ mod tests {
         let entry = sync_entry("update", "Fix bug", None, Some("blocked"), None);
         assert_eq!(
             format_sync_message(&entry),
-            "⚠️ <@42> progress on **Fix bug**: Blocked"
+            "⛔ <@42> progress on **Fix bug**: Blocked"
         );
     }
 }
