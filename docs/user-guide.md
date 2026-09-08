@@ -77,6 +77,8 @@ doesn't change or remove that post.
   `13` Ship the release
   ```
   Use this when you need an id for `edit`/`delete` below.
+  Still-open todos from earlier days appear below this in a read-only
+  **Carried over** section - see "Carrying work over" below.
 - **`/todo edit id:<...>`** - the `id` field autocompletes over today's
   todos as you type (pick from the suggestions rather than typing a
   number by hand). Opens the same form as `add`, pre-filled with the
@@ -95,7 +97,8 @@ doesn't change or remove that post.
   - **`task`** - autocompletes over today's todos that don't have a
     progress report yet. Pick one, or ignore the suggestions and type
     something else entirely for unplanned/ad-hoc work that wasn't on your
-    todo list (e.g. "Fixed a prod outage").
+    todo list (e.g. "Fixed a prod outage"). Todos carried over from
+    earlier days show up here too, marked `· carried from <date>`.
   - **`status`** - Done / In Progress / Blocked, pick from the dropdown.
 
   That opens a form with **Progress** (required - what actually happened)
@@ -149,6 +152,27 @@ Example - unplanned work, nothing on your todo list matched:
      Blocker: waiting on ops to confirm root cause
 ```
 
+## Carrying work over
+
+A todo you don't finish doesn't vanish at midnight. As long as no
+**Done** progress report has been filed against it, a todo from the last
+7 days keeps showing up as "still open" (the tech lead can change the
+window in `config.toml`, or set it to `0` to switch this off):
+
+- **`/progress add`** lists it in the `task` autocomplete, marked
+  `· carried from <date>`. Picking it attaches your report to the
+  original todo - and its SOW ref - instead of logging it as unplanned
+  work.
+- **`/todo list`** shows it in a read-only **Carried over (still open)**
+  block below today's todos. You can't `edit` or `delete` a carried-over
+  todo - close it out by filing a Done report, or leave it to age past
+  the window.
+- The tech lead sees it in **`/team status`** (a `+N carried` marker on
+  your line) and **`/team report`** (a **Carried over** block per
+  person, showing each todo's latest status and whether it moved today).
+
+Carry-over is per-person and only ever looks at your own todos.
+
 ## `/team status` - tech lead only
 
 Shows one line per team member: how many of today's todos have a matching
@@ -157,8 +181,11 @@ progress report, e.g. `✅ Alice - 3/3 updated`, `⚠️ Budi - 1/2 updated`,
 with an SOW ref, the unique refs are appended, e.g. `✅ Alice - 3/3
 updated (M1D1, M1D2, M2)` - handy for the tech lead to see which
 milestones/deliverables got touched today without opening `/todo list`
-for each person. Everyone else gets an "restricted to the tech lead"
-reply if they try it - it's not meant as a general team overview.
+for each person. If a member has unfinished todos carried over from the
+last few days, their line ends with `+N carried` (or reads `no new todo
+(N carried)` when they haven't posted anything today). Everyone else gets
+an "restricted to the tech lead" reply if they try it - it's not meant as
+a general team overview.
 
 ## `/team report` - tech lead only
 
@@ -166,6 +193,10 @@ The full picture in one message: every member's todos for today, each with
 its notes, SOW ref, and the progress report(s) filed against it, plus any
 unplanned work. Long reports are split across follow-up messages (Discord
 caps a message at 2000 characters). Ephemeral - only you see it.
+
+Any todos carried over from earlier days (still open, no Done report)
+appear in a **Carried over** block at the end of each member's section,
+with the latest status and whether it was updated today.
 
 ## `/team remind` - tech lead only
 
