@@ -24,6 +24,7 @@ pub struct Handler {
     guild_id: GuildId,
     db: Arc<Mutex<Connection>>,
     timezone: Tz,
+    carryover_lookback_days: u32,
 }
 
 #[async_trait]
@@ -88,7 +89,14 @@ impl EventHandler for Handler {
                 // Three subcommands, so `match` rather than `if let`.
                 "team" => match team::subcommand(&command.data.options) {
                     Some(("status", _)) => {
-                        team::handle_status(&ctx, &command, &self.db, &self.timezone).await
+                        team::handle_status(
+                            &ctx,
+                            &command,
+                            &self.db,
+                            &self.timezone,
+                            self.carryover_lookback_days,
+                        )
+                        .await
                     }
                     Some(("report", _)) => {
                         team::handle_report(&ctx, &command, &self.db, &self.timezone).await
@@ -214,6 +222,7 @@ pub async fn run(
             guild_id: GuildId::new(guild_id),
             db: db.clone(),
             timezone: config.timezone,
+            carryover_lookback_days: config.carryover_lookback_days,
         })
         .await
         .context("failed to build Discord client")?;

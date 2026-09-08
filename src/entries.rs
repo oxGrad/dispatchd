@@ -200,7 +200,6 @@ pub fn carryover_todos(
 
 /// Count of this user's still-open carried-over todos (see
 /// `carryover_todos`). `0` when `lookback_days <= 0`.
-#[allow(dead_code)]
 pub fn carryover_count(
     conn: &Connection,
     discord_user_id: &str,

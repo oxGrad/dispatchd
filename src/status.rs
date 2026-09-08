@@ -10,12 +10,19 @@ pub struct MemberStatus {
     /// Today's non-null SOW refs from this member's todos, unique and in
     /// first-seen (id) order.
     pub sow_refs: Vec<String>,
+    /// Count of this member's still-open carried-over todos (see
+    /// `entries::carryover_count`). `0` when carry-over is disabled.
+    pub carried_count: i64,
 }
 
 /// One row per `members` entry for `date`. Simple per-member COUNT queries
 /// rather than one complex JOIN - fine for a 6-person team, easier to
 /// read and verify.
-pub fn team_status(conn: &Connection, date: &str) -> Result<Vec<MemberStatus>> {
+pub fn team_status(
+    conn: &Connection,
+    date: &str,
+    carryover_lookback_days: i64,
+) -> Result<Vec<MemberStatus>> {
     let mut stmt = conn.prepare("SELECT discord_user_id, name FROM members ORDER BY name")?;
     let members = stmt
         .query_map([], |row| {
@@ -32,7 +39,11 @@ pub fn team_status(conn: &Connection, date: &str) -> Result<Vec<MemberStatus>> {
         )?;
         let matched_update_count: i64 = conn.query_row(
             "SELECT COUNT(DISTINCT todo_id) FROM entries
-             WHERE type = 'update' AND date = ?1 AND discord_user_id = ?2 AND todo_id IS NOT NULL",
+             WHERE type = 'update' AND date = ?1 AND discord_user_id = ?2 AND todo_id IS NOT NULL
+               AND todo_id IN (
+                 SELECT id FROM entries
+                 WHERE type = 'todo' AND date = ?1 AND discord_user_id = ?2
+               )",
             params![date, discord_user_id],
             |row| row.get(0),
         )?;
@@ -53,11 +64,15 @@ pub fn team_status(conn: &Connection, date: &str) -> Result<Vec<MemberStatus>> {
             }
         }
 
+        let carried_count =
+            crate::entries::carryover_count(conn, &discord_user_id, date, carryover_lookback_days)?;
+
         result.push(MemberStatus {
             name,
             todo_count,
             matched_update_count,
             sow_refs,
+            carried_count,
         });
     }
     Ok(result)
@@ -176,7 +191,14 @@ fn row_to_update_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateDetai
 /// any either, since the column only exists on todo rows).
 pub fn format_status_line(status: &MemberStatus) -> String {
     let base = if status.todo_count == 0 {
-        format!("❌ {} - no todo posted", status.name)
+        if status.carried_count > 0 {
+            format!(
+                "⚠️ {} - no new todo ({} carried)",
+                status.name, status.carried_count
+            )
+        } else {
+            format!("❌ {} - no todo posted", status.name)
+        }
     } else {
         let emoji = if status.matched_update_count == status.todo_count {
             "✅"
@@ -190,10 +212,15 @@ pub fn format_status_line(status: &MemberStatus) -> String {
             status.name, status.matched_update_count, status.todo_count
         )
     };
-    if status.sow_refs.is_empty() {
+    let base = if status.sow_refs.is_empty() {
         base
     } else {
         format!("{base} ({})", status.sow_refs.join(", "))
+    };
+    if status.todo_count > 0 && status.carried_count > 0 {
+        format!("{base} +{} carried", status.carried_count)
+    } else {
+        base
     }
 }
 
@@ -327,7 +354,7 @@ mod tests {
                 .unwrap();
         }
 
-        let statuses = team_status(&conn, DATE).unwrap();
+        let statuses = team_status(&conn, DATE, 0).unwrap();
         assert_eq!(statuses.len(), 1);
         assert_eq!(format_status_line(&statuses[0]), "✅ Alice - 3/3 updated");
     }
@@ -340,7 +367,7 @@ mod tests {
         entries::insert_todo(&conn, "2", DATE, "b", None, None).unwrap();
         entries::insert_update(&conn, "2", DATE, "a", Some(todo1), "done", "done", None).unwrap();
 
-        let statuses = team_status(&conn, DATE).unwrap();
+        let statuses = team_status(&conn, DATE, 0).unwrap();
         assert_eq!(format_status_line(&statuses[0]), "⚠️ Budi - 1/2 updated");
     }
 
@@ -349,7 +376,7 @@ mod tests {
         let conn = open_test_db();
         seed_member(&conn, "3", "Citra", "senior");
 
-        let statuses = team_status(&conn, DATE).unwrap();
+        let statuses = team_status(&conn, DATE, 0).unwrap();
         assert_eq!(
             format_status_line(&statuses[0]),
             "❌ Citra - no todo posted"
@@ -363,7 +390,7 @@ mod tests {
         entries::insert_todo(&conn, "4", DATE, "a", None, None).unwrap();
         entries::insert_todo(&conn, "4", DATE, "b", None, None).unwrap();
 
-        let statuses = team_status(&conn, DATE).unwrap();
+        let statuses = team_status(&conn, DATE, 0).unwrap();
         assert_eq!(format_status_line(&statuses[0]), "❌ Dedi - 0/2 updated");
     }
 
@@ -384,7 +411,7 @@ mod tests {
         )
         .unwrap();
 
-        let statuses = team_status(&conn, DATE).unwrap();
+        let statuses = team_status(&conn, DATE, 0).unwrap();
         assert_eq!(statuses[0].todo_count, 1);
         assert_eq!(statuses[0].matched_update_count, 0);
     }
@@ -417,7 +444,7 @@ mod tests {
         )
         .unwrap();
 
-        let statuses = team_status(&conn, DATE).unwrap();
+        let statuses = team_status(&conn, DATE, 0).unwrap();
         assert_eq!(statuses[0].matched_update_count, 1);
     }
 
@@ -429,7 +456,7 @@ mod tests {
         entries::insert_todo(&conn, "7", DATE, "b", None, Some("M1D2")).unwrap();
         entries::insert_update(&conn, "7", DATE, "a", Some(todo1), "done", "done", None).unwrap();
 
-        let statuses = team_status(&conn, DATE).unwrap();
+        let statuses = team_status(&conn, DATE, 0).unwrap();
         assert_eq!(statuses[0].sow_refs, vec!["M1D1", "M1D2"]);
         assert_eq!(
             format_status_line(&statuses[0]),
@@ -444,7 +471,7 @@ mod tests {
         entries::insert_todo(&conn, "8", DATE, "a", None, Some("M1")).unwrap();
         entries::insert_todo(&conn, "8", DATE, "b", None, Some("M1")).unwrap();
 
-        let statuses = team_status(&conn, DATE).unwrap();
+        let statuses = team_status(&conn, DATE, 0).unwrap();
         assert_eq!(statuses[0].sow_refs, vec!["M1"]);
     }
 
@@ -454,9 +481,71 @@ mod tests {
         seed_member(&conn, "9", "Ida", "junior");
         entries::insert_todo(&conn, "9", DATE, "a", None, None).unwrap();
 
-        let statuses = team_status(&conn, DATE).unwrap();
+        let statuses = team_status(&conn, DATE, 0).unwrap();
         assert!(statuses[0].sow_refs.is_empty());
         assert_eq!(format_status_line(&statuses[0]), "❌ Ida - 0/1 updated");
+    }
+
+    #[test]
+    fn matched_count_ignores_updates_against_past_day_todos() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice", "lead");
+        entries::insert_todo(&conn, "1", DATE, "today task", None, None).unwrap();
+        let past = entries::insert_todo(&conn, "1", "2026-08-20", "old task", None, None).unwrap();
+        entries::insert_update(
+            &conn,
+            "1",
+            DATE,
+            "old task",
+            Some(past),
+            "in_progress",
+            "wip",
+            None,
+        )
+        .unwrap();
+
+        let statuses = team_status(&conn, DATE, 0).unwrap();
+        assert_eq!(statuses[0].todo_count, 1);
+        assert_eq!(statuses[0].matched_update_count, 0);
+    }
+
+    #[test]
+    fn carried_count_appends_suffix_when_there_are_todos_today() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice", "lead");
+        entries::insert_todo(&conn, "1", DATE, "today task", None, None).unwrap();
+        entries::insert_todo(&conn, "1", "2026-08-27", "old task", None, None).unwrap();
+
+        let statuses = team_status(&conn, DATE, 7).unwrap();
+        assert_eq!(statuses[0].carried_count, 1);
+        assert_eq!(
+            format_status_line(&statuses[0]),
+            "❌ Alice - 0/1 updated +1 carried"
+        );
+    }
+
+    #[test]
+    fn no_new_todo_but_carried_shows_a_warning_line() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice", "lead");
+        entries::insert_todo(&conn, "1", "2026-08-27", "old task", None, None).unwrap();
+
+        let statuses = team_status(&conn, DATE, 7).unwrap();
+        assert_eq!(
+            format_status_line(&statuses[0]),
+            "⚠️ Alice - no new todo (1 carried)"
+        );
+    }
+
+    #[test]
+    fn carried_count_zero_leaves_the_line_unchanged() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice", "lead");
+        entries::insert_todo(&conn, "1", DATE, "today task", None, None).unwrap();
+
+        let statuses = team_status(&conn, DATE, 7).unwrap();
+        assert_eq!(statuses[0].carried_count, 0);
+        assert_eq!(format_status_line(&statuses[0]), "❌ Alice - 0/1 updated");
     }
 
     #[test]
