@@ -285,8 +285,10 @@ is online and responding.
   (or your mistakes) - what they do see is the separate public post
   dispatchd makes into the thread shortly after (see above).
 - Todos and progress reports are scoped to **today** (in the team's
-  configured timezone) - you can't edit or list yesterday's todos, and a
-  fresh thread starts each day.
+  configured timezone) - a fresh thread starts each day and you can only
+  edit today's todos. Unfinished todos from earlier days still *show up*
+  (read-only in `/todo list`, pickable in `/progress add`) - see
+  "Carrying work over" above.
 - Everything you submit is retained for the tech lead's biweekly recap -
   there's no "delete my history," only deleting an individual todo before
   it's been reported against (see `/todo delete` above).
