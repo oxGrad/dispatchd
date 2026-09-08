@@ -378,34 +378,71 @@ pub async fn handle_delete(
     reply_ephemeral(ctx, command, reply_text, "/todo delete").await;
 }
 
+/// Builds the `/todo list` reply: today's todos with ids, then a
+/// read-only "Carried over" section for still-open todos from recent
+/// past days. Pure.
+fn format_todo_list(
+    today: &[(i64, String, Option<String>)],
+    carried: &[entries::CarryoverTodo],
+) -> String {
+    let mut sections: Vec<String> = Vec::new();
+    if today.is_empty() {
+        sections.push("You haven't submitted a todo today yet - use `/todo add`.".to_string());
+    } else {
+        let lines: Vec<String> = today
+            .iter()
+            .map(|(id, task, sow_ref)| match sow_ref {
+                Some(r) => format!("`{id}` {task} [{r}]"),
+                None => format!("`{id}` {task}"),
+            })
+            .collect();
+        sections.push(format!("**Today's todos:**\n{}", lines.join("\n")));
+    }
+    if !carried.is_empty() {
+        let lines: Vec<String> = carried
+            .iter()
+            .map(|c| match &c.sow_ref {
+                Some(r) => format!(
+                    "{} [{r}] — from {}",
+                    c.task,
+                    entries::short_date(&c.origin_date)
+                ),
+                None => format!("{} — from {}", c.task, entries::short_date(&c.origin_date)),
+            })
+            .collect();
+        sections.push(format!(
+            "**Carried over (still open):**\n{}",
+            lines.join("\n")
+        ));
+    }
+    sections.join("\n\n")
+}
+
 pub async fn handle_list(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
     timezone: &Tz,
+    carryover_lookback_days: u32,
 ) {
     let discord_user_id = command.user.id.to_string();
     let date = entries::today_in(timezone);
 
-    let todos = {
+    let result = {
         let conn = db.lock().expect("db mutex poisoned");
-        entries::list_todos(&conn, &discord_user_id, &date, "")
+        let today = entries::list_todos(&conn, &discord_user_id, &date, "");
+        let carried = entries::carryover_todos(
+            &conn,
+            &discord_user_id,
+            &date,
+            carryover_lookback_days as i64,
+            "",
+        );
+        today.and_then(|t| carried.map(|c| (t, c)))
     };
 
-    let reply_text = match todos {
-        Ok(rows) if rows.is_empty() => {
-            "You haven't submitted a todo today yet - use `/todo add`.".to_string()
-        }
-        Ok(rows) => {
-            let lines: Vec<String> = rows
-                .iter()
-                .map(|(id, task, sow_ref)| match sow_ref {
-                    Some(r) => format!("`{id}` {task} [{r}]"),
-                    None => format!("`{id}` {task}"),
-                })
-                .collect();
-            format!("**Today's todos:**\n{}", lines.join("\n"))
-        }
+    let reply_text = match result {
+        Ok((today, carried)) => format_todo_list(&today, &carried),
         Err(e) => {
             eprintln!("failed to list todos: {e}");
             "⚠️ Something went wrong - please try again.".to_string()
@@ -492,6 +529,68 @@ mod tests {
         assert_eq!(normalize_sow_ref(None), None);
         assert_eq!(normalize_sow_ref(Some(String::new())), None);
         assert_eq!(normalize_sow_ref(Some("   ".to_string())), None);
+    }
+
+    #[test]
+    fn format_todo_list_today_only() {
+        let today = vec![
+            (12, "Write tests".to_string(), Some("M1D2".to_string())),
+            (13, "Ship the release".to_string(), None),
+        ];
+        assert_eq!(
+            format_todo_list(&today, &[]),
+            "**Today's todos:**\n`12` Write tests [M1D2]\n`13` Ship the release"
+        );
+    }
+
+    #[test]
+    fn format_todo_list_appends_carried_over_section() {
+        let today = vec![(13, "Ship the release".to_string(), None)];
+        let carried = vec![
+            crate::entries::CarryoverTodo {
+                id: 1,
+                task: "Refactor auth".to_string(),
+                sow_ref: Some("M2".to_string()),
+                origin_date: "2026-08-27".to_string(),
+            },
+            crate::entries::CarryoverTodo {
+                id: 2,
+                task: "Write migration".to_string(),
+                sow_ref: None,
+                origin_date: "2026-08-25".to_string(),
+            },
+        ];
+        assert_eq!(
+            format_todo_list(&today, &carried),
+            "**Today's todos:**\n`13` Ship the release\n\n\
+             **Carried over (still open):**\n\
+             Refactor auth [M2] — from Aug 27\n\
+             Write migration — from Aug 25"
+        );
+    }
+
+    #[test]
+    fn format_todo_list_no_todos_today_but_carried() {
+        let carried = vec![crate::entries::CarryoverTodo {
+            id: 1,
+            task: "Refactor auth".to_string(),
+            sow_ref: None,
+            origin_date: "2026-08-27".to_string(),
+        }];
+        assert_eq!(
+            format_todo_list(&[], &carried),
+            "You haven't submitted a todo today yet - use `/todo add`.\n\n\
+             **Carried over (still open):**\n\
+             Refactor auth — from Aug 27"
+        );
+    }
+
+    #[test]
+    fn format_todo_list_completely_empty() {
+        assert_eq!(
+            format_todo_list(&[], &[]),
+            "You haven't submitted a todo today yet - use `/todo add`."
+        );
     }
 
     // `subcommand()` isn't unit-tested here: `CommandDataOption` is

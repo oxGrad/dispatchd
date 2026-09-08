@@ -70,7 +70,14 @@ impl EventHandler for Handler {
                         todo::handle_delete(&ctx, &command, opts, &self.db, &self.timezone).await
                     }
                     Some(("list", _)) => {
-                        todo::handle_list(&ctx, &command, &self.db, &self.timezone).await
+                        todo::handle_list(
+                            &ctx,
+                            &command,
+                            &self.db,
+                            &self.timezone,
+                            self.carryover_lookback_days,
+                        )
+                        .await
                     }
                     Some(("help", _)) => todo::handle_help(&ctx, &command).await,
                     _ => {}
