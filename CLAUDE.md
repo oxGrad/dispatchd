@@ -330,8 +330,9 @@ src/
                     reply, not a raw DB error) if a /progress report
                     already references the todo. list also appends a
                     read-only "Carried over (still open)" section
-                    (format_todo_list); edit/delete ignore carried-over
-                    todos
+                    (format_todo_list) and chunks its reply past 2000
+                    chars like /team report (status::split_into_messages);
+                    edit/delete ignore carried-over todos
     progress.rs    /progress add|edit|list|help - `add` (was the flat
                     /progress command) opens the report modal and always
                     inserts a new 'update' row; `edit` (report autocomplete

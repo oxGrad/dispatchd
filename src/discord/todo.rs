@@ -6,8 +6,8 @@ use serenity::all::{
     AutocompleteChoice, CommandDataOption, CommandDataOptionValue, CommandInteraction,
     CommandInteraction as AutocompleteInteraction, CommandOptionType, Context as SerenityContext,
     CreateActionRow, CreateAutocompleteResponse, CreateCommand, CreateCommandOption,
-    CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateModal,
-    InputTextStyle, ModalInteraction,
+    CreateInputText, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, CreateModal, InputTextStyle, ModalInteraction,
 };
 
 use crate::entries::{self, DeleteTodoOutcome, TodoForEdit};
@@ -448,7 +448,27 @@ pub async fn handle_list(
             "⚠️ Something went wrong - please try again.".to_string()
         }
     };
-    reply_ephemeral(ctx, command, reply_text, "/todo list").await;
+
+    // A long carried-over list can push the reply past Discord's 2000-char
+    // message cap - chunk it the same way `/team report` does (split on the
+    // section blank line, 1900 for emoji headroom), first chunk in the
+    // response, the rest as ephemeral follow-ups.
+    let mut chunks = crate::status::split_into_messages(&reply_text, 1900).into_iter();
+    let first = chunks.next().unwrap_or(reply_text);
+    reply_ephemeral(ctx, command, first, "/todo list").await;
+    for chunk in chunks {
+        if let Err(e) = command
+            .create_followup(
+                &ctx.http,
+                CreateInteractionResponseFollowup::new()
+                    .content(chunk)
+                    .ephemeral(true),
+            )
+            .await
+        {
+            eprintln!("failed to send /todo list follow-up: {e}");
+        }
+    }
 }
 
 pub async fn handle_help(ctx: &SerenityContext, command: &CommandInteraction) {
@@ -591,6 +611,36 @@ mod tests {
             format_todo_list(&[], &[]),
             "You haven't submitted a todo today yet - use `/todo add`."
         );
+    }
+
+    #[test]
+    fn a_huge_todo_list_chunks_under_discords_message_cap() {
+        // 400 carried-over todos would blow past 2000 chars in one message;
+        // `/todo list` chunks it the same way `/team report` does.
+        let today = vec![(1, "today".to_string(), None)];
+        let carried: Vec<_> = (0..400)
+            .map(|i| crate::entries::CarryoverTodo {
+                id: i,
+                task: format!("Task number {i} with a reasonably wordy description"),
+                sow_ref: None,
+                origin_date: "2026-08-27".to_string(),
+            })
+            .collect();
+        let full = format_todo_list(&today, &carried);
+        assert!(
+            full.chars().count() > 1900,
+            "test setup should exceed the cap"
+        );
+
+        // `/todo list`'s reply is chunked the way `/team report` is; the
+        // content-preservation guarantee is covered by split_into_messages'
+        // own tests - here we just confirm a big list actually triggers the
+        // split and every chunk fits Discord's message cap.
+        let chunks = crate::status::split_into_messages(&full, 1900);
+        assert!(chunks.len() > 1, "expected the list to be split");
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 1900);
+        }
     }
 
     // `subcommand()` isn't unit-tested here: `CommandDataOption` is
