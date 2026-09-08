@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -127,6 +127,74 @@ pub fn list_todos(
         .query_map(params![discord_user_id, date, partial], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// `"2026-08-27"` -> `"Aug 27"`. Input that doesn't parse as `YYYY-MM-DD`
+/// is returned unchanged. Used to label carried-over todos in the
+/// `/progress add` autocomplete, `/todo list`, and `/team report`.
+#[allow(dead_code)]
+pub fn short_date(ymd: &str) -> String {
+    NaiveDate::parse_from_str(ymd, "%Y-%m-%d")
+        .map(|d| d.format("%b %-d").to_string())
+        .unwrap_or_else(|_| ymd.to_string())
+}
+
+/// A still-open todo from a recent past day, carried forward into today's
+/// `/progress add` autocomplete and `/todo list`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarryoverTodo {
+    pub id: i64,
+    pub task: String,
+    pub sow_ref: Option<String>,
+    /// The `YYYY-MM-DD` the todo was originally created on.
+    pub origin_date: String,
+}
+
+/// This user's still-open todos from the `lookback_days` calendar days
+/// before `today` (window `[today - lookback_days, today - 1]`) -
+/// `type = 'todo'` rows with no `status = 'done'` update against them
+/// (matched via `todo_id`), optionally filtered by a `task` substring.
+/// Ordered oldest-first, capped at 25 (Discord's autocomplete limit).
+/// Empty when `lookback_days <= 0` (carry-over disabled).
+#[allow(dead_code)]
+pub fn carryover_todos(
+    conn: &Connection,
+    discord_user_id: &str,
+    today: &str,
+    lookback_days: i64,
+    partial: &str,
+) -> Result<Vec<CarryoverTodo>> {
+    if lookback_days <= 0 {
+        return Ok(Vec::new());
+    }
+    let window_start = format!("-{lookback_days} days");
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.task, t.sow_ref, t.date FROM entries t
+         WHERE t.type = 'todo' AND t.discord_user_id = ?1
+           AND t.date >= date(?2, ?3) AND t.date < ?2
+           AND t.task LIKE '%' || ?4 || '%'
+           AND NOT EXISTS (
+             SELECT 1 FROM entries u
+             WHERE u.type = 'update' AND u.todo_id = t.id AND u.status = 'done'
+           )
+         ORDER BY t.date, t.id
+         LIMIT 25",
+    )?;
+    let rows = stmt
+        .query_map(
+            params![discord_user_id, today, window_start, partial],
+            |row| {
+                Ok(CarryoverTodo {
+                    id: row.get(0)?,
+                    task: row.get(1)?,
+                    sow_ref: row.get(2)?,
+                    origin_date: row.get(3)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -1082,6 +1150,125 @@ mod tests {
 
         assert!(
             entries_since(&conn, "2026-08-29", update_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn short_date_formats_or_passes_through() {
+        assert_eq!(short_date("2026-08-27"), "Aug 27");
+        assert_eq!(short_date("2026-12-01"), "Dec 1");
+        assert_eq!(short_date("not a date"), "not a date");
+    }
+
+    #[test]
+    fn carryover_todos_includes_recent_unfinished_todos_oldest_first() {
+        let conn = open_test_db();
+        let today = "2026-09-08";
+        let a = insert_todo(&conn, "42", "2026-09-07", "Alpha", None, None).unwrap();
+        let b = insert_todo(&conn, "42", "2026-09-06", "Bravo", None, Some("M1")).unwrap();
+        insert_update(
+            &conn,
+            "42",
+            "2026-09-06",
+            "Bravo",
+            Some(b),
+            "blocked",
+            "stuck",
+            Some("ops"),
+        )
+        .unwrap();
+
+        let got = carryover_todos(&conn, "42", today, 7, "").unwrap();
+        assert_eq!(
+            got,
+            vec![
+                CarryoverTodo {
+                    id: b,
+                    task: "Bravo".into(),
+                    sow_ref: Some("M1".into()),
+                    origin_date: "2026-09-06".into(),
+                },
+                CarryoverTodo {
+                    id: a,
+                    task: "Alpha".into(),
+                    sow_ref: None,
+                    origin_date: "2026-09-07".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn carryover_todos_excludes_done_today_and_other_users() {
+        let conn = open_test_db();
+        let today = "2026-09-08";
+        // has a done report -> excluded (even with a later non-done one)
+        let done = insert_todo(&conn, "42", "2026-09-06", "Done one", None, None).unwrap();
+        insert_update(
+            &conn,
+            "42",
+            "2026-09-06",
+            "Done one",
+            Some(done),
+            "done",
+            "shipped",
+            None,
+        )
+        .unwrap();
+        insert_update(
+            &conn,
+            "42",
+            "2026-09-07",
+            "Done one",
+            Some(done),
+            "blocked",
+            "regressed",
+            None,
+        )
+        .unwrap();
+        // today's todo -> excluded
+        insert_todo(&conn, "42", today, "Today one", None, None).unwrap();
+        // another user -> excluded
+        let other = insert_todo(&conn, "99", "2026-09-07", "Theirs", None, None).unwrap();
+        let _ = other;
+
+        assert!(
+            carryover_todos(&conn, "42", today, 7, "")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn carryover_todos_window_boundary_is_inclusive() {
+        let conn = open_test_db();
+        let today = "2026-09-08";
+        let inside = insert_todo(&conn, "42", "2026-09-01", "Inside", None, None).unwrap(); // D-7
+        insert_todo(&conn, "42", "2026-08-31", "Outside", None, None).unwrap(); // D-8
+
+        let got = carryover_todos(&conn, "42", today, 7, "").unwrap();
+        assert_eq!(got.iter().map(|c| c.id).collect::<Vec<_>>(), vec![inside]);
+    }
+
+    #[test]
+    fn carryover_todos_filters_by_substring() {
+        let conn = open_test_db();
+        insert_todo(&conn, "42", "2026-09-07", "Write parser", None, None).unwrap();
+        insert_todo(&conn, "42", "2026-09-07", "Ship release", None, None).unwrap();
+
+        let got = carryover_todos(&conn, "42", "2026-09-08", 7, "parser").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].task, "Write parser");
+    }
+
+    #[test]
+    fn carryover_todos_disabled_when_lookback_zero() {
+        let conn = open_test_db();
+        insert_todo(&conn, "42", "2026-09-07", "Alpha", None, None).unwrap();
+        assert!(
+            carryover_todos(&conn, "42", "2026-09-08", 0, "")
                 .unwrap()
                 .is_empty()
         );
