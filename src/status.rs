@@ -101,12 +101,19 @@ pub struct MemberReport {
     pub name: String,
     pub todos: Vec<TodoDetail>,
     pub ad_hoc: Vec<UpdateDetail>,
+    /// Still-open todos from recent past days (see
+    /// `entries::carryover_report`). Empty when carry-over is disabled.
+    pub carried: Vec<crate::entries::CarryoverDetail>,
 }
 
 /// One `MemberReport` per roster row, ordered by name. Per-member queries
 /// rather than one big JOIN - same rationale as `team_status`: a 6-person
 /// team's worth of rows, easier to read and verify.
-pub fn team_report(conn: &Connection, date: &str) -> Result<Vec<MemberReport>> {
+pub fn team_report(
+    conn: &Connection,
+    date: &str,
+    carryover_lookback_days: i64,
+) -> Result<Vec<MemberReport>> {
     let mut members_stmt =
         conn.prepare("SELECT discord_user_id, name FROM members ORDER BY name")?;
     let members = members_stmt
@@ -163,10 +170,18 @@ pub fn team_report(conn: &Connection, date: &str) -> Result<Vec<MemberReport>> {
             .query_map(params![date, discord_user_id], row_to_update_detail)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
+        let carried = crate::entries::carryover_report(
+            conn,
+            &discord_user_id,
+            date,
+            carryover_lookback_days,
+        )?;
+
         reports.push(MemberReport {
             name,
             todos,
             ad_hoc,
+            carried,
         });
     }
     Ok(reports)
@@ -188,7 +203,11 @@ fn row_to_update_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateDetai
 /// matched none of them is treated the same as "no todo posted" - both
 /// are the "needs attention" case. A member with no SOW refs set gets no
 /// trailing parens (a `todo_count == 0` member structurally can't have
-/// any either, since the column only exists on todo rows).
+/// any either, since the column only exists on todo rows). Carried-over
+/// todos add a ` +N carried` suffix when the member also posted today;
+/// a member with none posted today but carrying some shows
+/// `⚠️ Name - no new todo (N carried)` instead of the plain
+/// `❌ ... - no todo posted`.
 pub fn format_status_line(status: &MemberStatus) -> String {
     let base = if status.todo_count == 0 {
         if status.carried_count > 0 {
@@ -247,7 +266,7 @@ fn push_update_line(out: &mut String, update: &UpdateDetail) {
 /// One member's block for `/team report`, in Discord markdown, with no
 /// trailing newline. Callers join member blocks with "\n\n".
 pub fn format_report(report: &MemberReport) -> String {
-    if report.todos.is_empty() && report.ad_hoc.is_empty() {
+    if report.todos.is_empty() && report.ad_hoc.is_empty() && report.carried.is_empty() {
         return format!("**{}** - nothing posted today", report.name);
     }
 
@@ -273,6 +292,39 @@ pub fn format_report(report: &MemberReport) -> String {
     for update in &report.ad_hoc {
         out.push_str(&format!("\n• unplanned: {}\n", update.task));
         push_update_line(&mut out, update);
+    }
+    if !report.carried.is_empty() {
+        out.push_str("\nCarried over:");
+        for c in &report.carried {
+            out.push('\n');
+            let sow = c
+                .sow_ref
+                .as_deref()
+                .map(|r| format!(" [{r}]"))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "• {}{} — from {}",
+                c.task,
+                sow,
+                crate::entries::short_date(&c.origin_date)
+            ));
+            match &c.latest_status {
+                Some(status) => {
+                    let (glyph, label) = status_glyph_label(status);
+                    out.push_str(&format!(" · {glyph} {label}"));
+                    if c.updated_today {
+                        out.push_str(" · updated today");
+                    }
+                    if let Some(progress) = &c.latest_progress {
+                        out.push_str(&format!("\n  {progress}"));
+                    }
+                    if let Some(blocker) = &c.latest_blocker {
+                        out.push_str(&format!("\n  (blocker: {blocker})"));
+                    }
+                }
+                None => out.push_str(" · no report yet"),
+            }
+        }
     }
     out
 }
@@ -584,7 +636,7 @@ mod tests {
         )
         .unwrap();
 
-        let reports = team_report(&conn, DATE).unwrap();
+        let reports = team_report(&conn, DATE, 0).unwrap();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].name, "Alice");
         assert_eq!(reports[0].todos.len(), 1);
@@ -628,7 +680,7 @@ mod tests {
         )
         .unwrap();
 
-        let reports = team_report(&conn, DATE).unwrap();
+        let reports = team_report(&conn, DATE, 0).unwrap();
         assert!(reports[0].todos.is_empty());
         assert_eq!(
             reports[0].ad_hoc,
@@ -647,7 +699,7 @@ mod tests {
         seed_member(&conn, "9", "Zoya", "junior");
         seed_member(&conn, "1", "Alice", "lead");
 
-        let reports = team_report(&conn, DATE).unwrap();
+        let reports = team_report(&conn, DATE, 0).unwrap();
         let names: Vec<&str> = reports.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["Alice", "Zoya"]);
         assert!(reports[0].todos.is_empty() && reports[0].ad_hoc.is_empty());
@@ -659,7 +711,7 @@ mod tests {
         seed_member(&conn, "3", "Citra", "senior");
         entries::insert_todo(&conn, "3", DATE, "Design audit", None, None).unwrap();
 
-        let reports = team_report(&conn, DATE).unwrap();
+        let reports = team_report(&conn, DATE, 0).unwrap();
         assert_eq!(reports[0].todos.len(), 1);
         assert!(reports[0].todos[0].updates.is_empty());
         assert!(reports[0].todos[0].notes.is_none());
@@ -715,6 +767,7 @@ mod tests {
                 progress: "bad index, added it".into(),
                 blocker: None,
             }],
+            carried: vec![],
         }
     }
 
@@ -742,6 +795,7 @@ mod tests {
             name: "Budi".into(),
             todos: vec![],
             ad_hoc: vec![],
+            carried: vec![],
         };
         assert_eq!(format_report(&report), "**Budi** - nothing posted today");
     }
@@ -762,11 +816,88 @@ mod tests {
                 }],
             }],
             ad_hoc: vec![],
+            carried: vec![],
         };
         assert_eq!(
             format_report(&report),
             "**Citra**\n• Thing\n\u{20}\u{20}• weird: hmm"
         );
+    }
+
+    #[test]
+    fn format_report_renders_the_carried_over_block() {
+        let report = MemberReport {
+            name: "Alice".into(),
+            todos: vec![],
+            ad_hoc: vec![],
+            carried: vec![
+                entries::CarryoverDetail {
+                    task: "Refactor auth".into(),
+                    sow_ref: Some("M2".into()),
+                    origin_date: "2026-08-27".into(),
+                    latest_status: Some("in_progress".into()),
+                    latest_progress: Some("traced the leak".into()),
+                    latest_blocker: None,
+                    updated_today: true,
+                },
+                entries::CarryoverDetail {
+                    task: "Write migration".into(),
+                    sow_ref: None,
+                    origin_date: "2026-08-25".into(),
+                    latest_status: None,
+                    latest_progress: None,
+                    latest_blocker: None,
+                    updated_today: false,
+                },
+            ],
+        };
+        assert_eq!(
+            format_report(&report),
+            "**Alice**\n\
+             Carried over:\n\
+             • Refactor auth [M2] — from Aug 27 · ⏳ in progress · updated today\n\
+             \u{20}\u{20}traced the leak\n\
+             • Write migration — from Aug 25 · no report yet"
+        );
+    }
+
+    #[test]
+    fn format_report_carried_over_shows_blocker() {
+        let report = MemberReport {
+            name: "Budi".into(),
+            todos: vec![],
+            ad_hoc: vec![],
+            carried: vec![entries::CarryoverDetail {
+                task: "Ship it".into(),
+                sow_ref: None,
+                origin_date: "2026-08-26".into(),
+                latest_status: Some("blocked".into()),
+                latest_progress: Some("waiting".into()),
+                latest_blocker: Some("DBA review".into()),
+                updated_today: false,
+            }],
+        };
+        assert_eq!(
+            format_report(&report),
+            "**Budi**\n\
+             Carried over:\n\
+             • Ship it — from Aug 26 · ⛔ blocked\n\
+             \u{20}\u{20}waiting\n\
+             \u{20}\u{20}(blocker: DBA review)"
+        );
+    }
+
+    #[test]
+    fn team_report_populates_carried_from_past_days() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice", "lead");
+        entries::insert_todo(&conn, "1", "2026-08-27", "old task", None, None).unwrap();
+
+        let reports = team_report(&conn, DATE, 7).unwrap();
+        assert_eq!(reports[0].carried.len(), 1);
+        assert_eq!(reports[0].carried[0].task, "old task");
+        // still renders even though nothing was posted *today*
+        assert!(format_report(&reports[0]).contains("Carried over:"));
     }
 
     #[test]
@@ -833,7 +964,7 @@ mod tests {
         entries::insert_todo(&conn, "2", DATE, "Design audit", None, None).unwrap();
         entries::insert_update(&conn, "2", DATE, "Hotfix", None, "done", "shipped", None).unwrap();
 
-        let reports = team_report(&conn, DATE).unwrap();
+        let reports = team_report(&conn, DATE, 0).unwrap();
         let full = reports
             .iter()
             .map(format_report)
@@ -887,7 +1018,7 @@ mod tests {
         )
         .unwrap();
 
-        let reports = team_report(&conn, DATE).unwrap();
+        let reports = team_report(&conn, DATE, 0).unwrap();
         assert_eq!(reports[0].todos.len(), 1);
         assert_eq!(reports[0].todos[0].updates.len(), 1);
         assert_eq!(reports[0].todos[0].updates[0].progress, "halfway");
@@ -914,7 +1045,7 @@ mod tests {
         .unwrap();
         entries::insert_todo(&conn, "2", DATE, "Budi task", None, None).unwrap();
 
-        let reports = team_report(&conn, DATE).unwrap();
+        let reports = team_report(&conn, DATE, 0).unwrap();
         let budi = reports.iter().find(|r| r.name == "Budi").unwrap();
         assert_eq!(budi.todos.len(), 1);
         assert!(budi.todos[0].updates.is_empty());

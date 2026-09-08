@@ -99,7 +99,14 @@ impl EventHandler for Handler {
                         .await
                     }
                     Some(("report", _)) => {
-                        team::handle_report(&ctx, &command, &self.db, &self.timezone).await
+                        team::handle_report(
+                            &ctx,
+                            &command,
+                            &self.db,
+                            &self.timezone,
+                            self.carryover_lookback_days,
+                        )
+                        .await
                     }
                     Some(("remind", opts)) => {
                         team::handle_remind(&ctx, &command, opts, &self.db, &self.timezone).await

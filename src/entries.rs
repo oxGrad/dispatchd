@@ -134,7 +134,6 @@ pub fn list_todos(
 /// `"2026-08-27"` -> `"Aug 27"`. Input that doesn't parse as `YYYY-MM-DD`
 /// is returned unchanged. Used to label carried-over todos in the
 /// `/progress add` autocomplete, `/todo list`, and `/team report`.
-#[allow(dead_code)]
 pub fn short_date(ymd: &str) -> String {
     NaiveDate::parse_from_str(ymd, "%Y-%m-%d")
         .map(|d| d.format("%b %-d").to_string())
@@ -226,7 +225,6 @@ pub fn carryover_count(
 
 /// A carried-over todo plus its latest progress report and whether it
 /// moved today - the `/team report` "Carried over" view.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CarryoverDetail {
     pub task: String,
@@ -244,7 +242,6 @@ pub struct CarryoverDetail {
 /// Per-todo detail for the `/team report` "Carried over" block. Same
 /// window / eligibility / ordering as `carryover_todos`. Empty when
 /// `lookback_days <= 0`.
-#[allow(dead_code)]
 pub fn carryover_report(
     conn: &Connection,
     discord_user_id: &str,

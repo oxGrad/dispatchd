@@ -210,6 +210,7 @@ pub async fn handle_report(
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
     timezone: &Tz,
+    carryover_lookback_days: u32,
 ) {
     let discord_user_id = command.user.id.to_string();
     let date = entries::today_in(timezone);
@@ -218,7 +219,7 @@ pub async fn handle_report(
         let conn = db.lock().expect("db mutex poisoned");
         match members::is_lead(&conn, &discord_user_id) {
             Ok(false) => Err("⛔ This command is restricted to the tech lead.".to_string()),
-            Ok(true) => match status::team_report(&conn, &date) {
+            Ok(true) => match status::team_report(&conn, &date, carryover_lookback_days as i64) {
                 Ok(reports) if reports.is_empty() => {
                     Err("No team members configured yet - see members.toml.".to_string())
                 }
