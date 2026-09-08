@@ -50,7 +50,8 @@ impl EventHandler for Handler {
             Interaction::Command(command) => match command.data.name.as_str() {
                 "ping" => {
                     let reply = CreateInteractionResponseMessage::new()
-                        .content("pong! dispatchd is alive.");
+                        .content("pong! dispatchd is alive.")
+                        .ephemeral(true);
                     if let Err(e) = command
                         .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
                         .await
