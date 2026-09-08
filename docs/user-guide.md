@@ -171,6 +171,11 @@ window in `config.toml`, or set it to `0` to switch this off):
   your line) and **`/team report`** (a **Carried over** block per
   person, showing each todo's latest status and whether it moved today).
 
+Note the day-boundary asymmetry: filing an *In Progress* or *Blocked*
+(not Done) report on a todo drops it from `/progress add`'s suggestions
+for the rest of that day, but it comes back as a carried-over item the
+next day and stays there until you file a Done report.
+
 Carry-over is per-person and only ever looks at your own todos.
 
 ## `/team status` - tech lead only

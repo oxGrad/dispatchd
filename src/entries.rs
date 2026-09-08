@@ -174,6 +174,9 @@ pub fn carryover_todos(
            AND t.date >= date(?2, ?3) AND t.date < ?2
            AND t.task LIKE '%' || ?4 || '%'
            AND NOT EXISTS (
+             -- no need to re-check u.discord_user_id here: todo_id uniquely
+             -- identifies a todo and entries::todo_task is owner-scoped, so
+             -- no user can link an update to another user's todo
              SELECT 1 FROM entries u
              WHERE u.type = 'update' AND u.todo_id = t.id AND u.status = 'done'
            )
@@ -197,7 +200,9 @@ pub fn carryover_todos(
 }
 
 /// Count of this user's still-open carried-over todos (see
-/// `carryover_todos`). `0` when `lookback_days <= 0`.
+/// `carryover_todos`). `0` when `lookback_days <= 0`. Deliberately
+/// uncapped - it's a true count for the `+N carried` marker, unlike
+/// `carryover_todos`/`carryover_report` which cap at 25 rows.
 pub fn carryover_count(
     conn: &Connection,
     discord_user_id: &str,
@@ -239,15 +244,49 @@ pub struct CarryoverDetail {
 }
 
 /// Per-todo detail for the `/team report` "Carried over" block. Same
-/// window / eligibility / ordering as `carryover_todos`. Empty when
-/// `lookback_days <= 0`.
+/// window / user / ordering as `carryover_todos`, but with a deliberately
+/// looser eligibility rule: a todo is included unless it has a `done`
+/// update dated *before today*. So a carried-over todo finished **today**
+/// still shows here (with `latest_status = "done"`, `updated_today =
+/// true`) - the lead needs to see the work landed. `carryover_todos` /
+/// `carryover_count` stay strict ("no `done` update ever"), since a
+/// finished todo shouldn't clutter your still-open list or count as still
+/// carried. Empty when `lookback_days <= 0`.
 pub fn carryover_report(
     conn: &Connection,
     discord_user_id: &str,
     today: &str,
     lookback_days: i64,
 ) -> Result<Vec<CarryoverDetail>> {
-    let todos = carryover_todos(conn, discord_user_id, today, lookback_days, "")?;
+    if lookback_days <= 0 {
+        return Ok(Vec::new());
+    }
+    let window_start = format!("-{lookback_days} days");
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.task, t.sow_ref, t.date FROM entries t
+         WHERE t.type = 'todo' AND t.discord_user_id = ?1
+           AND t.date >= date(?2, ?3) AND t.date < ?2
+           AND NOT EXISTS (
+             -- no need to re-check u.discord_user_id here: todo_id uniquely
+             -- identifies a todo and entries::todo_task is owner-scoped, so
+             -- no user can link an update to another user's todo
+             SELECT 1 FROM entries u
+             WHERE u.type = 'update' AND u.todo_id = t.id
+               AND u.status = 'done' AND u.date < ?2
+           )
+         ORDER BY t.date, t.id
+         LIMIT 25",
+    )?;
+    let todos = stmt
+        .query_map(params![discord_user_id, today, window_start], |row| {
+            Ok(CarryoverTodo {
+                id: row.get(0)?,
+                task: row.get(1)?,
+                sow_ref: row.get(2)?,
+                origin_date: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut out = Vec::with_capacity(todos.len());
     for t in todos {
         let latest = conn
@@ -1445,6 +1484,46 @@ mod tests {
         assert_eq!(got[1].latest_progress, None);
         assert_eq!(got[1].latest_blocker, None);
         assert!(!got[1].updated_today);
+    }
+
+    #[test]
+    fn carryover_report_includes_a_todo_finished_today_but_not_one_finished_earlier() {
+        let conn = open_test_db();
+        let today = "2026-09-08";
+        // finished TODAY -> still in the report, latest_status "done"
+        let today_done =
+            insert_todo(&conn, "42", "2026-09-05", "Landed today", None, None).unwrap();
+        insert_update(
+            &conn,
+            "42",
+            today,
+            "Landed today",
+            Some(today_done),
+            "done",
+            "shipped it",
+            None,
+        )
+        .unwrap();
+        // finished YESTERDAY -> excluded
+        let old_done =
+            insert_todo(&conn, "42", "2026-09-04", "Landed earlier", None, None).unwrap();
+        insert_update(
+            &conn,
+            "42",
+            "2026-09-07",
+            "Landed earlier",
+            Some(old_done),
+            "done",
+            "shipped it",
+            None,
+        )
+        .unwrap();
+
+        let got = carryover_report(&conn, "42", today, 7).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].task, "Landed today");
+        assert_eq!(got[0].latest_status.as_deref(), Some("done"));
+        assert!(got[0].updated_today);
     }
 
     #[test]

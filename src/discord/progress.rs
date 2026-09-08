@@ -214,6 +214,19 @@ fn encode_task_for_modal(task_value: &str) -> (String, bool) {
     }
 }
 
+/// Discord rejects the entire autocomplete response (400) if any choice
+/// `name` exceeds 100 chars. Truncates to 99 chars + `…` when over.
+/// Char-count based, not bytes.
+fn cap_choice_label(label: String) -> String {
+    if label.chars().count() <= 100 {
+        label
+    } else {
+        let mut out: String = label.chars().take(99).collect();
+        out.push('…');
+        out
+    }
+}
+
 /// Merges today's open todos with carried-over ones for the `/progress
 /// add` task autocomplete: today's first, then carry-over, deduped by
 /// todo id, capped at Discord's 25-choice limit. Returns
@@ -230,7 +243,7 @@ fn merge_task_choices(
             break;
         }
         if seen.insert(id) {
-            out.push((task, format!("id:{id}")));
+            out.push((cap_choice_label(task), format!("id:{id}")));
         }
     }
     for c in carried {
@@ -239,11 +252,11 @@ fn merge_task_choices(
         }
         if seen.insert(c.id) {
             out.push((
-                format!(
+                cap_choice_label(format!(
                     "{} · carried from {}",
                     c.task,
                     entries::short_date(&c.origin_date)
-                ),
+                )),
                 format!("id:{}", c.id),
             ));
         }
@@ -670,16 +683,45 @@ mod tests {
 
     #[test]
     fn merge_task_choices_dedups_by_id_and_caps_at_25() {
-        let today: Vec<(i64, String)> = (0..30).map(|i| (i, format!("t{i}"))).collect();
-        let carried = vec![crate::entries::CarryoverTodo {
-            id: 0, // already in `today`
-            task: "dup".to_string(),
-            sow_ref: None,
-            origin_date: "2026-08-27".to_string(),
-        }];
+        // 24 today entries so the carried entries actually reach the loop:
+        // id:0 is a dup (skipped by dedup), id:24 fills the 25th slot, id:25
+        // is dropped by the cap.
+        let today: Vec<(i64, String)> = (0..24).map(|i| (i, format!("t{i}"))).collect();
+        let carried = vec![
+            crate::entries::CarryoverTodo {
+                id: 0, // already in `today`
+                task: "dup".to_string(),
+                sow_ref: None,
+                origin_date: "2026-08-27".to_string(),
+            },
+            crate::entries::CarryoverTodo {
+                id: 24,
+                task: "c24".to_string(),
+                sow_ref: None,
+                origin_date: "2026-08-27".to_string(),
+            },
+            crate::entries::CarryoverTodo {
+                id: 25,
+                task: "c25".to_string(),
+                sow_ref: None,
+                origin_date: "2026-08-27".to_string(),
+            },
+        ];
         let got = merge_task_choices(today, carried);
         assert_eq!(got.len(), 25);
         assert_eq!(got.iter().filter(|(_, v)| v == "id:0").count(), 1);
+        assert!(got.iter().all(|(_, v)| v != "id:25"));
+    }
+
+    #[test]
+    fn cap_choice_label_truncates_over_100_chars_and_leaves_short_untouched() {
+        let long = "x".repeat(150);
+        let capped = cap_choice_label(long);
+        assert_eq!(capped.chars().count(), 100);
+        assert!(capped.ends_with('…'));
+
+        let short = "Refactor auth · carried from Aug 27".to_string();
+        assert_eq!(cap_choice_label(short.clone()), short);
     }
 
     #[test]

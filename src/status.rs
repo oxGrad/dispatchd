@@ -143,8 +143,10 @@ pub fn team_report(
         let mut todos = Vec::with_capacity(todo_rows.len());
         for (todo_id, task, notes, sow_ref) in todo_rows {
             // date-scoped to match team_status's matched_update_count filter, so
-            // /team status and /team report agree for a given day. A cross-midnight
-            // update (todo dated D, its update dated D+1) is shown by neither.
+            // /team status and /team report agree for a given day. This section
+            // still excludes a cross-midnight update (todo dated D, its update
+            // dated D+1); the `Carried over:` block (carryover_report) now
+            // surfaces exactly that case instead.
             let mut upd_stmt = conn.prepare(
                 "SELECT task, status, progress, blocker FROM entries
                  WHERE type = 'update' AND todo_id = ?1 AND date = ?2
