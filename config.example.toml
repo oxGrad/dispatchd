@@ -68,3 +68,10 @@
 # Minutes after update_time to nag anyone who still hasn't submitted a
 # /progress report.
 # update_delay_minutes = 30
+
+[carryover]
+# How many days back /progress add and the /team views look for
+# unfinished todos to carry forward. A todo keeps carrying over until a
+# "Done" progress report is filed against it, or until it ages past this
+# window. Set to 0 to turn carry-over off.
+# lookback_days = 7

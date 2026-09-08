@@ -218,6 +218,10 @@ async fn main() -> anyhow::Result<()> {
         "  ticker_interval_seconds:      {}",
         config.ticker_interval_seconds
     );
+    println!(
+        "  carryover_lookback_days:      {}",
+        config.carryover_lookback_days
+    );
     println!("  timezone:                     {}", config.timezone);
     println!(
         "  db_path:                      {}",
