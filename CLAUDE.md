@@ -211,7 +211,10 @@ the gateway code.
 ```
 src/
   main.rs        CLI entry point, Config/DB/seed wiring, Discord gating
-  config.rs      Config struct, XDG lookup + env-var overrides, TOML merge
+  config.rs      Config struct, XDG lookup + env-var overrides, TOML merge;
+                 carryover_lookback_days ([carryover] lookback_days,
+                 default 7, 0 disables) - how far back /progress add +
+                 /team look for unfinished todos
   db/            SQLite connection + embedded migrations (0005 adds
                  members.is_admin)
   entries.rs     todo/update row DB logic, incl. entries.sow_ref - a
@@ -220,7 +223,14 @@ src/
                  update rows: insert_update (append), plus list_updates /
                  update_for_edit / update_update backing /progress
                  list|edit (edit revises status/progress/blocker in place,
-                 leaving task + the todo_id link alone)
+                 leaving task + the todo_id link alone).
+                 Carry-over query helpers: carryover_todos /
+                 carryover_count / carryover_report - `type='todo'` rows
+                 from the last N days with no `done` update, feeding
+                 /progress add autocomplete, /team status ("+N carried"),
+                 /team report ("Carried over" block) and /todo list.
+                 short_date formats an origin date ("2026-08-27" ->
+                 "Aug 27")
   members.rs     roster seeding + is_lead check + all_member_ids +
                  roster/name_of (used by /team remind's member autocomplete).
                  Role `admin` is a superset of `lead`: seeding it sets both
@@ -230,7 +240,13 @@ src/
                  format_status_line), incl. each member's deduped sow_ref
                  tag list appended to their line; also team_report /
                  format_report / split_into_messages - the full per-member
-                 detail for /team report and its 2000-char message chunking
+                 detail for /team report and its 2000-char message
+                 chunking. team_status / team_report take
+                 carryover_lookback_days; MemberStatus gains
+                 carried_count, MemberReport gains carried
+                 (Vec<CarryoverDetail>); matched_update_count is now
+                 scoped to today's todo ids so a carry-over update
+                 doesn't inflate it
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
   followups.rs   followups_sent DB logic (missing-todo/update nags)
   init.rs        `dispatchd init` subcommand
@@ -286,7 +302,10 @@ src/
                     (modal_value, get_option_string, is_unknown_channel_error
                     - the last moved here from ticker.rs, now shared by
                     ticker + team), spawns the ticker alongside the client;
-                    calls admin::post_upgrade_confirmation on `ready`
+                    calls admin::post_upgrade_confirmation on `ready`.
+                    Handler carries carryover_lookback_days, passed to
+                    /team status/report, /progress autocomplete, and
+                    /todo list
     help.rs        /help - static overview of every command
     admin.rs       the `/admin` command group (members with role=admin):
                     `status` - `dispatchd status`'s systemd + Discord health
@@ -309,7 +328,11 @@ src/
                     list_open_todos); delete is blocked by
                     entries.todo_id's FOREIGN KEY (surfaced as a friendly
                     reply, not a raw DB error) if a /progress report
-                    already references the todo
+                    already references the todo. list also appends a
+                    read-only "Carried over (still open)" section
+                    (format_todo_list) and chunks its reply past 2000
+                    chars like /team report (status::split_into_messages);
+                    edit/delete ignore carried-over todos
     progress.rs    /progress add|edit|list|help - `add` (was the flat
                     /progress command) opens the report modal and always
                     inserts a new 'update' row; `edit` (report autocomplete
@@ -322,7 +345,9 @@ src/
                     (edit, custom_id carries the resolved status + row id).
                     "progress" is the command name, not the 'update' DB row
                     type - entries.type/reminders_sent.type/etc. keep that
-                    name, it's the data concept not the command surface
+                    name, it's the data concept not the command surface.
+                    add's autocomplete unions today's open todos with
+                    carryover_todos (merge_task_choices, deduped, cap 25)
     team.rs        the `/team` command group (was team_status.rs):
                     `status` - the old standalone summary command moved
                     here verbatim, one line per member showing who's

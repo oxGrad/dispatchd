@@ -6,8 +6,8 @@ use serenity::all::{
     AutocompleteChoice, CommandDataOption, CommandDataOptionValue, CommandInteraction,
     CommandInteraction as AutocompleteInteraction, CommandOptionType, Context as SerenityContext,
     CreateActionRow, CreateAutocompleteResponse, CreateCommand, CreateCommandOption,
-    CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateModal,
-    InputTextStyle, ModalInteraction,
+    CreateInputText, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, CreateModal, InputTextStyle, ModalInteraction,
 };
 
 use crate::entries::{self, DeleteTodoOutcome, TodoForEdit};
@@ -378,40 +378,97 @@ pub async fn handle_delete(
     reply_ephemeral(ctx, command, reply_text, "/todo delete").await;
 }
 
+/// Builds the `/todo list` reply: today's todos with ids, then a
+/// read-only "Carried over" section for still-open todos from recent
+/// past days. Pure.
+fn format_todo_list(
+    today: &[(i64, String, Option<String>)],
+    carried: &[entries::CarryoverTodo],
+) -> String {
+    let mut sections: Vec<String> = Vec::new();
+    if today.is_empty() {
+        sections.push("You haven't submitted a todo today yet - use `/todo add`.".to_string());
+    } else {
+        let lines: Vec<String> = today
+            .iter()
+            .map(|(id, task, sow_ref)| match sow_ref {
+                Some(r) => format!("`{id}` {task} [{r}]"),
+                None => format!("`{id}` {task}"),
+            })
+            .collect();
+        sections.push(format!("**Today's todos:**\n{}", lines.join("\n")));
+    }
+    if !carried.is_empty() {
+        let lines: Vec<String> = carried
+            .iter()
+            .map(|c| match &c.sow_ref {
+                Some(r) => format!(
+                    "{} [{r}] — from {}",
+                    c.task,
+                    entries::short_date(&c.origin_date)
+                ),
+                None => format!("{} — from {}", c.task, entries::short_date(&c.origin_date)),
+            })
+            .collect();
+        sections.push(format!(
+            "**Carried over (still open):**\n{}",
+            lines.join("\n")
+        ));
+    }
+    sections.join("\n\n")
+}
+
 pub async fn handle_list(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
     timezone: &Tz,
+    carryover_lookback_days: u32,
 ) {
     let discord_user_id = command.user.id.to_string();
     let date = entries::today_in(timezone);
 
-    let todos = {
+    let result = {
         let conn = db.lock().expect("db mutex poisoned");
-        entries::list_todos(&conn, &discord_user_id, &date, "")
+        let today = entries::list_todos(&conn, &discord_user_id, &date, "");
+        let carried = entries::carryover_todos(
+            &conn,
+            &discord_user_id,
+            &date,
+            carryover_lookback_days as i64,
+            "",
+        );
+        today.and_then(|t| carried.map(|c| (t, c)))
     };
 
-    let reply_text = match todos {
-        Ok(rows) if rows.is_empty() => {
-            "You haven't submitted a todo today yet - use `/todo add`.".to_string()
-        }
-        Ok(rows) => {
-            let lines: Vec<String> = rows
-                .iter()
-                .map(|(id, task, sow_ref)| match sow_ref {
-                    Some(r) => format!("`{id}` {task} [{r}]"),
-                    None => format!("`{id}` {task}"),
-                })
-                .collect();
-            format!("**Today's todos:**\n{}", lines.join("\n"))
-        }
+    let reply_text = match result {
+        Ok((today, carried)) => format_todo_list(&today, &carried),
         Err(e) => {
             eprintln!("failed to list todos: {e}");
             "⚠️ Something went wrong - please try again.".to_string()
         }
     };
-    reply_ephemeral(ctx, command, reply_text, "/todo list").await;
+
+    // A long carried-over list can push the reply past Discord's 2000-char
+    // message cap - chunk it the same way `/team report` does (split on the
+    // section blank line, 1900 for emoji headroom), first chunk in the
+    // response, the rest as ephemeral follow-ups.
+    let mut chunks = crate::status::split_into_messages(&reply_text, 1900).into_iter();
+    let first = chunks.next().unwrap_or(reply_text);
+    reply_ephemeral(ctx, command, first, "/todo list").await;
+    for chunk in chunks {
+        if let Err(e) = command
+            .create_followup(
+                &ctx.http,
+                CreateInteractionResponseFollowup::new()
+                    .content(chunk)
+                    .ephemeral(true),
+            )
+            .await
+        {
+            eprintln!("failed to send /todo list follow-up: {e}");
+        }
+    }
 }
 
 pub async fn handle_help(ctx: &SerenityContext, command: &CommandInteraction) {
@@ -492,6 +549,98 @@ mod tests {
         assert_eq!(normalize_sow_ref(None), None);
         assert_eq!(normalize_sow_ref(Some(String::new())), None);
         assert_eq!(normalize_sow_ref(Some("   ".to_string())), None);
+    }
+
+    #[test]
+    fn format_todo_list_today_only() {
+        let today = vec![
+            (12, "Write tests".to_string(), Some("M1D2".to_string())),
+            (13, "Ship the release".to_string(), None),
+        ];
+        assert_eq!(
+            format_todo_list(&today, &[]),
+            "**Today's todos:**\n`12` Write tests [M1D2]\n`13` Ship the release"
+        );
+    }
+
+    #[test]
+    fn format_todo_list_appends_carried_over_section() {
+        let today = vec![(13, "Ship the release".to_string(), None)];
+        let carried = vec![
+            crate::entries::CarryoverTodo {
+                id: 1,
+                task: "Refactor auth".to_string(),
+                sow_ref: Some("M2".to_string()),
+                origin_date: "2026-08-27".to_string(),
+            },
+            crate::entries::CarryoverTodo {
+                id: 2,
+                task: "Write migration".to_string(),
+                sow_ref: None,
+                origin_date: "2026-08-25".to_string(),
+            },
+        ];
+        assert_eq!(
+            format_todo_list(&today, &carried),
+            "**Today's todos:**\n`13` Ship the release\n\n\
+             **Carried over (still open):**\n\
+             Refactor auth [M2] — from Aug 27\n\
+             Write migration — from Aug 25"
+        );
+    }
+
+    #[test]
+    fn format_todo_list_no_todos_today_but_carried() {
+        let carried = vec![crate::entries::CarryoverTodo {
+            id: 1,
+            task: "Refactor auth".to_string(),
+            sow_ref: None,
+            origin_date: "2026-08-27".to_string(),
+        }];
+        assert_eq!(
+            format_todo_list(&[], &carried),
+            "You haven't submitted a todo today yet - use `/todo add`.\n\n\
+             **Carried over (still open):**\n\
+             Refactor auth — from Aug 27"
+        );
+    }
+
+    #[test]
+    fn format_todo_list_completely_empty() {
+        assert_eq!(
+            format_todo_list(&[], &[]),
+            "You haven't submitted a todo today yet - use `/todo add`."
+        );
+    }
+
+    #[test]
+    fn a_huge_todo_list_chunks_under_discords_message_cap() {
+        // 400 carried-over todos would blow past 2000 chars in one message;
+        // `/todo list` chunks it the same way `/team report` does.
+        let today = vec![(1, "today".to_string(), None)];
+        let carried: Vec<_> = (0..400)
+            .map(|i| crate::entries::CarryoverTodo {
+                id: i,
+                task: format!("Task number {i} with a reasonably wordy description"),
+                sow_ref: None,
+                origin_date: "2026-08-27".to_string(),
+            })
+            .collect();
+        let full = format_todo_list(&today, &carried);
+        assert!(
+            full.chars().count() > 1900,
+            "test setup should exceed the cap"
+        );
+
+        // `/todo list`'s reply is chunked the way `/team report` is; the
+        // content-preservation guarantee is covered by split_into_messages'
+        // own tests - here we just confirm a big list actually triggers the
+        // split and every chunk fits Discord's message cap.
+        let chunks = crate::status::split_into_messages(&full, 1900);
+        assert!(chunks.len() > 1, "expected the list to be split");
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 1900);
+        }
     }
 
     // `subcommand()` isn't unit-tested here: `CommandDataOption` is

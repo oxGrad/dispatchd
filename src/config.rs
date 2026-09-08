@@ -25,6 +25,7 @@ const DEFAULT_TICKER_INTERVAL_SECONDS: u64 = 60;
 const DEFAULT_RUN_ON_WEEKENDS: bool = false;
 const DEFAULT_TIMEZONE: &str = "UTC";
 const DEFAULT_DB_FILE_NAME: &str = "dispatchd.sqlite3";
+const DEFAULT_CARRYOVER_LOOKBACK_DAYS: u32 = 7;
 
 /// The resolved, fully-typed, flat config actually used by the rest of the
 /// program. Every field is guaranteed valid.
@@ -39,6 +40,9 @@ pub struct Config {
     pub meeting_reminder_lead_minutes: u32,
     pub todo_followup_delay_minutes: u32,
     pub update_followup_delay_minutes: u32,
+    /// How many days back `/progress add` and the `/team` views look for
+    /// unfinished todos to carry forward. `0` disables carry-over.
+    pub carryover_lookback_days: u32,
     pub ticker_interval_seconds: u64,
     pub run_on_weekends: bool,
     pub timezone: Tz,
@@ -58,6 +62,7 @@ impl Default for Config {
             meeting_reminder_lead_minutes: DEFAULT_MEETING_REMINDER_LEAD_MINUTES,
             todo_followup_delay_minutes: DEFAULT_TODO_FOLLOWUP_DELAY_MINUTES,
             update_followup_delay_minutes: DEFAULT_UPDATE_FOLLOWUP_DELAY_MINUTES,
+            carryover_lookback_days: DEFAULT_CARRYOVER_LOOKBACK_DAYS,
             ticker_interval_seconds: DEFAULT_TICKER_INTERVAL_SECONDS,
             run_on_weekends: DEFAULT_RUN_ON_WEEKENDS,
             timezone: parse_timezone(DEFAULT_TIMEZONE).expect("default timezone is valid"),
@@ -76,6 +81,8 @@ struct RawConfig {
     schedule: RawSchedule,
     #[serde(default)]
     followup: RawFollowup,
+    #[serde(default)]
+    carryover: RawCarryover,
     timezone: Option<String>,
     db_path: Option<String>,
     discord_guild_id: Option<u64>,
@@ -97,6 +104,11 @@ struct RawSchedule {
 struct RawFollowup {
     todo_delay_minutes: Option<u32>,
     update_delay_minutes: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawCarryover {
+    lookback_days: Option<u32>,
 }
 
 impl Config {
@@ -170,6 +182,10 @@ impl Config {
                 .followup
                 .update_delay_minutes
                 .unwrap_or(defaults.update_followup_delay_minutes),
+            carryover_lookback_days: raw
+                .carryover
+                .lookback_days
+                .unwrap_or(defaults.carryover_lookback_days),
             ticker_interval_seconds: raw
                 .schedule
                 .ticker_interval_seconds
@@ -295,6 +311,10 @@ mod tests {
         assert_eq!(config.run_on_weekends, defaults.run_on_weekends);
         assert_eq!(config.timezone, defaults.timezone);
         assert_eq!(config.db_path, defaults.db_path);
+        assert_eq!(
+            config.carryover_lookback_days,
+            defaults.carryover_lookback_days
+        );
     }
 
     #[test]
@@ -346,6 +366,9 @@ mod tests {
             [followup]
             todo_delay_minutes = 45
             update_delay_minutes = 20
+
+            [carryover]
+            lookback_days = 2
             "#,
         );
         let raw = read_raw_config(&path).unwrap();
@@ -376,6 +399,7 @@ mod tests {
         );
         assert_eq!(config.discord_guild_id, Some(111111111111111111));
         assert_eq!(config.discord_standup_channel_id, Some(222222222222222222));
+        assert_eq!(config.carryover_lookback_days, 2);
     }
 
     #[test]
@@ -472,5 +496,23 @@ mod tests {
             env::remove_var(CONFIG_PATH_OVERRIDE_ENV);
         }
         assert_eq!(config.db_path, PathBuf::from("/from/config/file.sqlite3"));
+    }
+
+    #[test]
+    fn carryover_lookback_defaults_to_seven_and_is_overridable() {
+        assert_eq!(Config::default().carryover_lookback_days, 7);
+
+        let (_dir, path) = write_config("[carryover]\nlookback_days = 3\n");
+        let raw = read_raw_config(&path).unwrap();
+        let config = Config::from_raw(raw).unwrap();
+        assert_eq!(config.carryover_lookback_days, 3);
+    }
+
+    #[test]
+    fn carryover_lookback_accepts_zero() {
+        let (_dir, path) = write_config("[carryover]\nlookback_days = 0\n");
+        let raw = read_raw_config(&path).unwrap();
+        let config = Config::from_raw(raw).unwrap();
+        assert_eq!(config.carryover_lookback_days, 0);
     }
 }

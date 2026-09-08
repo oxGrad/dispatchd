@@ -24,6 +24,7 @@ pub struct Handler {
     guild_id: GuildId,
     db: Arc<Mutex<Connection>>,
     timezone: Tz,
+    carryover_lookback_days: u32,
 }
 
 #[async_trait]
@@ -69,7 +70,14 @@ impl EventHandler for Handler {
                         todo::handle_delete(&ctx, &command, opts, &self.db, &self.timezone).await
                     }
                     Some(("list", _)) => {
-                        todo::handle_list(&ctx, &command, &self.db, &self.timezone).await
+                        todo::handle_list(
+                            &ctx,
+                            &command,
+                            &self.db,
+                            &self.timezone,
+                            self.carryover_lookback_days,
+                        )
+                        .await
                     }
                     Some(("help", _)) => todo::handle_help(&ctx, &command).await,
                     _ => {}
@@ -88,10 +96,24 @@ impl EventHandler for Handler {
                 // Three subcommands, so `match` rather than `if let`.
                 "team" => match team::subcommand(&command.data.options) {
                     Some(("status", _)) => {
-                        team::handle_status(&ctx, &command, &self.db, &self.timezone).await
+                        team::handle_status(
+                            &ctx,
+                            &command,
+                            &self.db,
+                            &self.timezone,
+                            self.carryover_lookback_days,
+                        )
+                        .await
                     }
                     Some(("report", _)) => {
-                        team::handle_report(&ctx, &command, &self.db, &self.timezone).await
+                        team::handle_report(
+                            &ctx,
+                            &command,
+                            &self.db,
+                            &self.timezone,
+                            self.carryover_lookback_days,
+                        )
+                        .await
                     }
                     Some(("remind", opts)) => {
                         team::handle_remind(&ctx, &command, opts, &self.db, &self.timezone).await
@@ -116,8 +138,14 @@ impl EventHandler for Handler {
                     todo::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone).await
                 }
                 "progress" => {
-                    progress::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone)
-                        .await
+                    progress::handle_autocomplete(
+                        &ctx,
+                        &autocomplete,
+                        &self.db,
+                        &self.timezone,
+                        self.carryover_lookback_days,
+                    )
+                    .await
                 }
                 "team" => team::handle_autocomplete(&ctx, &autocomplete, &self.db).await,
                 _ => {}
@@ -214,6 +242,7 @@ pub async fn run(
             guild_id: GuildId::new(guild_id),
             db: db.clone(),
             timezone: config.timezone,
+            carryover_lookback_days: config.carryover_lookback_days,
         })
         .await
         .context("failed to build Discord client")?;
