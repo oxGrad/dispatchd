@@ -159,7 +159,6 @@ pub struct CarryoverTodo {
 /// (matched via `todo_id`), optionally filtered by a `task` substring.
 /// Ordered oldest-first, capped at 25 (Discord's autocomplete limit).
 /// Empty when `lookback_days <= 0` (carry-over disabled).
-#[allow(dead_code)]
 pub fn carryover_todos(
     conn: &Connection,
     discord_user_id: &str,
@@ -224,6 +223,76 @@ pub fn carryover_count(
         |row| row.get(0),
     )?;
     Ok(n)
+}
+
+/// A carried-over todo plus its latest progress report and whether it
+/// moved today - the `/team report` "Carried over" view.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarryoverDetail {
+    pub task: String,
+    pub sow_ref: Option<String>,
+    pub origin_date: String,
+    /// Status of the most recent linked update (any date), or `None` if
+    /// the todo has never had a progress report.
+    pub latest_status: Option<String>,
+    pub latest_progress: Option<String>,
+    pub latest_blocker: Option<String>,
+    /// True when at least one linked update is dated `today`.
+    pub updated_today: bool,
+}
+
+/// Per-todo detail for the `/team report` "Carried over" block. Same
+/// window / eligibility / ordering as `carryover_todos`. Empty when
+/// `lookback_days <= 0`.
+#[allow(dead_code)]
+pub fn carryover_report(
+    conn: &Connection,
+    discord_user_id: &str,
+    today: &str,
+    lookback_days: i64,
+) -> Result<Vec<CarryoverDetail>> {
+    let todos = carryover_todos(conn, discord_user_id, today, lookback_days, "")?;
+    let mut out = Vec::with_capacity(todos.len());
+    for t in todos {
+        let latest = conn
+            .query_row(
+                "SELECT status, progress, blocker FROM entries
+                 WHERE type = 'update' AND todo_id = ?1
+                 ORDER BY id DESC LIMIT 1",
+                params![t.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let updated_today: bool = conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM entries
+               WHERE type = 'update' AND todo_id = ?1 AND date = ?2
+             )",
+            params![t.id, today],
+            |row| row.get(0),
+        )?;
+        let (latest_status, latest_progress, latest_blocker) = match latest {
+            Some((s, p, b)) => (Some(s), Some(p), b),
+            None => (None, None, None),
+        };
+        out.push(CarryoverDetail {
+            task: t.task,
+            sow_ref: t.sow_ref,
+            origin_date: t.origin_date,
+            latest_status,
+            latest_progress,
+            latest_blocker,
+            updated_today,
+        });
+    }
+    Ok(out)
 }
 
 /// A todo's current editable fields, scoped to owner+date+type='todo' -
@@ -1333,5 +1402,64 @@ mod tests {
 
         assert_eq!(carryover_count(&conn, "42", today, 7).unwrap(), 2);
         assert_eq!(carryover_count(&conn, "42", today, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn carryover_report_carries_latest_status_and_updated_today_flag() {
+        let conn = open_test_db();
+        let today = "2026-09-08";
+        let a = insert_todo(&conn, "42", "2026-09-05", "Alpha", None, Some("M2")).unwrap();
+        insert_update(
+            &conn,
+            "42",
+            "2026-09-05",
+            "Alpha",
+            Some(a),
+            "in_progress",
+            "day 1",
+            None,
+        )
+        .unwrap();
+        insert_update(
+            &conn,
+            "42",
+            today,
+            "Alpha",
+            Some(a),
+            "blocked",
+            "hit a wall",
+            Some("need creds"),
+        )
+        .unwrap();
+        // carried but never reported on
+        insert_todo(&conn, "42", "2026-09-06", "Bravo", None, None).unwrap();
+
+        let got = carryover_report(&conn, "42", today, 7).unwrap();
+        assert_eq!(got.len(), 2);
+
+        assert_eq!(got[0].task, "Alpha");
+        assert_eq!(got[0].sow_ref.as_deref(), Some("M2"));
+        assert_eq!(got[0].origin_date, "2026-09-05");
+        assert_eq!(got[0].latest_status.as_deref(), Some("blocked"));
+        assert_eq!(got[0].latest_progress.as_deref(), Some("hit a wall"));
+        assert_eq!(got[0].latest_blocker.as_deref(), Some("need creds"));
+        assert!(got[0].updated_today);
+
+        assert_eq!(got[1].task, "Bravo");
+        assert_eq!(got[1].latest_status, None);
+        assert_eq!(got[1].latest_progress, None);
+        assert_eq!(got[1].latest_blocker, None);
+        assert!(!got[1].updated_today);
+    }
+
+    #[test]
+    fn carryover_report_empty_when_disabled() {
+        let conn = open_test_db();
+        insert_todo(&conn, "42", "2026-09-07", "Alpha", None, None).unwrap();
+        assert!(
+            carryover_report(&conn, "42", "2026-09-08", 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
