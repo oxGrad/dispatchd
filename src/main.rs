@@ -8,6 +8,7 @@ mod init;
 mod lock;
 mod maintenance;
 mod members;
+mod recap;
 mod reminders;
 mod service;
 mod status;

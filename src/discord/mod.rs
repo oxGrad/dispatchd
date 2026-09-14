@@ -1,6 +1,7 @@
 mod admin;
 mod help;
 mod progress;
+mod recap;
 mod team;
 mod ticker;
 mod todo;
@@ -38,6 +39,7 @@ impl EventHandler for Handler {
             progress::command(),
             team::command(),
             admin::command(),
+            recap::command(),
         ];
         if let Err(e) = self.guild_id.set_commands(&ctx.http, commands).await {
             eprintln!("failed to register guild commands: {e}");
@@ -131,6 +133,7 @@ impl EventHandler for Handler {
                     Some(("help", _)) => admin::handle_help(&ctx, &command, &self.db).await,
                     _ => {}
                 },
+                "recap" => recap::handle(&ctx, &command, &self.db, &self.timezone).await,
                 _ => {}
             },
             Interaction::Autocomplete(autocomplete) => match autocomplete.data.name.as_str() {
