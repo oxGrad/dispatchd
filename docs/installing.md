@@ -148,6 +148,15 @@ To move between specific versions (including downgrades), use
 `sudo dispatchd upgrade --version <tag>` (above), or pin the installer
 with `DISPATCHD_VERSION` (see "Options") and restart the same way.
 
+## Restarting the service
+
+```sh
+sudo dispatchd service restart   # equivalent to: sudo systemctl restart dispatchd
+```
+
+A thin wrapper around `systemctl restart dispatchd.service` that checks
+the unit is actually installed first.
+
 ## Uninstalling the service
 
 ```sh

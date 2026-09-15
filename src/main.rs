@@ -106,6 +106,8 @@ enum ServiceCommand {
     /// Stop, disable, and remove the systemd units (leaves the encrypted
     /// Discord token in place - see `dispatchd discord logout`)
     Uninstall,
+    /// Restart the dispatchd.service unit
+    Restart,
 }
 
 #[derive(Subcommand)]
@@ -188,6 +190,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Service {
             action: ServiceCommand::Uninstall,
         }) => return service::uninstall(),
+        Some(Command::Service {
+            action: ServiceCommand::Restart,
+        }) => return service::restart(),
         Some(Command::Maintenance {
             action: MaintenanceCommand::Run,
         }) => return run_maintenance(),

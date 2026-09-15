@@ -273,6 +273,21 @@ pub fn uninstall() -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+pub fn restart() -> anyhow::Result<()> {
+    if !std::path::Path::new(UNIT_PATH).exists() {
+        anyhow::bail!("dispatchd.service is not installed - run: sudo dispatchd service install");
+    }
+    run_systemctl(&["restart", "dispatchd.service"])?;
+    println!("dispatchd.service restarted.");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn restart() -> anyhow::Result<()> {
+    anyhow::bail!("`dispatchd service restart` is only supported on Linux (systemd)");
+}
+
+#[cfg(target_os = "linux")]
 fn run_systemctl(args: &[&str]) -> anyhow::Result<()> {
     use anyhow::Context;
 
