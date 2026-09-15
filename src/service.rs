@@ -221,6 +221,57 @@ pub fn install() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Stops, disables, and removes every unit `install` writes. Leaves
+/// `CRED_PATH` (the encrypted Discord token) and `ENV_DIR` untouched - same
+/// split as `discord_login::logout` being a separate command from this one,
+/// so uninstalling the service doesn't silently throw away the token.
+#[cfg(target_os = "linux")]
+pub fn uninstall() -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    // Same lock `install` takes, so the two can't interleave.
+    let _singleton = crate::lock::acquire(std::path::Path::new(INSTALL_LOCK_PATH))?;
+
+    for (unit, path) in [
+        ("dispatchd-upgrade.path", UPGRADE_PATH_PATH),
+        ("dispatchd-maintenance.timer", MAINTENANCE_TIMER_PATH),
+        ("dispatchd.service", UNIT_PATH),
+    ] {
+        if std::path::Path::new(path).exists() {
+            run_systemctl(&["disable", "--now", unit])?;
+        }
+    }
+
+    for path in [
+        UNIT_PATH,
+        MAINTENANCE_SERVICE_PATH,
+        MAINTENANCE_TIMER_PATH,
+        UPGRADE_SERVICE_PATH,
+        UPGRADE_PATH_PATH,
+    ] {
+        match std::fs::remove_file(path) {
+            Ok(()) => println!("removed {path}"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("failed to remove {path}")),
+        }
+    }
+
+    run_systemctl(&["daemon-reload"])?;
+
+    println!("dispatchd systemd units removed.");
+    if std::path::Path::new(CRED_PATH).exists() {
+        println!(
+            "{CRED_PATH} left untouched - run `sudo dispatchd discord logout` to remove it too."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn uninstall() -> anyhow::Result<()> {
+    anyhow::bail!("`dispatchd service uninstall` is only supported on Linux (systemd)");
+}
+
 #[cfg(target_os = "linux")]
 fn run_systemctl(args: &[&str]) -> anyhow::Result<()> {
     use anyhow::Context;

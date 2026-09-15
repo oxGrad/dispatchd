@@ -103,6 +103,9 @@ enum DiscordCommand {
 enum ServiceCommand {
     /// Install the systemd unit and enable it to start at boot
     Install,
+    /// Stop, disable, and remove the systemd units (leaves the encrypted
+    /// Discord token in place - see `dispatchd discord logout`)
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -182,6 +185,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Service {
             action: ServiceCommand::Install,
         }) => return service::install(),
+        Some(Command::Service {
+            action: ServiceCommand::Uninstall,
+        }) => return service::uninstall(),
         Some(Command::Maintenance {
             action: MaintenanceCommand::Run,
         }) => return run_maintenance(),

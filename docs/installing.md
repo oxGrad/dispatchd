@@ -148,6 +148,18 @@ To move between specific versions (including downgrades), use
 `sudo dispatchd upgrade --version <tag>` (above), or pin the installer
 with `DISPATCHD_VERSION` (see "Options") and restart the same way.
 
+## Uninstalling the service
+
+```sh
+sudo dispatchd service uninstall   # stops, disables, and removes the systemd units
+```
+
+This removes `dispatchd.service`, the maintenance timer, and the
+`/admin upgrade` helper units, then `daemon-reload`s. It leaves the
+encrypted Discord token (`/etc/dispatchd/discord_token.cred`) and
+config/DB files in place - run `sudo dispatchd discord logout` and
+delete those yourself if you want a full teardown.
+
 ## Running on a cloud VM (Google Cloud free tier)
 
 dispatchd is a good fit for a tiny always-on VM: one static binary,
