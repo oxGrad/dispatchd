@@ -61,6 +61,8 @@ enum Command {
     Status,
     /// Download and install the latest dispatchd release
     Upgrade(UpgradeArgs),
+    /// Check config.toml and members.toml for errors without starting the bot
+    Validate,
 }
 
 #[derive(Args)]
@@ -153,6 +155,30 @@ async fn run_status() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `dispatchd validate` - parses config.toml and members.toml and reports
+/// errors, without opening the DB, taking the singleton lock, or
+/// connecting to Discord (unlike the default run, which does all three).
+fn run_validate() -> anyhow::Result<()> {
+    match config::config_file_path()? {
+        Some(path) => println!("config.toml: ok ({})", path.display()),
+        None => println!("config.toml: not configured (using defaults)"),
+    }
+    Config::load()?;
+
+    match members::resolve_path() {
+        Some(path) => {
+            let count = members::validate()?;
+            println!(
+                "members.toml: ok ({count} member{} - {})",
+                if count == 1 { "" } else { "s" },
+                path.display()
+            );
+        }
+        None => println!("members.toml: not configured (no roster to seed)"),
+    }
+    Ok(())
+}
+
 fn run_maintenance() -> anyhow::Result<()> {
     let config = Config::load()?;
 
@@ -198,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
         }) => return run_maintenance(),
         Some(Command::Status) => return run_status().await,
         Some(Command::Upgrade(args)) => return upgrade::run(args.into()).await,
+        Some(Command::Validate) => return run_validate(),
         None => {}
     }
 

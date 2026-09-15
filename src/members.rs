@@ -56,11 +56,13 @@ pub fn target_path() -> Result<PathBuf> {
         .context("failed to resolve members.toml target path (is $HOME set?)")
 }
 
-/// Reads `members.toml` (if present) and upserts each row into `members`.
-/// Returns the number of rows upserted (0 if no file was found).
-pub fn seed(conn: &Connection) -> Result<usize> {
+/// Reads and parses `members.toml` (if present) and checks every `role`
+/// against `VALID_ROLES`. No DB access - shared by `seed` (which then
+/// writes the parsed rows) and `validate` (which just wants the same
+/// checks without a DB connection).
+fn load_and_validate() -> Result<Option<MembersFile>> {
     let Some(path) = resolve_path() else {
-        return Ok(0);
+        return Ok(None);
     };
 
     let contents = std::fs::read_to_string(&path)
@@ -79,6 +81,23 @@ pub fn seed(conn: &Connection) -> Result<usize> {
             );
         }
     }
+
+    Ok(Some(file))
+}
+
+/// Parses and validates `members.toml` without touching the DB - the
+/// `dispatchd validate` check. Returns the number of members that would be
+/// seeded (0 if no file was found).
+pub fn validate() -> Result<usize> {
+    Ok(load_and_validate()?.map_or(0, |file| file.members.len()))
+}
+
+/// Reads `members.toml` (if present) and upserts each row into `members`.
+/// Returns the number of rows upserted (0 if no file was found).
+pub fn seed(conn: &Connection) -> Result<usize> {
+    let Some(file) = load_and_validate()? else {
+        return Ok(0);
+    };
 
     for member in &file.members {
         let is_lead = matches!(member.role.as_str(), "lead" | "viewer");
@@ -205,6 +224,20 @@ mod tests {
             env::set_var(MEMBERS_PATH_OVERRIDE_ENV, &path);
         }
         let result = seed(conn);
+        unsafe {
+            env::remove_var(MEMBERS_PATH_OVERRIDE_ENV);
+        }
+        result
+    }
+
+    fn validate_from(contents: &str) -> Result<usize> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let (_dir, path) = write_members(contents);
+        // SAFETY: held under ENV_LOCK; removed before returning.
+        unsafe {
+            env::set_var(MEMBERS_PATH_OVERRIDE_ENV, &path);
+        }
+        let result = validate();
         unsafe {
             env::remove_var(MEMBERS_PATH_OVERRIDE_ENV);
         }
@@ -354,6 +387,51 @@ mod tests {
         assert!(err.to_string().contains("intern"), "{err}");
         assert!(err.to_string().contains("Alice"), "{err}");
         assert_eq!(row_count(&conn), 0);
+    }
+
+    #[test]
+    fn validate_counts_members_without_a_db_connection() {
+        let count = validate_from(
+            r#"
+            [[members]]
+            discord_user_id = "1"
+            name = "Alice"
+            role = "lead"
+
+            [[members]]
+            discord_user_id = "2"
+            name = "Budi"
+            role = "viewer"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn validate_rejects_an_invalid_role() {
+        let err = validate_from(
+            "[[members]]\ndiscord_user_id = \"1\"\nname = \"Ops\"\nrole = \"admin\"\n",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("admin"), "{err}");
+    }
+
+    #[test]
+    fn validate_returns_zero_with_no_file_present() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let empty_xdg = tempfile::tempdir().unwrap();
+        unsafe {
+            env::remove_var(MEMBERS_PATH_OVERRIDE_ENV);
+            env::set_var("XDG_CONFIG_HOME", empty_xdg.path());
+        }
+        let count = validate().unwrap();
+        unsafe {
+            env::remove_var("XDG_CONFIG_HOME");
+        }
+        assert_eq!(count, 0);
     }
 
     #[test]

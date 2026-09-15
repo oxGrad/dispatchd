@@ -85,6 +85,11 @@ release workflow's container).
 dispatchd init      # writes commented-out config.toml + members.toml
                      # templates to their resolved locations (XDG or the
                      # DISPATCHD_*_PATH env vars below), never overwrites
+dispatchd validate   # parses config.toml and members.toml and reports
+                     # errors (e.g. an invalid members.toml role) without
+                     # opening the DB, taking the singleton lock, or
+                     # connecting to Discord - unlike the bare run below,
+                     # which does all three
 dispatchd discord login   # (Linux, root) prompts for the bot token (hidden
                      # input), validates it against Discord, then pipes it
                      # into `systemd-creds encrypt --with-key=host` and
@@ -243,7 +248,9 @@ src/
                  manage the team, only watch it). all_member_ids excludes
                  `viewer` (they're not pinged by the standup reminders),
                  as does followups::members_missing_todo (never nagged to
-                 submit)
+                 submit). load_and_validate is the shared read+parse+role-check
+                 (no DB access), reused by seed (writes the rows) and
+                 validate (just the checks - backs `dispatchd validate`)
   status.rs      /team status DB queries + formatting (team_status /
                  format_status_line), incl. each member's deduped sow_ref
                  tag list appended to their line; also team_report /
