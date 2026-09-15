@@ -248,7 +248,7 @@ pub fn format_status_line(status: &MemberStatus) -> String {
 /// `(glyph, label)` for a progress-report status value. Unknown values
 /// (shouldn't happen - the command only writes done/in_progress/blocked)
 /// fall back to a neutral bullet and the raw string.
-fn status_glyph_label(status: &str) -> (&'static str, String) {
+pub(crate) fn status_glyph_label(status: &str) -> (&'static str, String) {
     match status {
         "done" => ("✅", "done".to_string()),
         "in_progress" => ("⏳", "in progress".to_string()),
