@@ -70,7 +70,7 @@ pub fn subcommand(options: &[CommandDataOption]) -> Option<(&str, &[CommandDataO
 }
 
 fn permission_denied_reply() -> &'static str {
-    "⛔ This command is restricted to bot operators (the `admin` role in members.toml)."
+    "⛔ This command is restricted to bot operators (`is_admin = true` in members.toml)."
 }
 
 fn version_line(check: Result<upgrade::UpgradeCheck, String>) -> String {

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use crate::config::xdg_dirs;
 
 pub(crate) const MEMBERS_PATH_OVERRIDE_ENV: &str = "DISPATCHD_MEMBERS_PATH";
-const VALID_ROLES: &[&str] = &["admin", "lead", "designer", "senior", "medior", "junior"];
+const VALID_ROLES: &[&str] = &["lead", "designer", "senior", "medior", "junior", "viewer"];
 
 #[derive(Debug, Default, Deserialize)]
 struct MembersFile {
@@ -21,6 +21,12 @@ struct MemberSeed {
     discord_user_id: String,
     name: String,
     role: String,
+    /// Bot-operator privileges (`/admin`), independent of `role` - not a
+    /// superset/subset relationship with `is_lead`. A member needs
+    /// `role = "lead"` (or `"viewer"`) separately if they should also pass
+    /// `/team`'s `is_lead` gate.
+    #[serde(default)]
+    is_admin: bool,
 }
 
 /// Resolves the roster file to read, without reading it. `None` means
@@ -75,8 +81,7 @@ pub fn seed(conn: &Connection) -> Result<usize> {
     }
 
     for member in &file.members {
-        let is_lead = matches!(member.role.as_str(), "lead" | "admin");
-        let is_admin = member.role == "admin";
+        let is_lead = matches!(member.role.as_str(), "lead" | "viewer");
         conn.execute(
             "INSERT INTO members (discord_user_id, name, role, is_lead, is_admin)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -90,7 +95,7 @@ pub fn seed(conn: &Connection) -> Result<usize> {
                 member.name,
                 member.role,
                 is_lead,
-                is_admin
+                member.is_admin
             ],
         )
         .with_context(|| format!("failed to upsert member {:?}", member.discord_user_id))?;
@@ -100,8 +105,10 @@ pub fn seed(conn: &Connection) -> Result<usize> {
 }
 
 /// `true` when the member has tech-lead privileges - role `lead` or
-/// `admin`. `false` for an unknown `discord_user_id`, not an error - the
-/// bot-side source-of-truth check for `/team`.
+/// `viewer` (view-only: sees `/team status`/`report` but isn't nagged to
+/// submit `/todo`/`/progress`, see `all_member_ids`). `false` for an
+/// unknown `discord_user_id`, not an error - the bot-side source-of-truth
+/// check for `/team`.
 pub fn is_lead(conn: &Connection, discord_user_id: &str) -> Result<bool> {
     Ok(conn
         .query_row(
@@ -113,9 +120,25 @@ pub fn is_lead(conn: &Connection, discord_user_id: &str) -> Result<bool> {
         .unwrap_or(false))
 }
 
-/// `true` when the member has bot-operator privileges (role `admin`).
-/// `false` for an unknown `discord_user_id`, not an error - the bot-side
-/// source-of-truth check for `/admin`.
+/// `true` only for role `lead` - unlike `is_lead`, excludes `viewer`.
+/// Gates `/team remind` and `/team skip-meeting`: a view-only member can
+/// see the team's progress but shouldn't be nudging members or cancelling
+/// the meeting on the tech lead's behalf.
+pub fn is_active_lead(conn: &Connection, discord_user_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT role = 'lead' FROM members WHERE discord_user_id = ?1",
+            [discord_user_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// `true` when the member has bot-operator privileges (`is_admin = true`
+/// in `members.toml`, set independently of `role`). `false` for an
+/// unknown `discord_user_id`, not an error - the bot-side source-of-truth
+/// check for `/admin`.
 pub fn is_admin(conn: &Connection, discord_user_id: &str) -> Result<bool> {
     Ok(conn
         .query_row(
@@ -127,10 +150,12 @@ pub fn is_admin(conn: &Connection, discord_user_id: &str) -> Result<bool> {
         .unwrap_or(false))
 }
 
-/// Every team member's Discord user id - used to build the `<@id> ...`
-/// mention text for the 9am standup ping. Order doesn't matter.
+/// Every *participating* team member's Discord user id - used to build the
+/// `<@id> ...` mention text for the 9am standup / pre-meeting pings.
+/// Excludes role `viewer` (view-only members aren't expected to submit
+/// anything, so they're not pinged to). Order doesn't matter.
 pub fn all_member_ids(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT discord_user_id FROM members")?;
+    let mut stmt = conn.prepare("SELECT discord_user_id FROM members WHERE role != 'viewer'")?;
     let ids = stmt
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -332,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn all_member_ids_returns_every_seeded_member() {
+    fn all_member_ids_returns_every_seeded_member_except_viewers() {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::db::open(&dir.path().join("d.sqlite3")).unwrap();
 
@@ -348,6 +373,11 @@ mod tests {
             discord_user_id = "2"
             name = "Budi"
             role = "designer"
+
+            [[members]]
+            discord_user_id = "3"
+            name = "Citra"
+            role = "viewer"
             "#,
         )
         .unwrap();
@@ -376,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_role_seeds_both_is_admin_and_is_lead() {
+    fn is_admin_is_independent_of_role() {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::db::open(&dir.path().join("d.sqlite3")).unwrap();
         seed_from(
@@ -385,7 +415,8 @@ mod tests {
             [[members]]
             discord_user_id = "1"
             name = "Ops"
-            role = "admin"
+            role = "senior"
+            is_admin = true
             "#,
         )
         .unwrap();
@@ -397,12 +428,15 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert!(is_lead, "admin must inherit lead privileges");
+        assert!(
+            !is_lead,
+            "is_admin must not grant is_lead - they're set independently"
+        );
         assert!(is_admin);
     }
 
     #[test]
-    fn is_admin_is_true_only_for_admins() {
+    fn is_admin_is_true_only_for_flagged_members() {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::db::open(&dir.path().join("d.sqlite3")).unwrap();
         seed_from(
@@ -411,7 +445,8 @@ mod tests {
             [[members]]
             discord_user_id = "1"
             name = "Ops"
-            role = "admin"
+            role = "lead"
+            is_admin = true
 
             [[members]]
             discord_user_id = "2"
@@ -427,12 +462,12 @@ mod tests {
     }
 
     #[test]
-    fn reseeding_admin_to_senior_clears_both_flags() {
+    fn reseeding_without_is_admin_clears_it() {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::db::open(&dir.path().join("d.sqlite3")).unwrap();
         seed_from(
             &conn,
-            "[[members]]\ndiscord_user_id = \"1\"\nname = \"X\"\nrole = \"admin\"\n",
+            "[[members]]\ndiscord_user_id = \"1\"\nname = \"X\"\nrole = \"lead\"\nis_admin = true\n",
         )
         .unwrap();
         seed_from(
@@ -449,6 +484,45 @@ mod tests {
             .unwrap();
         assert!(!is_lead);
         assert!(!is_admin);
+    }
+
+    #[test]
+    fn viewer_role_grants_is_lead_but_not_is_admin() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("d.sqlite3")).unwrap();
+        seed_from(
+            &conn,
+            "[[members]]\ndiscord_user_id = \"1\"\nname = \"Watcher\"\nrole = \"viewer\"\n",
+        )
+        .unwrap();
+
+        assert!(is_lead(&conn, "1").unwrap());
+        assert!(!is_admin(&conn, "1").unwrap());
+    }
+
+    #[test]
+    fn is_active_lead_admits_lead_but_not_viewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("d.sqlite3")).unwrap();
+        seed_from(
+            &conn,
+            r#"
+            [[members]]
+            discord_user_id = "1"
+            name = "Lead"
+            role = "lead"
+
+            [[members]]
+            discord_user_id = "2"
+            name = "Watcher"
+            role = "viewer"
+            "#,
+        )
+        .unwrap();
+
+        assert!(is_active_lead(&conn, "1").unwrap());
+        assert!(!is_active_lead(&conn, "2").unwrap());
+        assert!(!is_active_lead(&conn, "999").unwrap());
     }
 
     #[test]

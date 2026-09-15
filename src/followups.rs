@@ -28,11 +28,14 @@ pub fn mark_sent(conn: &Connection, date: &str, discord_user_id: &str, kind: &st
     Ok(())
 }
 
-/// Members with no `type = 'todo'` row for `date` at all.
+/// Members with no `type = 'todo'` row for `date` at all. Excludes role
+/// `viewer` - view-only members aren't expected to submit one, so they're
+/// never nagged for it.
 pub fn members_missing_todo(conn: &Connection, date: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT discord_user_id FROM members
-         WHERE discord_user_id NOT IN (
+         WHERE role != 'viewer'
+           AND discord_user_id NOT IN (
              SELECT discord_user_id FROM entries WHERE type = 'todo' AND date = ?1
          )",
     )?;
@@ -77,6 +80,14 @@ mod tests {
         .unwrap();
     }
 
+    fn seed_viewer(conn: &Connection, id: &str, name: &str) {
+        conn.execute(
+            "INSERT INTO members (discord_user_id, name, role, is_lead) VALUES (?1, ?2, 'viewer', 1)",
+            params![id, name],
+        )
+        .unwrap();
+    }
+
     const DATE: &str = "2026-08-29";
 
     #[test]
@@ -104,6 +115,16 @@ mod tests {
 
         let missing = members_missing_todo(&conn, DATE).unwrap();
         assert_eq!(missing, vec!["2".to_string()]);
+    }
+
+    #[test]
+    fn members_missing_todo_excludes_viewers() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice");
+        seed_viewer(&conn, "2", "Watcher");
+
+        let missing = members_missing_todo(&conn, DATE).unwrap();
+        assert_eq!(missing, vec!["1".to_string()]);
     }
 
     #[test]

@@ -231,11 +231,19 @@ src/
                  /team report ("Carried over" block) and /todo list.
                  short_date formats an origin date ("2026-08-27" ->
                  "Aug 27")
-  members.rs     roster seeding + is_lead check + all_member_ids +
-                 roster/name_of (used by /team remind's member autocomplete).
-                 Role `admin` is a superset of `lead`: seeding it sets both
-                 is_admin=1 and is_lead=1, so every is_lead gate admits
-                 admins unchanged; is_admin() is the /admin-only check
+  members.rs     roster seeding + is_lead/is_active_lead checks +
+                 all_member_ids + roster/name_of (used by /team remind's
+                 member autocomplete). role (`lead | designer | senior |
+                 medior | junior | viewer`) and is_admin (a separate
+                 members.toml bool) are fully decoupled - is_admin no
+                 longer implies is_lead, they're set independently.
+                 is_lead admits `lead` and `viewer` (gates /team
+                 status/report); is_active_lead admits `lead` only (gates
+                 /team remind/skip-meeting, since a viewer shouldn't
+                 manage the team, only watch it). all_member_ids excludes
+                 `viewer` (they're not pinged by the standup reminders),
+                 as does followups::members_missing_todo (never nagged to
+                 submit)
   status.rs      /team status DB queries + formatting (team_status /
                  format_status_line), incl. each member's deduped sow_ref
                  tag list appended to their line; also team_report /

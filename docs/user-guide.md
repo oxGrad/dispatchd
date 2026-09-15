@@ -190,7 +190,9 @@ for each person. If a member has unfinished todos carried over from the
 last few days, their line ends with `+N carried` (or reads `no new todo
 (N carried)` when they haven't posted anything today). Everyone else gets
 an "restricted to the tech lead" reply if they try it - it's not meant as
-a general team overview.
+a general team overview. A member with `role = "viewer"` also passes this
+check (see below), so `/team status` and `/team report` aren't strictly
+tech-lead-only - just restricted to `lead`/`viewer`.
 
 ## `/team report` - tech lead only
 
@@ -210,7 +212,9 @@ mentions the chosen member in today's standup thread, asking them to
 submit a `/todo` or a `/progress` update. It's separate from the
 automated follow-up nags - sending one by hand doesn't stop the scheduled
 one, and vice versa. If today's thread hasn't been created yet, the bot
-tells you so and posts nothing.
+tells you so and posts nothing. Unlike `/team status`/`report`, this one
+stays strictly `role = "lead"` - a `viewer` gets "restricted to the tech
+lead" here, since nudging a member isn't a view-only action.
 
 ## `/team skip-meeting` - tech lead only
 
@@ -218,14 +222,28 @@ Cancels today's meeting. Posts a fixed note into the standup thread -
 *"No meeting today. I've reviewed everyone's progress and I'm all caught
 up..."* - with no `@mentions`, and marks the automated pre-meeting ping as
 sent so it won't also fire. Running it a second time the same day just
-tells you it's already skipped. Needs today's thread to exist.
+tells you it's already skipped. Needs today's thread to exist. Same
+`role = "lead"`-only gate as `/team remind` - a `viewer` can't cancel the
+meeting.
 
-## Bot operator - the `admin` role
+## View-only access - the `viewer` role
 
-A member with `role = "admin"` in `members.toml` has **every `/team`
-capability** (they count as a tech lead for all of them) **plus** the
-`/admin` command group. `/admin` is for whoever operates the bot's host,
-and is hidden from everyone else.
+A member with `role = "viewer"` in `members.toml` passes the same
+`/team status`/`/team report` check as `lead` - full visibility into the
+team's progress - but isn't a participant: they're never pinged by the
+automated `/todo`/`/progress` reminders or nagged by the follow-up checks
+for not submitting either, and `/team remind`/`/team skip-meeting` stay
+off-limits to them. Meant for someone (e.g. a manager) who wants to watch
+the team's standup activity without being treated as a team member
+themselves.
+
+## Bot operator - the `is_admin` flag
+
+A member with `is_admin = true` in `members.toml` gets the `/admin`
+command group, for whoever operates the bot's host - hidden from everyone
+else. It's set independently of `role`, so it doesn't grant `/team`
+access on its own; give them `role = "lead"` (or `"viewer"`, see below)
+too if they need both.
 
 ### `/admin status` - admin only
 

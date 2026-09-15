@@ -340,13 +340,13 @@ pub async fn handle_remind(
 
         let name = {
             let conn = db.lock().expect("db mutex poisoned");
-            match members::is_lead(&conn, &discord_user_id) {
+            match members::is_active_lead(&conn, &discord_user_id) {
                 Ok(false) => {
                     break 'reply "⛔ This command is restricted to the tech lead.".to_string();
                 }
                 Ok(true) => {}
                 Err(e) => {
-                    eprintln!("failed to check is_lead: {e}");
+                    eprintln!("failed to check is_active_lead: {e}");
                     break 'reply "⚠️ Something went wrong checking permissions.".to_string();
                 }
             }
@@ -396,13 +396,13 @@ pub async fn handle_skip_meeting(
     let reply_text = 'reply: {
         {
             let conn = db.lock().expect("db mutex poisoned");
-            match members::is_lead(&conn, &discord_user_id) {
+            match members::is_active_lead(&conn, &discord_user_id) {
                 Ok(false) => {
                     break 'reply "⛔ This command is restricted to the tech lead.".to_string();
                 }
                 Ok(true) => {}
                 Err(e) => {
-                    eprintln!("failed to check is_lead: {e}");
+                    eprintln!("failed to check is_active_lead: {e}");
                     break 'reply "⚠️ Something went wrong checking permissions.".to_string();
                 }
             }

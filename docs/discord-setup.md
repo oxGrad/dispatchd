@@ -156,7 +156,7 @@ dispatchd connected to Discord as <your bot's name>
 
 and `/ping`, `/todo`, `/progress`, `/team` (with its `status` / `report` /
 `remind` / `skip-meeting` subcommands), and `/admin` (`status` / `upgrade`,
-for members with `role = "admin"`) will show up in your server within
+for members with `is_admin = true`) will show up in your server within
 seconds (guild-scoped commands take effect immediately, unlike global
 ones). Run `/ping` in the server — dispatchd should reply
 "pong! dispatchd is alive."
@@ -200,15 +200,19 @@ Settings → Integrations → dispatchd → team**, where each of `status`,
 you want. This is
 optional — the bot-side check is the real gate either way.
 
-### The `admin` role
+### The `is_admin` flag
 
-`members.toml` roles are `admin | lead | designer | senior | medior |
-junior`. `admin` is a superset of `lead` — someone with `role = "admin"`
-passes every `is_lead` check (so all of `/team` works for them) and also
-gets the `/admin` command group: `/admin status` (systemd + Discord
-health plus a version check) and `/admin upgrade` (self-upgrade from
-Discord). `/admin` is `Manage Server`-gated and bot-side `is_admin`-checked,
-same dual gate as `/team`. Enabling `/admin upgrade` needs the
-`dispatchd-upgrade.path` helper from `sudo dispatchd service install`
-plus a `sudo systemctl restart dispatchd` afterwards (see step 4).
-Day-to-day use of both is in `docs/user-guide.md`.
+`members.toml` roles are `lead | designer | senior | medior | junior |
+viewer` — they control `is_lead` (`lead` and `viewer` pass it; `viewer`
+additionally never gets nagged to submit `/todo`/`/progress`, for someone
+who only wants visibility). `is_admin` is a separate boolean field, set
+independently of `role`: someone with `is_admin = true` gets the `/admin`
+command group — `/admin status` (systemd + Discord health plus a version
+check) and `/admin upgrade` (self-upgrade from Discord) — regardless of
+their `role`. If the same person also needs `/team`, give them
+`role = "lead"` (or `"viewer"`) too — the two aren't linked. `/admin` is
+`Manage Server`-gated and bot-side `is_admin`-checked, same dual gate as
+`/team`. Enabling `/admin upgrade` needs the `dispatchd-upgrade.path`
+helper from `sudo dispatchd service install` plus a
+`sudo systemctl restart dispatchd` afterwards (see step 4). Day-to-day use
+of both is in `docs/user-guide.md`.

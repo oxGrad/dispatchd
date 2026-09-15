@@ -11,14 +11,22 @@
 #
 # name is just a display label used in bot output (e.g. /team status lines) -
 # it doesn't need to match the person's actual Discord username.
-# role must be one of: admin | lead | designer | senior | medior | junior
-# 'admin' has every /team capability plus the /admin command group
-# (see docs/user-guide.md).
+# role must be one of: lead | designer | senior | medior | junior | viewer
+# 'lead' unlocks the /team command group (status/report/remind/skip-meeting).
+# 'viewer' unlocks the same /team commands but, unlike every other role,
+# is never nagged to submit /todo or /progress - for someone who only wants
+# visibility into the team's progress (e.g. a manager) without participating
+# in standups.
+# is_admin (default false) unlocks the /admin command group (bot-operator
+# only: self-upgrade, systemd/Discord health). It's independent of role -
+# set both role = "lead" and is_admin = true if one person needs both.
+# See docs/user-guide.md.
 
 # [[members]]
 # discord_user_id = "000000000000000000"
 # name = "Bot Operator's Name"
-# role = "admin"
+# role = "senior"
+# is_admin = true
 
 # [[members]]
 # discord_user_id = "000000000000000001"
@@ -49,3 +57,8 @@
 # discord_user_id = "000000000000000006"
 # name = "Junior Engineer's Name"
 # role = "junior"
+
+# [[members]]
+# discord_user_id = "000000000000000007"
+# name = "Manager's Name"
+# role = "viewer"
