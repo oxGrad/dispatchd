@@ -22,22 +22,26 @@ cargo fmt --check              # verify formatting without changing files
 
 All four should be clean before considering a change done - still worth
 running locally before pushing, for a fast inner loop. CI is the shared
-oxHive reusable pipeline (`oxHive/pipelines`, pinned `@v2`), consumed by
-two thin workflows here:
+oxHive pipeline (`oxHive/pipelines`, pinned `@v2`, a floating major tag),
+consumed by two thin workflows here.
+`rust-check`, `rust-audit`, and `rust-verify-version` are composite actions
+under `oxHive/pipelines/.github/actions/*` now (not reusable workflows), so
+each runs as a step inside a plain `runs-on: ubuntu-latest` job rather than
+a job-level `uses:`:
 
-- `.github/workflows/pull-request.yml` (every PR + push to `main`) calls
-  `rust-check.yml` (`cargo fmt --check`, `cargo clippy -- -D warnings`,
-  and `cargo tarpaulin` coverage gated at `fail-under-coverage: 30` - see
-  below) and `rust-audit.yml` (`rustsec/audit-check`). Note the pipeline's
+- `.github/workflows/pull-request.yml` (every PR + push to `main`) runs
+  `rust-check` (`cargo fmt --check`, `cargo clippy -- -D warnings`, and
+  `cargo tarpaulin` coverage gated at `fail-under-coverage: 30` - see
+  below) and `rust-audit` (`rustsec/audit-check`). Note the pipeline's
   clippy is not `--all-targets`, so warnings in `#[cfg(test)]` code only
   fail your local `cargo clippy --all-targets`, not CI - keep running it.
 - `.github/workflows/release.yml` (on a `v*` tag) runs the same
   `rust-verify-version` -> `rust-check` -> `rust-audit` gates, then a
   bespoke binary build (static musl for x86_64/aarch64/armv7 + macOS
-  arm64, `SHA256SUMS`, GitHub Release). `rust-build-binaries.yml` is
-  deliberately not used - it's glibc-only and drops armv7 (Raspberry Pi),
-  and dispatchd is not a crates.io crate so `rust-publish-crates` is
-  skipped too. See `docs/installing.md`.
+  arm64, `SHA256SUMS`, GitHub Release). `rust-build-binaries` (also now a
+  composite action) is deliberately not used - it's glibc-only and drops
+  armv7 (Raspberry Pi), and dispatchd is not a crates.io crate so
+  `rust-publish-crates` is skipped too. See `docs/installing.md`.
 
 Coverage sits around 35% (measured 2026-09-01): the DB-layer modules are
 ~fully covered, the `src/discord/*` serenity code is near zero because it
