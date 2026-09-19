@@ -14,22 +14,28 @@ jobs:
   # (static musl, armv7, SHA256SUMS, curl|sh installer) rather than using
   # rust-build-binaries.yml, which is glibc-only and drops armv7.
   verify-version:
-    uses: oxHive/pipelines/.github/workflows/rust-verify-version.yml@v2
-    with:
-      package-name: dispatchd
+    runs-on: ubuntu-latest
+    steps:
+      - uses: oxHive/pipelines/.github/actions/rust-verify-version@v2
+        with:
+          package-name: dispatchd
 
   check:
     needs: verify-version
-    uses: oxHive/pipelines/.github/workflows/rust-check.yml@v2
-    with:
-      fail-under-coverage: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: oxHive/pipelines/.github/actions/rust-check@v2
+        with:
+          fail-under-coverage: 30
 
   audit:
     needs: verify-version
+    runs-on: ubuntu-latest
     permissions:
       checks: write
       contents: read
-    uses: oxHive/pipelines/.github/workflows/rust-audit.yml@v2
+    steps:
+      - uses: oxHive/pipelines/.github/actions/rust-audit@v2
 
   build-linux:
     needs: [check, audit]

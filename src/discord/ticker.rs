@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use serenity::all::{ChannelId, ChannelType, CreateMessage, CreateThread, Http};
 
 use crate::config::Config;
-use crate::{entries, followups, members, reminders};
+use crate::{entries, followups, members, recap, reminders, status};
 
 /// Pure time comparison - testable without a live clock or Discord types.
 fn is_due(now: NaiveTime, trigger: NaiveTime) -> bool {
@@ -68,6 +68,11 @@ async fn tick(
         - chrono::Duration::minutes(config.meeting_reminder_lead_minutes.into());
     if is_due(now_time, meeting_reminder_trigger) {
         maybe_fire_meeting_reminder(http, db, &date, config.meeting_reminder_lead_minutes).await;
+    }
+    if is_due(now_time, config.day_summary_time) {
+        maybe_fire_day_summary(http, db, &date).await;
+        maybe_fire_missing_submissions(http, db, &date).await;
+        maybe_record_missed(db, &date).await;
     }
 
     let todo_followup_trigger =
@@ -212,6 +217,187 @@ async fn maybe_fire_meeting_reminder(
     let mentions = all_member_mentions(db);
     let message = format!("{mentions}\n{}", meeting_reminder_body(lead));
     maybe_fire_simple_reminder(http, db, date, "meeting_reminder", &message).await;
+}
+
+/// Posts the full-detail day progress table into today's standup thread -
+/// the same per-day table `/recap` renders (one row per todo, plus any
+/// ad-hoc updates), for just today. Fires on the clock at
+/// `config.day_summary_time` like every other entry in `tick()`, not on
+/// whether everyone has actually submitted yet - a still-open todo just
+/// shows up as "no report yet" (see `recap::format_day_table`).
+async fn maybe_fire_day_summary(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, date: &str) {
+    match already_sent(db, date, "day_summary") {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("failed to check day_summary status: {e}");
+            return;
+        }
+    }
+
+    let thread_id = {
+        let conn = db.lock().expect("db mutex poisoned");
+        reminders::thread_for(&conn, date)
+    };
+    let thread_id = match thread_id {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            eprintln!("no standup thread yet for {date}, skipping day_summary");
+            return;
+        }
+        Err(e) => {
+            eprintln!("failed to look up standup thread for day_summary: {e}");
+            return;
+        }
+    };
+    let Ok(raw_id) = thread_id.parse::<u64>() else {
+        eprintln!("invalid stored thread_id {thread_id:?} for {date}");
+        return;
+    };
+    let channel_id = ChannelId::new(raw_id);
+
+    let day = {
+        let conn = db.lock().expect("db mutex poisoned");
+        recap::recap_range(&conn, date, date)
+    };
+    let day = match day {
+        Ok(mut days) => days.pop(),
+        Err(e) => {
+            eprintln!("failed to build day_summary for {date}: {e}");
+            return;
+        }
+    };
+    let chunks = day_summary_chunks(date, day.as_ref());
+
+    // Same at-most-once stance as the other automated posts below: only
+    // mark `day_summary` sent once every chunk has actually gone out (or
+    // the thread turns out to be gone), so a mid-send failure retries the
+    // whole summary next tick rather than silently posting a partial one.
+    let mut posted_ok = true;
+    for chunk in chunks {
+        match channel_id
+            .send_message(http, CreateMessage::new().content(chunk))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if super::is_unknown_channel_error(&e) => {
+                eprintln!(
+                    "standup thread for {date} no longer exists (deleted?) - giving up on day_summary for today: {e}"
+                );
+                break;
+            }
+            Err(e) => {
+                eprintln!("failed to post day_summary chunk for {date}: {e}");
+                posted_ok = false;
+                break;
+            }
+        }
+    }
+
+    if posted_ok {
+        let conn = db.lock().expect("db mutex poisoned");
+        if let Err(e) = reminders::mark_sent(&conn, date, "day_summary") {
+            eprintln!("failed to mark day_summary sent: {e}");
+        }
+    }
+}
+
+/// Posts a separate "no submissions today" message - @mentions every
+/// member with neither a todo nor a progress update for `date` at all
+/// (`followups::members_with_no_activity`). Same trigger as
+/// `maybe_fire_day_summary` (fires at `day_summary_time`) but its own
+/// message and its own `reminders_sent` marker, so a failure in one never
+/// blocks the other. Silently skipped (but still tracked, so it isn't
+/// re-checked every tick) when nobody qualifies.
+async fn maybe_fire_missing_submissions(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, date: &str) {
+    match already_sent(db, date, "day_summary_missing") {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("failed to check day_summary_missing status: {e}");
+            return;
+        }
+    }
+
+    let missing = {
+        let conn = db.lock().expect("db mutex poisoned");
+        followups::members_with_no_activity(&conn, date)
+    };
+    let missing = match missing {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("failed to list members with no activity for {date}: {e}");
+            return;
+        }
+    };
+
+    let Some(message) = missing_submissions_message(&missing) else {
+        return;
+    };
+
+    maybe_fire_simple_reminder(http, db, date, "day_summary_missing", &message).await;
+}
+
+/// Records `date`'s miss snapshot into `missed_submissions`
+/// (`followups::record_missed`) so `/missed` can report on it later.
+/// Independent of - and gated separately from - the two posts above: a
+/// deleted standup thread (which stops both messages from ever sending)
+/// must never stop this from being recorded, since the record itself
+/// doesn't depend on the thread existing at all.
+async fn maybe_record_missed(db: &Arc<Mutex<Connection>>, date: &str) {
+    match already_sent(db, date, "missed_recorded") {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("failed to check missed_recorded status: {e}");
+            return;
+        }
+    }
+
+    let conn = db.lock().expect("db mutex poisoned");
+    if let Err(e) = followups::record_missed(&conn, date) {
+        eprintln!("failed to record missed submissions for {date}: {e}");
+        return;
+    }
+    if let Err(e) = reminders::mark_sent(&conn, date, "missed_recorded") {
+        eprintln!("failed to mark missed_recorded sent: {e}");
+    }
+}
+
+/// Pure - builds the day progress message chunks (header + the full-detail
+/// day table, chunked for Discord's 2000-char cap) for `date`, given the
+/// already-fetched recap row for that day (`None` when there's no activity
+/// yet). Split out from `maybe_fire_day_summary` so the formatting is
+/// unit-testable without a live Discord connection - same split as
+/// `format_sync_message` above.
+fn day_summary_chunks(date: &str, day: Option<&recap::DayRecap>) -> Vec<String> {
+    let table = match day {
+        Some(day) => recap::format_day_table(day),
+        None => format!("**{date}**\nNo activity today."),
+    };
+    let full = format!("📊 **Day progress**\n\n{table}");
+    status::split_into_messages(&full, 1900)
+}
+
+/// Pure - builds the "no submissions today" message @mentioning every
+/// member in `missing` (submitted neither a todo nor a progress update
+/// today at all - see `followups::members_with_no_activity`). Deliberately
+/// firmer than the other reminders in this file - this is the daily
+/// ritual's actual compliance nag, not a friendly heads-up. `None` when
+/// `missing` is empty, so the caller posts nothing rather than an empty
+/// callout.
+fn missing_submissions_message(missing: &[String]) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    let mentions = missing
+        .iter()
+        .map(|id| format!("<@{id}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!(
+        "🚫 **No submissions today:** {mentions} - you have not submitted a `/todo` or `/progress` update. This is required daily. Submit now."
+    ))
 }
 
 async fn maybe_fire_simple_reminder(
@@ -565,6 +751,54 @@ mod tests {
             trigger
         ));
         assert!(is_due(NaiveTime::from_hms_opt(15, 55, 0).unwrap(), trigger));
+    }
+
+    #[test]
+    fn day_summary_chunks_reports_no_activity_when_theres_nothing_yet() {
+        let chunks = day_summary_chunks("2026-09-19", None);
+        assert_eq!(
+            chunks,
+            vec!["📊 **Day progress**\n\n**2026-09-19**\nNo activity today.".to_string()]
+        );
+    }
+
+    #[test]
+    fn day_summary_chunks_renders_the_full_day_table() {
+        let day = recap::DayRecap {
+            date: "2026-09-19".to_string(),
+            rows: vec![recap::RecapRow {
+                member: "Alice".to_string(),
+                task: "Ship it".to_string(),
+                status: Some("done".to_string()),
+                progress: Some("shipped".to_string()),
+                blocker: None,
+            }],
+        };
+        let chunks = day_summary_chunks("2026-09-19", Some(&day));
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0],
+            format!("📊 **Day progress**\n\n{}", recap::format_day_table(&day))
+        );
+        assert!(chunks[0].contains("Alice"));
+        assert!(chunks[0].contains("Ship it"));
+    }
+
+    #[test]
+    fn missing_submissions_message_is_none_when_nobody_is_missing() {
+        assert_eq!(missing_submissions_message(&[]), None);
+    }
+
+    #[test]
+    fn missing_submissions_message_mentions_every_missing_member() {
+        let missing = vec!["111".to_string(), "222".to_string()];
+        assert_eq!(
+            missing_submissions_message(&missing),
+            Some(
+                "🚫 **No submissions today:** <@111> <@222> - you have not submitted a `/todo` or `/progress` update. This is required daily. Submit now."
+                    .to_string()
+            )
+        );
     }
 
     fn sync_entry(

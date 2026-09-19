@@ -242,6 +242,10 @@ async fn main() -> anyhow::Result<()> {
     println!("  update_time:                  {}", config.update_time);
     println!("  meeting_time:                 {}", config.meeting_time);
     println!(
+        "  day_summary_time:             {}",
+        config.day_summary_time
+    );
+    println!(
         "  meeting_reminder_lead_min:    {}",
         config.meeting_reminder_lead_minutes
     );

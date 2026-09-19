@@ -18,6 +18,8 @@ const HELP_TEXT: &str = "\
 `/team report` - (tech lead only) full detail of everyone's todos + progress today
 `/team remind member:<name> kind:<todo|progress>` - (tech lead only) nudge a member in today's thread
 `/team skip-meeting` - (tech lead only) cancel today's meeting and tell the team
+`/recap start:<date> end:<date>` - (tech lead only) multi-day recap table, one per day
+`/missed start:<date> end:<date>` - (tech lead only) who missed a /todo or /progress submission in that range
 `/admin status` - (admin only) systemd + Discord health and version check
 `/admin upgrade` - (admin only) upgrade dispatchd to the latest release
 `/admin help` - admin-specific help
@@ -59,6 +61,8 @@ mod tests {
             "/team report",
             "/team remind",
             "/team skip-meeting",
+            "/recap",
+            "/missed",
             "/admin status",
             "/admin upgrade",
             "/admin help",

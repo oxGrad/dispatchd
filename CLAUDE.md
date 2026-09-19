@@ -22,22 +22,26 @@ cargo fmt --check              # verify formatting without changing files
 
 All four should be clean before considering a change done - still worth
 running locally before pushing, for a fast inner loop. CI is the shared
-oxHive reusable pipeline (`oxHive/pipelines`, pinned `@v2`), consumed by
-two thin workflows here:
+oxHive pipeline (`oxHive/pipelines`, pinned `@v2`, a floating major tag),
+consumed by two thin workflows here.
+`rust-check`, `rust-audit`, and `rust-verify-version` are composite actions
+under `oxHive/pipelines/.github/actions/*` now (not reusable workflows), so
+each runs as a step inside a plain `runs-on: ubuntu-latest` job rather than
+a job-level `uses:`:
 
-- `.github/workflows/pull-request.yml` (every PR + push to `main`) calls
-  `rust-check.yml` (`cargo fmt --check`, `cargo clippy -- -D warnings`,
-  and `cargo tarpaulin` coverage gated at `fail-under-coverage: 30` - see
-  below) and `rust-audit.yml` (`rustsec/audit-check`). Note the pipeline's
+- `.github/workflows/pull-request.yml` (every PR + push to `main`) runs
+  `rust-check` (`cargo fmt --check`, `cargo clippy -- -D warnings`, and
+  `cargo tarpaulin` coverage gated at `fail-under-coverage: 30` - see
+  below) and `rust-audit` (`rustsec/audit-check`). Note the pipeline's
   clippy is not `--all-targets`, so warnings in `#[cfg(test)]` code only
   fail your local `cargo clippy --all-targets`, not CI - keep running it.
 - `.github/workflows/release.yml` (on a `v*` tag) runs the same
   `rust-verify-version` -> `rust-check` -> `rust-audit` gates, then a
   bespoke binary build (static musl for x86_64/aarch64/armv7 + macOS
-  arm64, `SHA256SUMS`, GitHub Release). `rust-build-binaries.yml` is
-  deliberately not used - it's glibc-only and drops armv7 (Raspberry Pi),
-  and dispatchd is not a crates.io crate so `rust-publish-crates` is
-  skipped too. See `docs/installing.md`.
+  arm64, `SHA256SUMS`, GitHub Release). `rust-build-binaries` (also now a
+  composite action) is deliberately not used - it's glibc-only and drops
+  armv7 (Raspberry Pi), and dispatchd is not a crates.io crate so
+  `rust-publish-crates` is skipped too. See `docs/installing.md`.
 
 Coverage sits around 35% (measured 2026-09-01): the DB-layer modules are
 ~fully covered, the `src/discord/*` serenity code is near zero because it
@@ -221,7 +225,8 @@ src/
                  default 7, 0 disables) - how far back /progress add +
                  /team look for unfinished todos
   db/            SQLite connection + embedded migrations (0005 adds
-                 members.is_admin)
+                 members.is_admin, 0006 adds missed_submissions - never
+                 pruned by maintenance.rs, same as entries)
   entries.rs     todo/update row DB logic, incl. entries.sow_ref - a
                  purely informational, unvalidated cross-reference into
                  an external scope-of-work doc (e.g. "M1D2"), todo-only.
@@ -263,7 +268,27 @@ src/
                  scoped to today's todo ids so a carry-over update
                  doesn't inflate it
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
-  followups.rs   followups_sent DB logic (missing-todo/update nags)
+  followups.rs   followups_sent DB logic (missing-todo/update nags), plus
+                 members_with_no_activity - no todo AND no update at all
+                 today, feeding the ticker's day_summary_missing message
+                 rather than the per-kind todo/update follow-ups above.
+                 Also missed_submissions logic: record_missed (writes one
+                 row per member per kind for a date - 'todo' from
+                 members_missing_todo, 'update' from members_missing_update
+                 reused directly from the live update_followup nag - a
+                 todo left with no report against it, not a blanket
+                 zero-updates day, and correctly silent for a member with
+                 no todo at all, since that's already the 'todo' miss -
+                 called once daily by the ticker alongside day_summary)
+                 + missed_detail/
+                 format_missed_report (the report /missed renders,
+                 MissedDetail { member, missed_todo_dates,
+                 missed_update_dates } - per-member exact dates, folded
+                 in Rust from rows ordered member/date rather than a SQL
+                 GROUP BY, since the report needs every date, not just a
+                 count; format_missed_report renders that detail first,
+                 then a summary table separately ranked by total missed
+                 days, most first)
   init.rs        `dispatchd init` subcommand
   discord_login.rs `dispatchd discord login` - prompts, validates against
                  Discord (Http::get_current_user), then shells out to
@@ -398,5 +423,38 @@ src/
                     "Standup: <date>"; gives up (marks sent/advances the
                     cursor, doesn't
                     retry) on a deleted standup thread instead of
-                    retrying every tick
+                    retrying every tick; also posts a day_summary at
+                    day_summary_time (default 16:00, the same moment
+                    meeting_time defaults to) - one markdown table, the
+                    same per-day format /recap renders (recap::recap_range
+                    + recap::format_day_table) for just today, chunked
+                    through status::split_into_messages. Fires on the clock
+                    like every other entry here, not once everyone's
+                    actually submitted - a still-open todo just shows "no
+                    report yet". Right after it, a separate
+                    day_summary_missing message (own reminders_sent kind,
+                    so one failing never blocks the other) @-mentions every
+                    member from followups::members_with_no_activity - no
+                    todo AND no update at all today, not just a missing
+                    update against an existing todo like the followups
+                    below - and is skipped entirely (not just left silent,
+                    ticker.rs's missing_submissions_message returns None)
+                    when nobody qualifies; deliberately blunt wording
+                    ("you have not submitted ... This is required daily")
+                    since it's the ritual's compliance nag, not a
+                    heads-up. Also at day_summary_time, independently of
+                    both posts above (its own reminders_sent kind,
+                    missed_recorded, and no dependency on the standup
+                    thread existing at all): maybe_record_missed calls
+                    followups::record_missed to persist the day's misses
+                    into missed_submissions, feeding /missed
+    missed.rs      /missed start:<date> end:<date> - tech-lead-only,
+                    reads missed_submissions (the ticker's daily snapshot
+                    above, not a live query) via followups::missed_detail
+                    + format_missed_report - per-member dates first, a
+                    ranked summary table after; same date-range handling
+                    as /recap (recap::resolve_range, reused directly) and
+                    the same status::split_into_messages chunking, since
+                    the detail section can outgrow the 2000-char cap on a
+                    long enough range even for a 6-person team
 ```
