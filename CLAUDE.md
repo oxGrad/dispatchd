@@ -268,12 +268,15 @@ src/
                  members_with_no_activity - no todo AND no update at all
                  today, feeding the ticker's day_summary_missing message
                  rather than the per-kind todo/update follow-ups above.
-                 Also missed_submissions logic: members_missing_any_update
-                 (whole-day miss, unlike members_missing_update's
-                 per-todo-left-unmatched check) + record_missed (writes
-                 one row per member per kind - 'todo'/'update' - they
-                 missed entirely for a date, called once daily by the
-                 ticker alongside day_summary) + missed_detail/
+                 Also missed_submissions logic: record_missed (writes one
+                 row per member per kind for a date - 'todo' from
+                 members_missing_todo, 'update' from members_missing_update
+                 reused directly from the live update_followup nag - a
+                 todo left with no report against it, not a blanket
+                 zero-updates day, and correctly silent for a member with
+                 no todo at all, since that's already the 'todo' miss -
+                 called once daily by the ticker alongside day_summary)
+                 + missed_detail/
                  format_missed_report (the report /missed renders,
                  MissedDetail { member, missed_todo_dates,
                  missed_update_dates } - per-member exact dates, folded

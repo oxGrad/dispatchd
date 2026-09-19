@@ -48,7 +48,12 @@ pub fn members_missing_todo(conn: &Connection, date: &str) -> Result<Vec<String>
 /// Members who posted at least one todo for `date` but have at least one
 /// that still has no matching update. Someone with zero todos isn't
 /// included here - there's nothing to update against, so they're only
-/// nagged by the todo follow-up.
+/// nagged by the todo follow-up. Shared by the live `update_followup` nag
+/// and `record_missed` below - a stated todo left with no report against
+/// it is the sharper "missed /progress" signal, not just "posted zero
+/// updates today" (which double-counts a total no-show already caught by
+/// `members_missing_todo`, and would also flag someone with zero todos
+/// who has nothing to report progress on in the first place).
 pub fn members_missing_update(conn: &Connection, date: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT discord_user_id FROM entries
@@ -81,32 +86,12 @@ pub fn members_with_no_activity(conn: &Connection, date: &str) -> Result<Vec<Str
     Ok(ids)
 }
 
-/// Members with no `type = 'update'` row for `date` at all - i.e. posted
-/// no `/progress` report whatsoever today, regardless of whether they had
-/// a todo to report against. Distinct from `members_missing_update`
-/// above, which only tracks a todo left specifically unmatched; this is
-/// the whole-day miss `record_missed` below persists. Excludes role
-/// `viewer`, same as `members_missing_todo`.
-pub fn members_missing_any_update(conn: &Connection, date: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT discord_user_id FROM members
-         WHERE role != 'viewer'
-           AND discord_user_id NOT IN (
-             SELECT discord_user_id FROM entries WHERE type = 'update' AND date = ?1
-         )",
-    )?;
-    let ids = stmt
-        .query_map(params![date], |row| row.get(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(ids)
-}
-
 /// One member's detail for the `/missed` report: every date in the
-/// queried range they missed `/todo` entirely, and every date they missed
-/// `/progress` entirely, each ascending. Built from `missed_submissions`
-/// (see `record_missed` below), not computed live - only members with at
-/// least one miss are returned by `missed_detail`, a clean record isn't
-/// worth a row.
+/// queried range they missed `/todo` entirely, and every date they left a
+/// todo with no `/progress` report against it, each ascending. Built from
+/// `missed_submissions` (see `record_missed` below), not computed live -
+/// only members with at least one miss are returned by `missed_detail`, a
+/// clean record isn't worth a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissedDetail {
     pub member: String,
@@ -123,11 +108,15 @@ impl MissedDetail {
 }
 
 /// Records `date`'s miss snapshot into `missed_submissions`: one row per
-/// member per kind ('todo' from `members_missing_todo`, 'update' from
-/// `members_missing_any_update`) they submitted nothing for at all today.
-/// A member missing both gets a row of each kind, so `/missed` can report
-/// on either independently. `INSERT OR IGNORE` makes this idempotent -
-/// safe to call more than once for the same date - though the ticker only
+/// member per kind - 'todo' from `members_missing_todo` (no todo
+/// submitted at all), 'update' from `members_missing_update` (had a todo
+/// today but left at least one without a `/progress` report against it -
+/// the tighter, more actionable signal than "posted zero updates all
+/// day", and one that correctly excludes a member with no todo at all,
+/// since `members_missing_todo` already covers that case). A member
+/// hitting both gets a row of each kind, so `/missed` can report on
+/// either independently. `INSERT OR IGNORE` makes this idempotent - safe
+/// to call more than once for the same date - though the ticker only
 /// ever does so once, gated by its own `reminders_sent` marker (see
 /// `discord::ticker`). Unlike `followups_sent`/`reminders_sent`, nothing
 /// prunes this table - it's retained history, same as `entries`.
@@ -138,7 +127,7 @@ pub fn record_missed(conn: &Connection, date: &str) -> Result<()> {
             params![date, id],
         )?;
     }
-    for id in members_missing_any_update(conn, date)? {
+    for id in members_missing_update(conn, date)? {
         conn.execute(
             "INSERT OR IGNORE INTO missed_submissions (date, discord_user_id, kind) VALUES (?1, ?2, 'update')",
             params![date, id],
@@ -365,36 +354,10 @@ mod tests {
     }
 
     #[test]
-    fn members_missing_any_update_ignores_whether_a_todo_exists() {
-        let conn = open_test_db();
-        seed_member(&conn, "1", "Alice"); // todo, update posted
-        seed_member(&conn, "2", "Budi"); // todo, no update at all
-        seed_member(&conn, "3", "Citra"); // no todo, ad-hoc update posted
-
-        let todo1 = entries::insert_todo(&conn, "1", DATE, "a", None, None).unwrap();
-        entries::insert_update(&conn, "1", DATE, "a", Some(todo1), "done", "x", None).unwrap();
-        entries::insert_todo(&conn, "2", DATE, "b", None, None).unwrap();
-        entries::insert_update(&conn, "3", DATE, "hotfix", None, "done", "shipped", None).unwrap();
-
-        let missing = members_missing_any_update(&conn, DATE).unwrap();
-        assert_eq!(missing, vec!["2".to_string()]);
-    }
-
-    #[test]
-    fn members_missing_any_update_excludes_viewers() {
-        let conn = open_test_db();
-        seed_member(&conn, "1", "Alice");
-        seed_viewer(&conn, "2", "Watcher");
-
-        let missing = members_missing_any_update(&conn, DATE).unwrap();
-        assert_eq!(missing, vec!["1".to_string()]);
-    }
-
-    #[test]
     fn record_missed_writes_a_row_per_kind_for_each_missing_member() {
         let conn = open_test_db();
-        seed_member(&conn, "1", "Alice"); // misses both
-        seed_member(&conn, "2", "Budi"); // todo only, misses update
+        seed_member(&conn, "1", "Alice"); // no todo at all - todo miss only
+        seed_member(&conn, "2", "Budi"); // todo left with no update - both
 
         entries::insert_todo(&conn, "2", DATE, "b", None, None).unwrap();
 
@@ -407,7 +370,7 @@ mod tests {
                 MissedDetail {
                     member: "Alice".to_string(),
                     missed_todo_dates: vec![DATE.to_string()],
-                    missed_update_dates: vec![DATE.to_string()],
+                    missed_update_dates: vec![],
                 },
                 MissedDetail {
                     member: "Budi".to_string(),
@@ -419,15 +382,31 @@ mod tests {
     }
 
     #[test]
+    fn record_missed_excludes_a_member_with_no_todo_from_the_update_miss() {
+        // A total no-show (no todo, no update) is a todo miss, not an
+        // "also missed update" - there's nothing to have reported
+        // progress against in the first place.
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice");
+
+        record_missed(&conn, DATE).unwrap();
+
+        let detail = missed_detail(&conn, DATE, DATE).unwrap();
+        assert_eq!(detail[0].missed_todo_dates, vec![DATE.to_string()]);
+        assert!(detail[0].missed_update_dates.is_empty());
+    }
+
+    #[test]
     fn record_missed_is_idempotent() {
         let conn = open_test_db();
         seed_member(&conn, "1", "Alice");
+        entries::insert_todo(&conn, "1", DATE, "a", None, None).unwrap();
 
         record_missed(&conn, DATE).unwrap();
         record_missed(&conn, DATE).unwrap();
 
         let detail = missed_detail(&conn, DATE, DATE).unwrap();
-        assert_eq!(detail[0].missed_todo_dates, vec![DATE.to_string()]);
+        assert_eq!(detail[0].missed_todo_dates, Vec::<String>::new());
         assert_eq!(detail[0].missed_update_dates, vec![DATE.to_string()]);
     }
 
@@ -435,8 +414,8 @@ mod tests {
     fn missed_detail_is_empty_for_a_member_with_no_misses() {
         let conn = open_test_db();
         seed_member(&conn, "1", "Alice");
-        entries::insert_todo(&conn, "1", DATE, "a", None, None).unwrap();
-        entries::insert_update(&conn, "1", DATE, "a", None, "done", "x", None).unwrap();
+        let todo = entries::insert_todo(&conn, "1", DATE, "a", None, None).unwrap();
+        entries::insert_update(&conn, "1", DATE, "a", Some(todo), "done", "x", None).unwrap();
 
         record_missed(&conn, DATE).unwrap();
 
@@ -444,9 +423,9 @@ mod tests {
     }
 
     #[test]
-    fn missed_detail_lists_every_missed_date_in_range_and_excludes_outside_days() {
+    fn missed_detail_lists_every_missed_todo_date_in_range_and_excludes_outside_days() {
         let conn = open_test_db();
-        seed_member(&conn, "1", "Alice");
+        seed_member(&conn, "1", "Alice"); // no todo on any of the three days
 
         record_missed(&conn, "2026-08-28").unwrap();
         record_missed(&conn, "2026-08-29").unwrap();
@@ -458,6 +437,24 @@ mod tests {
             detail[0].missed_todo_dates,
             vec!["2026-08-28".to_string(), "2026-08-29".to_string()]
         );
+        assert!(detail[0].missed_update_dates.is_empty());
+    }
+
+    #[test]
+    fn missed_detail_lists_every_missed_update_date_in_range_and_excludes_outside_days() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice");
+
+        // A todo every day, never updated - the tighter "missed /progress"
+        // signal, not a blanket zero-activity day.
+        for date in ["2026-08-28", "2026-08-29", "2026-08-30"] {
+            entries::insert_todo(&conn, "1", date, "a", None, None).unwrap();
+            record_missed(&conn, date).unwrap();
+        }
+
+        let detail = missed_detail(&conn, "2026-08-28", "2026-08-29").unwrap();
+        assert_eq!(detail.len(), 1);
+        assert!(detail[0].missed_todo_dates.is_empty());
         assert_eq!(
             detail[0].missed_update_dates,
             vec!["2026-08-28".to_string(), "2026-08-29".to_string()]
@@ -467,8 +464,8 @@ mod tests {
     #[test]
     fn missed_detail_is_ordered_alphabetically_by_member() {
         let conn = open_test_db();
-        seed_member(&conn, "1", "Zed"); // misses both kinds
-        seed_member(&conn, "2", "Alice"); // misses just todo
+        seed_member(&conn, "1", "Zed"); // no todo, no update at all - todo miss only
+        seed_member(&conn, "2", "Alice"); // ad-hoc update posted, no todo - todo miss only
 
         entries::insert_update(&conn, "2", DATE, "hotfix", None, "done", "x", None).unwrap();
 

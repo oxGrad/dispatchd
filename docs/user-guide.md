@@ -251,8 +251,11 @@ to stay under Discord's 2000-character limit per message.
 ## `/missed` - tech lead only
 
 `/missed start:<date> end:<date>` reports who missed a `/todo`, a
-`/progress` update, or both, on each day in the range. The reply is two
-parts: first a section per member listing the exact dates they missed
+`/progress` update, or both, on each day in the range. "Missed
+`/progress`" means a todo that day with no report filed against it, not
+just an entirely quiet day - if you had nothing planned, that's a missed
+`/todo` instead, not double-counted as a missed update too. The reply is
+two parts: first a section per member listing the exact dates they missed
 each one, then a summary table ranking everyone by total missed days.
 Same date handling as `/recap`. This reads from a daily snapshot the bot
 takes at `day_summary_time` (see "The daily ritual" above), not a live
