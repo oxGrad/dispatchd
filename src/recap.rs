@@ -168,16 +168,18 @@ fn day_rows(conn: &Connection, date: &str) -> Result<Vec<RecapRow>> {
     Ok(rows)
 }
 
-/// blocked, then never-updated, then done, then in-progress - blocked and
-/// never-updated both need the lead's attention, so they lead the table.
-/// Any other status value (shouldn't happen - the command only ever writes
-/// done/in_progress/blocked) sorts last rather than panicking.
+/// blocked, then never-updated ("no progress"), then in-progress, then
+/// done - the rows that need the lead's attention (blocked, then nothing
+/// reported at all, then still in flight) lead the table, with wrapped-up
+/// work trailing at the bottom. Any other status value (shouldn't happen -
+/// the command only ever writes done/in_progress/blocked) sorts last
+/// rather than panicking.
 fn bucket_rank(status: Option<&str>) -> u8 {
     match status {
         Some("blocked") => 0,
         None => 1,
-        Some("done") => 2,
-        Some("in_progress") => 3,
+        Some("in_progress") => 2,
+        Some("done") => 3,
         Some(_) => 4,
     }
 }
@@ -403,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn recap_range_orders_blocked_then_no_report_then_done_then_in_progress() {
+    fn recap_range_orders_blocked_then_no_report_then_in_progress_then_done() {
         let conn = open_test_db();
         seed_member(&conn, "1", "Alice", "lead");
         seed_member(&conn, "2", "Zed", "senior");
@@ -458,8 +460,8 @@ mod tests {
             vec![
                 "Blocked task",
                 "No report task",
-                "Done task",
                 "In progress task",
+                "Done task",
             ]
         );
     }

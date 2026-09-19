@@ -367,7 +367,7 @@ fn missing_submissions_message(missing: &[String]) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
     Some(format!(
-        "🚫 **No submissions today:** {mentions} - nothing under `/todo` or `/progress` for you yet."
+        "🚫 **No submissions today:** {mentions} - please submit a `/todo` or post a `/progress` update when you can."
     ))
 }
 
@@ -766,7 +766,7 @@ mod tests {
         assert_eq!(
             missing_submissions_message(&missing),
             Some(
-                "🚫 **No submissions today:** <@111> <@222> - nothing under `/todo` or `/progress` for you yet."
+                "🚫 **No submissions today:** <@111> <@222> - please submit a `/todo` or post a `/progress` update when you can."
                     .to_string()
             )
         );
