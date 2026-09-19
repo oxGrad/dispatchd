@@ -21,6 +21,11 @@ posts into a "Standup: YYYY-MM-DD" thread in the team's standup channel:
    about to start. The meeting happens by default; the tech lead can cancel
    it for the day with `/team skip-meeting` (see below), which posts a "no
    meeting today" note and suppresses this ping if it hasn't fired yet.
+5. **Day progress summary** (17:00 by default) - a full-detail markdown
+   table of the day's todos and progress (same format as `/recap`, one day
+   instead of a range) is posted into the thread. This fires on the clock,
+   not once everyone's actually submitted - a still-open todo just shows
+   as "no report yet" in the table.
 
 If you miss a step, dispatchd nags you with an `@mention` in the thread a
 while after each of the two prompts above (default 30 minutes) - once per

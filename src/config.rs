@@ -18,6 +18,7 @@ const DEFAULT_THREAD_CREATION_TIME: &str = "07:00";
 const DEFAULT_TODO_TIME: &str = "09:00";
 const DEFAULT_UPDATE_TIME: &str = "15:00";
 const DEFAULT_MEETING_TIME: &str = "16:00";
+const DEFAULT_DAY_SUMMARY_TIME: &str = "17:00";
 const DEFAULT_MEETING_REMINDER_LEAD_MINUTES: u32 = 5;
 const DEFAULT_TODO_FOLLOWUP_DELAY_MINUTES: u32 = 30;
 const DEFAULT_UPDATE_FOLLOWUP_DELAY_MINUTES: u32 = 30;
@@ -36,6 +37,10 @@ pub struct Config {
     pub update_time: NaiveTime,
     /// When the daily meeting actually starts.
     pub meeting_time: NaiveTime,
+    /// When the full-detail day progress summary is posted into today's
+    /// standup thread - fires on this clock time regardless of whether
+    /// everyone has submitted yet, same as the other schedule entries.
+    pub day_summary_time: NaiveTime,
     /// How many minutes before `meeting_time` the pre-meeting reminder fires.
     pub meeting_reminder_lead_minutes: u32,
     pub todo_followup_delay_minutes: u32,
@@ -59,6 +64,8 @@ impl Default for Config {
             todo_time: parse_time(DEFAULT_TODO_TIME).expect("default todo_time is valid"),
             update_time: parse_time(DEFAULT_UPDATE_TIME).expect("default update_time is valid"),
             meeting_time: parse_time(DEFAULT_MEETING_TIME).expect("default meeting_time is valid"),
+            day_summary_time: parse_time(DEFAULT_DAY_SUMMARY_TIME)
+                .expect("default day_summary_time is valid"),
             meeting_reminder_lead_minutes: DEFAULT_MEETING_REMINDER_LEAD_MINUTES,
             todo_followup_delay_minutes: DEFAULT_TODO_FOLLOWUP_DELAY_MINUTES,
             update_followup_delay_minutes: DEFAULT_UPDATE_FOLLOWUP_DELAY_MINUTES,
@@ -95,6 +102,7 @@ struct RawSchedule {
     todo_time: Option<String>,
     update_time: Option<String>,
     meeting_time: Option<String>,
+    day_summary_time: Option<String>,
     meeting_reminder_lead_minutes: Option<u32>,
     ticker_interval_seconds: Option<u64>,
     run_on_weekends: Option<bool>,
@@ -156,6 +164,11 @@ impl Config {
             }
             None => defaults.meeting_time,
         };
+        let day_summary_time = match raw.schedule.day_summary_time {
+            Some(s) => parse_time(&s)
+                .with_context(|| format!("invalid schedule.day_summary_time: {s:?}"))?,
+            None => defaults.day_summary_time,
+        };
         let timezone = match raw.timezone {
             Some(s) => parse_timezone(&s).with_context(|| format!("invalid timezone: {s:?}"))?,
             None => defaults.timezone,
@@ -170,6 +183,7 @@ impl Config {
             todo_time,
             update_time,
             meeting_time,
+            day_summary_time,
             meeting_reminder_lead_minutes: raw
                 .schedule
                 .meeting_reminder_lead_minutes
@@ -292,6 +306,7 @@ mod tests {
         assert_eq!(config.thread_creation_time, defaults.thread_creation_time);
         assert_eq!(config.todo_time, defaults.todo_time);
         assert_eq!(config.meeting_time, defaults.meeting_time);
+        assert_eq!(config.day_summary_time, defaults.day_summary_time);
         assert_eq!(
             config.meeting_reminder_lead_minutes,
             defaults.meeting_reminder_lead_minutes
@@ -346,6 +361,34 @@ mod tests {
     }
 
     #[test]
+    fn day_summary_time_defaults_to_5pm_and_is_overridable_independently() {
+        assert_eq!(
+            Config::default().day_summary_time,
+            NaiveTime::from_hms_opt(17, 0, 0).unwrap()
+        );
+
+        let (_dir, path) = write_config("[schedule]\nday_summary_time = \"18:30\"\n");
+        let raw = read_raw_config(&path).unwrap();
+        let config = Config::from_raw(raw).unwrap();
+
+        let defaults = Config::default();
+        assert_eq!(
+            config.day_summary_time,
+            NaiveTime::from_hms_opt(18, 30, 0).unwrap()
+        );
+        assert_eq!(config.meeting_time, defaults.meeting_time);
+        assert_eq!(config.update_time, defaults.update_time);
+    }
+
+    #[test]
+    fn invalid_day_summary_time_is_an_error() {
+        let (_dir, path) = write_config("[schedule]\nday_summary_time = \"not-a-time\"\n");
+        let raw = read_raw_config(&path).unwrap();
+        let err = Config::from_raw(raw).unwrap_err();
+        assert!(err.to_string().contains("day_summary_time"), "{err}");
+    }
+
+    #[test]
     fn full_override_changes_every_field() {
         let (_dir, path) = write_config(
             r#"
@@ -359,6 +402,7 @@ mod tests {
             todo_time = "08:15"
             update_time = "14:45"
             meeting_time = "17:00"
+            day_summary_time = "18:00"
             meeting_reminder_lead_minutes = 10
             ticker_interval_seconds = 120
             run_on_weekends = true
@@ -386,6 +430,10 @@ mod tests {
         assert_eq!(
             config.meeting_time,
             NaiveTime::from_hms_opt(17, 0, 0).unwrap()
+        );
+        assert_eq!(
+            config.day_summary_time,
+            NaiveTime::from_hms_opt(18, 0, 0).unwrap()
         );
         assert_eq!(config.meeting_reminder_lead_minutes, 10);
         assert_eq!(config.todo_followup_delay_minutes, 45);

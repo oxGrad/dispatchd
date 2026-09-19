@@ -398,5 +398,12 @@ src/
                     "Standup: <date>"; gives up (marks sent/advances the
                     cursor, doesn't
                     retry) on a deleted standup thread instead of
-                    retrying every tick
+                    retrying every tick; also posts a day_summary at
+                    day_summary_time (default 17:00) - one markdown table,
+                    the same per-day format /recap renders (recap::recap_range
+                    + recap::format_day_table) for just today, chunked
+                    through status::split_into_messages. Fires on the clock
+                    like every other entry here, not once everyone's
+                    actually submitted - a still-open todo just shows "no
+                    report yet"
 ```

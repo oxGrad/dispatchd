@@ -51,6 +51,13 @@
 # with /team skip-meeting.
 # meeting_reminder_lead_minutes = 5
 
+# Time the full-detail day progress summary is posted into the standup
+# thread - one markdown table (same format as /recap, but just today),
+# every todo and its latest update for the day. Fires on this clock time
+# like every other entry here, regardless of whether everyone has
+# submitted yet.
+# day_summary_time = "17:00"
+
 # How often the background ticker wakes up to check whether any reminder,
 # followup, or thread sync is due, and to post new submissions into the
 # thread. Lower = snappier sync, more Discord API calls.
