@@ -273,10 +273,15 @@ src/
                  per-todo-left-unmatched check) + record_missed (writes
                  one row per member per kind - 'todo'/'update' - they
                  missed entirely for a date, called once daily by the
-                 ticker alongside day_summary) + missed_summary/
-                 format_missed_summary (the aggregated report /missed
-                 renders, MissedSummary { member, missed_todo_days,
-                 missed_update_days })
+                 ticker alongside day_summary) + missed_detail/
+                 format_missed_report (the report /missed renders,
+                 MissedDetail { member, missed_todo_dates,
+                 missed_update_dates } - per-member exact dates, folded
+                 in Rust from rows ordered member/date rather than a SQL
+                 GROUP BY, since the report needs every date, not just a
+                 count; format_missed_report renders that detail first,
+                 then a summary table separately ranked by total missed
+                 days, most first)
   init.rs        `dispatchd init` subcommand
   discord_login.rs `dispatchd discord login` - prompts, validates against
                  Discord (Http::get_current_user), then shells out to
@@ -438,7 +443,11 @@ src/
                     into missed_submissions, feeding /missed
     missed.rs      /missed start:<date> end:<date> - tech-lead-only,
                     reads missed_submissions (the ticker's daily snapshot
-                    above, not a live query) via followups::missed_summary
-                    + format_missed_summary; same date-range handling as
-                    /recap (recap::resolve_range, reused directly)
+                    above, not a live query) via followups::missed_detail
+                    + format_missed_report - per-member dates first, a
+                    ranked summary table after; same date-range handling
+                    as /recap (recap::resolve_range, reused directly) and
+                    the same status::split_into_messages chunking, since
+                    the detail section can outgrow the 2000-char cap on a
+                    long enough range even for a 6-person team
 ```

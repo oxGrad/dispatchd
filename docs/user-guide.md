@@ -251,12 +251,14 @@ to stay under Discord's 2000-character limit per message.
 ## `/missed` - tech lead only
 
 `/missed start:<date> end:<date>` reports who missed a `/todo`, a
-`/progress` update, or both, on each day in the range - a count per
-member, not a day-by-day breakdown. Same date handling as `/recap`. This
-reads from a daily snapshot the bot takes at `day_summary_time` (see "The
-daily ritual" above), not a live query, so a day only shows up here once
-that snapshot has run - don't expect today's row to appear before then.
-Members with a clean record for the whole range aren't listed at all.
+`/progress` update, or both, on each day in the range. The reply is two
+parts: first a section per member listing the exact dates they missed
+each one, then a summary table ranking everyone by total missed days.
+Same date handling as `/recap`. This reads from a daily snapshot the bot
+takes at `day_summary_time` (see "The daily ritual" above), not a live
+query, so a day only shows up here once that snapshot has run - don't
+expect today's entry to appear before then. Members with a clean record
+for the whole range aren't listed at all.
 
 ## View-only access - the `viewer` role
 
