@@ -29,7 +29,9 @@ posts into a "Standup: YYYY-MM-DD" thread in the team's standup channel:
    still-open todo just shows as "no report yet" in the table. Right
    after it, a separate message `@mentions` anyone who submitted neither a
    todo nor a progress update today at all - skipped entirely if nobody
-   qualifies.
+   qualifies. Either way, today's misses (per-member, `/todo` and
+   `/progress` tracked independently) are recorded permanently, so the
+   tech lead can review any date range later with `/missed` (see below).
 
 If you miss a step, dispatchd nags you with an `@mention` in the thread a
 while after each of the two prompts above (default 30 minutes) - once per
@@ -234,6 +236,27 @@ sent so it won't also fire. Running it a second time the same day just
 tells you it's already skipped. Needs today's thread to exist. Same
 `role = "lead"`-only gate as `/team remind` - a `viewer` can't cancel the
 meeting.
+
+## `/recap` - tech lead only
+
+`/recap start:<date> end:<date>` renders one markdown table per day in the
+range, each row a todo (or an "(unplanned)" ad-hoc update) with its latest
+status, progress, and blocker - the same detail `/team report` shows for
+today, but across as many days back as you need. Both dates are optional:
+omitting `end` defaults to today, omitting `start` defaults to 14 days
+before `end`. Days with no activity at all are left out rather than shown
+empty. Long ranges are split across several ephemeral follow-up messages
+to stay under Discord's 2000-character limit per message.
+
+## `/missed` - tech lead only
+
+`/missed start:<date> end:<date>` reports who missed a `/todo`, a
+`/progress` update, or both, on each day in the range - a count per
+member, not a day-by-day breakdown. Same date handling as `/recap`. This
+reads from a daily snapshot the bot takes at `day_summary_time` (see "The
+daily ritual" above), not a live query, so a day only shows up here once
+that snapshot has run - don't expect today's row to appear before then.
+Members with a clean record for the whole range aren't listed at all.
 
 ## View-only access - the `viewer` role
 

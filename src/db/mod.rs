@@ -11,6 +11,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("migrations/0003_thread_sync_cursor.sql")),
         M::up(include_str!("migrations/0004_sow_ref.sql")),
         M::up(include_str!("migrations/0005_members_is_admin.sql")),
+        M::up(include_str!("migrations/0006_missed_submissions.sql")),
     ])
 }
 
@@ -70,6 +71,7 @@ mod tests {
                 "entries",
                 "followups_sent",
                 "members",
+                "missed_submissions",
                 "reminders_sent"
             ]
         );
@@ -126,6 +128,7 @@ mod tests {
                 "entries",
                 "followups_sent",
                 "members",
+                "missed_submissions",
                 "reminders_sent"
             ]
         );

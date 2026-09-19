@@ -57,7 +57,8 @@
 # like every other entry here, regardless of whether everyone has
 # submitted yet. At the same trigger, a separate message @mentions anyone
 # who submitted neither a todo nor a progress update today at all (skipped
-# if that list is empty).
+# if that list is empty), and the day's misses are recorded permanently so
+# the tech lead can review them later with /missed start:<date> end:<date>.
 # day_summary_time = "16:00"
 
 # How often the background ticker wakes up to check whether any reminder,

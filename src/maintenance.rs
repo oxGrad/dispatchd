@@ -8,8 +8,9 @@ const RETENTION_DAYS: u32 = 90;
 /// Prunes `reminders_sent`/`followups_sent` rows older than
 /// `RETENTION_DAYS` and reclaims the freed space with `VACUUM`.
 /// `entries` is never touched - it's the retained history the biweekly
-/// recap depends on. Returns (reminders_sent rows deleted, followups_sent
-/// rows deleted).
+/// recap depends on - and neither is `missed_submissions`, the retained
+/// history `/missed` depends on the same way. Returns (reminders_sent
+/// rows deleted, followups_sent rows deleted).
 pub fn run(conn: &Connection) -> Result<(usize, usize)> {
     let cutoff = format!("-{RETENTION_DAYS} days");
 
@@ -102,5 +103,20 @@ mod tests {
         run(&conn).unwrap();
 
         assert_eq!(count(&conn, "entries"), 1);
+    }
+
+    #[test]
+    fn never_touches_missed_submissions() {
+        let conn = open_test_db();
+        conn.execute(
+            "INSERT INTO missed_submissions (date, discord_user_id, kind) VALUES ('2000-01-01', '1', 'todo')",
+            [],
+        )
+        .unwrap();
+        seed_reminder(&conn, "2000-01-01");
+
+        run(&conn).unwrap();
+
+        assert_eq!(count(&conn, "missed_submissions"), 1);
     }
 }

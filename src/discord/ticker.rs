@@ -72,6 +72,7 @@ async fn tick(
     if is_due(now_time, config.day_summary_time) {
         maybe_fire_day_summary(http, db, &date).await;
         maybe_fire_missing_submissions(http, db, &date).await;
+        maybe_record_missed(db, &date).await;
     }
 
     let todo_followup_trigger =
@@ -337,6 +338,32 @@ async fn maybe_fire_missing_submissions(http: &Arc<Http>, db: &Arc<Mutex<Connect
     maybe_fire_simple_reminder(http, db, date, "day_summary_missing", &message).await;
 }
 
+/// Records `date`'s miss snapshot into `missed_submissions`
+/// (`followups::record_missed`) so `/missed` can report on it later.
+/// Independent of - and gated separately from - the two posts above: a
+/// deleted standup thread (which stops both messages from ever sending)
+/// must never stop this from being recorded, since the record itself
+/// doesn't depend on the thread existing at all.
+async fn maybe_record_missed(db: &Arc<Mutex<Connection>>, date: &str) {
+    match already_sent(db, date, "missed_recorded") {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("failed to check missed_recorded status: {e}");
+            return;
+        }
+    }
+
+    let conn = db.lock().expect("db mutex poisoned");
+    if let Err(e) = followups::record_missed(&conn, date) {
+        eprintln!("failed to record missed submissions for {date}: {e}");
+        return;
+    }
+    if let Err(e) = reminders::mark_sent(&conn, date, "missed_recorded") {
+        eprintln!("failed to mark missed_recorded sent: {e}");
+    }
+}
+
 /// Pure - builds the day progress message chunks (header + the full-detail
 /// day table, chunked for Discord's 2000-char cap) for `date`, given the
 /// already-fetched recap row for that day (`None` when there's no activity
@@ -369,7 +396,7 @@ fn missing_submissions_message(missing: &[String]) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
     Some(format!(
-        "🚫 **No submissions today:** {mentions} - a `/todo` and `/progress` update are required every working day. This has not been submitted, and that's not optional. Submit now."
+        "🚫 **No submissions today:** {mentions} - you have not submitted a `/todo` or `/progress` update. This is required daily. Submit now."
     ))
 }
 
@@ -768,7 +795,7 @@ mod tests {
         assert_eq!(
             missing_submissions_message(&missing),
             Some(
-                "🚫 **No submissions today:** <@111> <@222> - a `/todo` and `/progress` update are required every working day. This has not been submitted, and that's not optional. Submit now."
+                "🚫 **No submissions today:** <@111> <@222> - you have not submitted a `/todo` or `/progress` update. This is required daily. Submit now."
                     .to_string()
             )
         );

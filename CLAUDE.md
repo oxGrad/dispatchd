@@ -221,7 +221,8 @@ src/
                  default 7, 0 disables) - how far back /progress add +
                  /team look for unfinished todos
   db/            SQLite connection + embedded migrations (0005 adds
-                 members.is_admin)
+                 members.is_admin, 0006 adds missed_submissions - never
+                 pruned by maintenance.rs, same as entries)
   entries.rs     todo/update row DB logic, incl. entries.sow_ref - a
                  purely informational, unvalidated cross-reference into
                  an external scope-of-work doc (e.g. "M1D2"), todo-only.
@@ -266,7 +267,16 @@ src/
   followups.rs   followups_sent DB logic (missing-todo/update nags), plus
                  members_with_no_activity - no todo AND no update at all
                  today, feeding the ticker's day_summary_missing message
-                 rather than the per-kind todo/update follow-ups above
+                 rather than the per-kind todo/update follow-ups above.
+                 Also missed_submissions logic: members_missing_any_update
+                 (whole-day miss, unlike members_missing_update's
+                 per-todo-left-unmatched check) + record_missed (writes
+                 one row per member per kind - 'todo'/'update' - they
+                 missed entirely for a date, called once daily by the
+                 ticker alongside day_summary) + missed_summary/
+                 format_missed_summary (the aggregated report /missed
+                 renders, MissedSummary { member, missed_todo_days,
+                 missed_update_days })
   init.rs        `dispatchd init` subcommand
   discord_login.rs `dispatchd discord login` - prompts, validates against
                  Discord (Http::get_current_user), then shells out to
@@ -417,5 +427,18 @@ src/
                     update against an existing todo like the followups
                     below - and is skipped entirely (not just left silent,
                     ticker.rs's missing_submissions_message returns None)
-                    when nobody qualifies
+                    when nobody qualifies; deliberately blunt wording
+                    ("you have not submitted ... This is required daily")
+                    since it's the ritual's compliance nag, not a
+                    heads-up. Also at day_summary_time, independently of
+                    both posts above (its own reminders_sent kind,
+                    missed_recorded, and no dependency on the standup
+                    thread existing at all): maybe_record_missed calls
+                    followups::record_missed to persist the day's misses
+                    into missed_submissions, feeding /missed
+    missed.rs      /missed start:<date> end:<date> - tech-lead-only,
+                    reads missed_submissions (the ticker's daily snapshot
+                    above, not a live query) via followups::missed_summary
+                    + format_missed_summary; same date-range handling as
+                    /recap (recap::resolve_range, reused directly)
 ```
