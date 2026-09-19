@@ -71,6 +71,7 @@ async fn tick(
     }
     if is_due(now_time, config.day_summary_time) {
         maybe_fire_day_summary(http, db, &date).await;
+        maybe_fire_missing_submissions(http, db, &date).await;
     }
 
     let todo_followup_trigger =
@@ -300,6 +301,42 @@ async fn maybe_fire_day_summary(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, d
     }
 }
 
+/// Posts a separate "no submissions today" message - @mentions every
+/// member with neither a todo nor a progress update for `date` at all
+/// (`followups::members_with_no_activity`). Same trigger as
+/// `maybe_fire_day_summary` (fires at `day_summary_time`) but its own
+/// message and its own `reminders_sent` marker, so a failure in one never
+/// blocks the other. Silently skipped (but still tracked, so it isn't
+/// re-checked every tick) when nobody qualifies.
+async fn maybe_fire_missing_submissions(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, date: &str) {
+    match already_sent(db, date, "day_summary_missing") {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("failed to check day_summary_missing status: {e}");
+            return;
+        }
+    }
+
+    let missing = {
+        let conn = db.lock().expect("db mutex poisoned");
+        followups::members_with_no_activity(&conn, date)
+    };
+    let missing = match missing {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("failed to list members with no activity for {date}: {e}");
+            return;
+        }
+    };
+
+    let Some(message) = missing_submissions_message(&missing) else {
+        return;
+    };
+
+    maybe_fire_simple_reminder(http, db, date, "day_summary_missing", &message).await;
+}
+
 /// Pure - builds the day progress message chunks (header + the full-detail
 /// day table, chunked for Discord's 2000-char cap) for `date`, given the
 /// already-fetched recap row for that day (`None` when there's no activity
@@ -313,6 +350,25 @@ fn day_summary_chunks(date: &str, day: Option<&recap::DayRecap>) -> Vec<String> 
     };
     let full = format!("📊 **Day progress**\n\n{table}");
     status::split_into_messages(&full, 1900)
+}
+
+/// Pure - builds the "no submissions today" message @mentioning every
+/// member in `missing` (submitted neither a todo nor a progress update
+/// today at all - see `followups::members_with_no_activity`). `None` when
+/// `missing` is empty, so the caller posts nothing rather than an empty
+/// callout.
+fn missing_submissions_message(missing: &[String]) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    let mentions = missing
+        .iter()
+        .map(|id| format!("<@{id}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!(
+        "🚫 **No submissions today:** {mentions} - nothing under `/todo` or `/progress` for you yet."
+    ))
 }
 
 async fn maybe_fire_simple_reminder(
@@ -697,6 +753,23 @@ mod tests {
         );
         assert!(chunks[0].contains("Alice"));
         assert!(chunks[0].contains("Ship it"));
+    }
+
+    #[test]
+    fn missing_submissions_message_is_none_when_nobody_is_missing() {
+        assert_eq!(missing_submissions_message(&[]), None);
+    }
+
+    #[test]
+    fn missing_submissions_message_mentions_every_missing_member() {
+        let missing = vec!["111".to_string(), "222".to_string()];
+        assert_eq!(
+            missing_submissions_message(&missing),
+            Some(
+                "🚫 **No submissions today:** <@111> <@222> - nothing under `/todo` or `/progress` for you yet."
+                    .to_string()
+            )
+        );
     }
 
     fn sync_entry(

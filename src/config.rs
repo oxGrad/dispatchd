@@ -18,7 +18,7 @@ const DEFAULT_THREAD_CREATION_TIME: &str = "07:00";
 const DEFAULT_TODO_TIME: &str = "09:00";
 const DEFAULT_UPDATE_TIME: &str = "15:00";
 const DEFAULT_MEETING_TIME: &str = "16:00";
-const DEFAULT_DAY_SUMMARY_TIME: &str = "17:00";
+const DEFAULT_DAY_SUMMARY_TIME: &str = "16:00";
 const DEFAULT_MEETING_REMINDER_LEAD_MINUTES: u32 = 5;
 const DEFAULT_TODO_FOLLOWUP_DELAY_MINUTES: u32 = 30;
 const DEFAULT_UPDATE_FOLLOWUP_DELAY_MINUTES: u32 = 30;
@@ -361,10 +361,10 @@ mod tests {
     }
 
     #[test]
-    fn day_summary_time_defaults_to_5pm_and_is_overridable_independently() {
+    fn day_summary_time_defaults_to_4pm_and_is_overridable_independently() {
         assert_eq!(
             Config::default().day_summary_time,
-            NaiveTime::from_hms_opt(17, 0, 0).unwrap()
+            NaiveTime::from_hms_opt(16, 0, 0).unwrap()
         );
 
         let (_dir, path) = write_config("[schedule]\nday_summary_time = \"18:30\"\n");

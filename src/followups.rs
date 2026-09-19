@@ -61,6 +61,26 @@ pub fn members_missing_update(conn: &Connection, date: &str) -> Result<Vec<Strin
     Ok(ids)
 }
 
+/// Members with no `entries` row of any type (`todo` or `update`) for
+/// `date` at all - i.e. submitted nothing whatsoever today. Distinct from
+/// `members_missing_todo`/`members_missing_update` above, which each
+/// track one submission kind independently; this is the "no activity at
+/// all" set the day summary's missing-submissions message nags. Excludes
+/// role `viewer`, same as `members_missing_todo`.
+pub fn members_with_no_activity(conn: &Connection, date: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT discord_user_id FROM members
+         WHERE role != 'viewer'
+           AND discord_user_id NOT IN (
+             SELECT discord_user_id FROM entries WHERE date = ?1
+         )",
+    )?;
+    let ids = stmt
+        .query_map(params![date], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +161,39 @@ mod tests {
 
         let missing = members_missing_update(&conn, DATE).unwrap();
         assert_eq!(missing, vec!["2".to_string()]);
+    }
+
+    #[test]
+    fn members_with_no_activity_excludes_anyone_with_a_todo_or_an_update() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice"); // todo only
+        seed_member(&conn, "2", "Budi"); // ad-hoc update only, no todo
+        seed_member(&conn, "3", "Citra"); // nothing at all
+
+        entries::insert_todo(&conn, "1", DATE, "a", None, None).unwrap();
+        entries::insert_update(&conn, "2", DATE, "hotfix", None, "done", "shipped", None).unwrap();
+
+        let missing = members_with_no_activity(&conn, DATE).unwrap();
+        assert_eq!(missing, vec!["3".to_string()]);
+    }
+
+    #[test]
+    fn members_with_no_activity_excludes_viewers() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice");
+        seed_viewer(&conn, "2", "Watcher");
+
+        let missing = members_with_no_activity(&conn, DATE).unwrap();
+        assert_eq!(missing, vec!["1".to_string()]);
+    }
+
+    #[test]
+    fn members_with_no_activity_is_empty_when_everyone_submitted_something() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice");
+        entries::insert_todo(&conn, "1", DATE, "a", None, None).unwrap();
+
+        let missing = members_with_no_activity(&conn, DATE).unwrap();
+        assert!(missing.is_empty());
     }
 }

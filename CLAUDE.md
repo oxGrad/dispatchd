@@ -263,7 +263,10 @@ src/
                  scoped to today's todo ids so a carry-over update
                  doesn't inflate it
   reminders.rs   reminders_sent/daily_threads DB logic (the ticker's state)
-  followups.rs   followups_sent DB logic (missing-todo/update nags)
+  followups.rs   followups_sent DB logic (missing-todo/update nags), plus
+                 members_with_no_activity - no todo AND no update at all
+                 today, feeding the ticker's day_summary_missing message
+                 rather than the per-kind todo/update follow-ups above
   init.rs        `dispatchd init` subcommand
   discord_login.rs `dispatchd discord login` - prompts, validates against
                  Discord (Http::get_current_user), then shells out to
@@ -399,11 +402,20 @@ src/
                     cursor, doesn't
                     retry) on a deleted standup thread instead of
                     retrying every tick; also posts a day_summary at
-                    day_summary_time (default 17:00) - one markdown table,
-                    the same per-day format /recap renders (recap::recap_range
+                    day_summary_time (default 16:00, the same moment
+                    meeting_time defaults to) - one markdown table, the
+                    same per-day format /recap renders (recap::recap_range
                     + recap::format_day_table) for just today, chunked
                     through status::split_into_messages. Fires on the clock
                     like every other entry here, not once everyone's
                     actually submitted - a still-open todo just shows "no
-                    report yet"
+                    report yet". Right after it, a separate
+                    day_summary_missing message (own reminders_sent kind,
+                    so one failing never blocks the other) @-mentions every
+                    member from followups::members_with_no_activity - no
+                    todo AND no update at all today, not just a missing
+                    update against an existing todo like the followups
+                    below - and is skipped entirely (not just left silent,
+                    ticker.rs's missing_submissions_message returns None)
+                    when nobody qualifies
 ```

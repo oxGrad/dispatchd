@@ -55,8 +55,10 @@
 # thread - one markdown table (same format as /recap, but just today),
 # every todo and its latest update for the day. Fires on this clock time
 # like every other entry here, regardless of whether everyone has
-# submitted yet.
-# day_summary_time = "17:00"
+# submitted yet. At the same trigger, a separate message @mentions anyone
+# who submitted neither a todo nor a progress update today at all (skipped
+# if that list is empty).
+# day_summary_time = "16:00"
 
 # How often the background ticker wakes up to check whether any reminder,
 # followup, or thread sync is due, and to post new submissions into the
