@@ -354,7 +354,9 @@ fn day_summary_chunks(date: &str, day: Option<&recap::DayRecap>) -> Vec<String> 
 
 /// Pure - builds the "no submissions today" message @mentioning every
 /// member in `missing` (submitted neither a todo nor a progress update
-/// today at all - see `followups::members_with_no_activity`). `None` when
+/// today at all - see `followups::members_with_no_activity`). Deliberately
+/// firmer than the other reminders in this file - this is the daily
+/// ritual's actual compliance nag, not a friendly heads-up. `None` when
 /// `missing` is empty, so the caller posts nothing rather than an empty
 /// callout.
 fn missing_submissions_message(missing: &[String]) -> Option<String> {
@@ -367,7 +369,7 @@ fn missing_submissions_message(missing: &[String]) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
     Some(format!(
-        "🚫 **No submissions today:** {mentions} - please submit a `/todo` or post a `/progress` update when you can."
+        "🚫 **No submissions today:** {mentions} - a `/todo` and `/progress` update are required every working day. This has not been submitted, and that's not optional. Submit now."
     ))
 }
 
@@ -766,7 +768,7 @@ mod tests {
         assert_eq!(
             missing_submissions_message(&missing),
             Some(
-                "🚫 **No submissions today:** <@111> <@222> - please submit a `/todo` or post a `/progress` update when you can."
+                "🚫 **No submissions today:** <@111> <@222> - a `/todo` and `/progress` update are required every working day. This has not been submitted, and that's not optional. Submit now."
                     .to_string()
             )
         );
