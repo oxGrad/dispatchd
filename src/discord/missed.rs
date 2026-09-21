@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 use chrono_tz::Tz;
 use rusqlite::Connection;
 use serenity::all::{
-    CommandInteraction, CommandOptionType, Context as SerenityContext, CreateCommand,
-    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CommandInteraction, CommandOptionType, Context as SerenityContext, CreateAttachment,
+    CreateCommand, CreateCommandOption, CreateInteractionResponse,
     CreateInteractionResponseMessage, Permissions,
 };
 
-use crate::{entries, followups, members, recap, status};
+use crate::{entries, followups, members, recap};
 
 use super::get_option_string;
 
@@ -39,11 +39,11 @@ pub fn command() -> CreateCommand {
 /// `/missed` reads `missed_submissions`, the ticker's once-a-day snapshot
 /// (`followups::record_missed`, taken at `day_summary_time`) - not a live
 /// query - so today's row only shows up once that snapshot has actually
-/// run. Same date-range handling as `/recap` (`recap::resolve_range`).
-/// The reply is per-member detail (exactly which dates each missed) then
-/// a ranked summary table (`followups::format_missed_report`); a long
-/// enough range or a habitually-missing team can exceed Discord's
-/// 2000-char cap, so this chunks the same way `/recap` does.
+/// run. Same date-range handling as `/recap` (`recap::resolve_range`). The
+/// reply is a short header plus, when there's anything to show, the full
+/// report - per-member detail then a ranked summary table
+/// (`followups::format_missed_report_file`) - as a `.md` file attachment
+/// rather than chunked messages, same as `/recap`.
 pub async fn handle(
     ctx: &SerenityContext,
     command: &CommandInteraction,
@@ -62,11 +62,7 @@ pub async fn handle(
             Ok(true) => match recap::resolve_range(start.as_deref(), end.as_deref(), &today) {
                 Err(msg) => Err(msg),
                 Ok((start, end)) => match followups::missed_detail(&conn, &start, &end) {
-                    Ok(details) => {
-                        let full = followups::format_missed_report(&details, &start, &end);
-                        // 1900, not Discord's 2000 cap: same headroom as /recap.
-                        Ok(status::split_into_messages(&full, 1900))
-                    }
+                    Ok(details) => Ok((start, end, details)),
                     Err(e) => {
                         eprintln!("failed to build /missed: {e}");
                         Err("⚠️ Something went wrong building the report.".to_string())
@@ -80,36 +76,32 @@ pub async fn handle(
         }
     };
 
-    let mut chunks = match body {
-        Ok(chunks) => chunks.into_iter(),
-        Err(message) => vec![message].into_iter(),
+    let (content, file) = match body {
+        Ok((start, end, details)) => {
+            match followups::format_missed_report_file(&details, &start, &end) {
+                Some(file) => (
+                    format!("📉 **Missed submissions ({start} to {end})** - see attached."),
+                    Some((file, format!("missed-{start}_{end}.md"))),
+                ),
+                None => (
+                    format!("✅ No missed submissions between {start} and {end}."),
+                    None,
+                ),
+            }
+        }
+        Err(message) => (message, None),
     };
-    let first = chunks
-        .next()
-        .unwrap_or_else(|| "No missed submissions.".to_string());
 
-    let reply = CreateInteractionResponseMessage::new()
-        .content(first)
+    let mut reply = CreateInteractionResponseMessage::new()
+        .content(content)
         .ephemeral(true);
+    if let Some((file, filename)) = file {
+        reply = reply.add_file(CreateAttachment::bytes(file.into_bytes(), filename));
+    }
     if let Err(e) = command
         .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
         .await
     {
         eprintln!("failed to respond to /missed: {e}");
-        return;
-    }
-
-    for chunk in chunks {
-        if let Err(e) = command
-            .create_followup(
-                &ctx.http,
-                CreateInteractionResponseFollowup::new()
-                    .content(chunk)
-                    .ephemeral(true),
-            )
-            .await
-        {
-            eprintln!("failed to send /missed follow-up: {e}");
-        }
     }
 }

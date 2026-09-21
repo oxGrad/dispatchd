@@ -188,34 +188,58 @@ fn sanitize_cell(s: &str) -> String {
     s.replace('\n', " ").replace('|', "/")
 }
 
-/// Renders one day's table in Discord markdown, no trailing newline -
-/// callers join day blocks with "\n\n" and can feed the joined string
-/// straight into `status::split_into_messages` for Discord's 2000-char cap.
-pub fn format_day_table(day: &DayRecap) -> String {
-    let mut out = format!(
-        "**{}**\n| Member | Task | Status | Progress | Blocker |\n|---|---|---|---|---|",
-        day.date
-    );
-    for row in &day.rows {
-        let (glyph, label) = match &row.status {
-            Some(status) => crate::status::status_glyph_label(status),
-            None => ("❌", "no report yet".to_string()),
-        };
-        out.push_str(&format!(
-            "\n| {} | {} | {glyph} {label} | {} | {} |",
-            sanitize_cell(&row.member),
-            sanitize_cell(&row.task),
-            row.progress
-                .as_deref()
-                .map(sanitize_cell)
-                .unwrap_or_else(|| "—".to_string()),
-            row.blocker
-                .as_deref()
-                .map(sanitize_cell)
-                .unwrap_or_else(|| "—".to_string()),
-        ));
+/// Renders one day's table as a column-aligned GFM table
+/// (`status::render_aligned_table`), meant for a `.md` file attachment
+/// rather than squeezed into Discord's 2000-char message cap - alignment
+/// only reads right in a fixed-width viewer (a raw/opened .md file), not
+/// chat text.
+pub fn format_day_table_file(day: &DayRecap) -> String {
+    let headers = ["Member", "Task", "Status", "Progress", "Blocker"];
+    let rows: Vec<Vec<String>> = day
+        .rows
+        .iter()
+        .map(|row| {
+            let (glyph, label) = match &row.status {
+                Some(status) => crate::status::status_glyph_label(status),
+                None => ("❌", "no report yet".to_string()),
+            };
+            vec![
+                sanitize_cell(&row.member),
+                sanitize_cell(&row.task),
+                format!("{glyph} {label}"),
+                row.progress
+                    .as_deref()
+                    .map(sanitize_cell)
+                    .unwrap_or_else(|| "—".to_string()),
+                row.blocker
+                    .as_deref()
+                    .map(sanitize_cell)
+                    .unwrap_or_else(|| "—".to_string()),
+            ]
+        })
+        .collect();
+
+    format!(
+        "# {}\n\n{}",
+        day.date,
+        crate::status::render_aligned_table(&headers, &rows)
+    )
+}
+
+/// Renders the full `/recap` report as `.md` file content: one
+/// column-aligned day table (`format_day_table_file`) per day in `days`,
+/// separated by a blank line - or `None` when `days` is empty, so the
+/// caller can show a plain "no activity" message instead of an empty file.
+pub fn format_recap_file(days: &[DayRecap]) -> Option<String> {
+    if days.is_empty() {
+        return None;
     }
-    out
+    Some(
+        days.iter()
+            .map(format_day_table_file)
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
 }
 
 #[cfg(test)]
@@ -492,10 +516,10 @@ mod tests {
         assert_eq!(dates, vec!["2026-09-01", "2026-09-03"]);
     }
 
-    // --- format_day_table ---
+    // --- format_day_table_file ---
 
     #[test]
-    fn format_day_table_renders_header_and_rows() {
+    fn format_day_table_file_pads_every_column_to_the_same_width() {
         let day = DayRecap {
             date: "2026-09-01".to_string(),
             rows: vec![
@@ -516,18 +540,28 @@ mod tests {
             ],
         };
 
-        assert_eq!(
-            format_day_table(&day),
-            "**2026-09-01**\n\
-             | Member | Task | Status | Progress | Blocker |\n\
-             |---|---|---|---|---|\n\
-             | Alice | Refactor auth | ⛔ blocked | stuck on the parser | needs review |\n\
-             | Budi | Design audit | ❌ no report yet | — | — |"
-        );
+        let out = format_day_table_file(&day);
+        let lines: Vec<&str> = out.lines().collect();
+        // "# <date>", blank, header, separator, 2 rows.
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[0], "# 2026-09-01");
+        assert_eq!(lines[1], "");
+        // Every table row (header, separator, and data) must line up
+        // char-for-char - that's the whole point of a file attachment
+        // over squeezing this into a chat message.
+        let table_lines = &lines[2..];
+        let width = table_lines[0].chars().count();
+        for line in table_lines {
+            assert_eq!(line.chars().count(), width, "misaligned line: {line:?}");
+        }
+        assert!(table_lines[0].contains("Member") && table_lines[0].contains("Blocker"));
+        assert!(table_lines[1].starts_with("|-"));
+        assert!(table_lines[2].contains("Alice") && table_lines[2].contains("⛔ blocked"));
+        assert!(table_lines[3].contains("Budi") && table_lines[3].contains("❌ no report yet"));
     }
 
     #[test]
-    fn format_day_table_sanitizes_pipes_and_newlines_in_cell_text() {
+    fn format_day_table_file_sanitizes_pipes_and_newlines_in_cell_text() {
         let day = DayRecap {
             date: "2026-09-01".to_string(),
             rows: vec![RecapRow {
@@ -539,9 +573,50 @@ mod tests {
             }],
         };
 
-        let out = format_day_table(&day);
+        let out = format_day_table_file(&day);
         assert!(out.contains("A / B"));
         assert!(out.contains("line one line two"));
-        assert_eq!(out.lines().count(), 4);
+        assert_eq!(out.lines().count(), 5);
+    }
+
+    #[test]
+    fn format_recap_file_is_none_for_an_empty_range() {
+        assert_eq!(format_recap_file(&[]), None);
+    }
+
+    #[test]
+    fn format_recap_file_joins_one_table_per_day() {
+        let days = vec![
+            DayRecap {
+                date: "2026-09-01".to_string(),
+                rows: vec![RecapRow {
+                    member: "Alice".to_string(),
+                    task: "Ship it".to_string(),
+                    status: Some("done".to_string()),
+                    progress: Some("shipped".to_string()),
+                    blocker: None,
+                }],
+            },
+            DayRecap {
+                date: "2026-09-02".to_string(),
+                rows: vec![RecapRow {
+                    member: "Budi".to_string(),
+                    task: "Design audit".to_string(),
+                    status: None,
+                    progress: None,
+                    blocker: None,
+                }],
+            },
+        ];
+
+        let out = format_recap_file(&days).unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "{}\n\n{}",
+                format_day_table_file(&days[0]),
+                format_day_table_file(&days[1])
+            )
+        );
     }
 }

@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 use chrono_tz::Tz;
 use rusqlite::Connection;
 use serenity::all::{
-    CommandInteraction, CommandOptionType, Context as SerenityContext, CreateCommand,
-    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CommandInteraction, CommandOptionType, Context as SerenityContext, CreateAttachment,
+    CreateCommand, CreateCommandOption, CreateInteractionResponse,
     CreateInteractionResponseMessage, Permissions,
 };
 
-use crate::{entries, members, recap, status};
+use crate::{entries, members, recap};
 
 use super::get_option_string;
 
@@ -52,20 +52,7 @@ pub async fn handle(
             Ok(true) => match recap::resolve_range(start.as_deref(), end.as_deref(), &today) {
                 Err(msg) => Err(msg),
                 Ok((start, end)) => match recap::recap_range(&conn, &start, &end) {
-                    Ok(days) if days.is_empty() => {
-                        Err(format!("No activity between {start} and {end}."))
-                    }
-                    Ok(days) => {
-                        let full = days
-                            .iter()
-                            .map(recap::format_day_table)
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        // 1900, not Discord's 2000 cap: headroom in case a non-BMP
-                        // emoji in user text counts as 2 against the limit (same
-                        // margin as /team report).
-                        Ok(status::split_into_messages(&full, 1900))
-                    }
+                    Ok(days) => Ok((start, end, days)),
                     Err(e) => {
                         eprintln!("failed to build /recap: {e}");
                         Err("⚠️ Something went wrong building the recap.".to_string())
@@ -79,34 +66,29 @@ pub async fn handle(
         }
     };
 
-    let mut chunks = match body {
-        Ok(chunks) => chunks.into_iter(),
-        Err(message) => vec![message].into_iter(),
+    // A file, not chunked messages: an attachment isn't bound by Discord's
+    // 2000-char cap, and lets the table's columns actually line up.
+    let (content, file) = match body {
+        Ok((start, end, days)) => match recap::format_recap_file(&days) {
+            Some(file) => (
+                format!("📅 **Recap ({start} to {end})** - see attached."),
+                Some((file, format!("recap-{start}_{end}.md"))),
+            ),
+            None => (format!("No activity between {start} and {end}."), None),
+        },
+        Err(message) => (message, None),
     };
-    let first = chunks.next().unwrap_or_else(|| "No activity.".to_string());
 
-    let reply = CreateInteractionResponseMessage::new()
-        .content(first)
+    let mut reply = CreateInteractionResponseMessage::new()
+        .content(content)
         .ephemeral(true);
+    if let Some((file, filename)) = file {
+        reply = reply.add_file(CreateAttachment::bytes(file.into_bytes(), filename));
+    }
     if let Err(e) = command
         .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
         .await
     {
         eprintln!("failed to respond to /recap: {e}");
-        return;
-    }
-
-    for chunk in chunks {
-        if let Err(e) = command
-            .create_followup(
-                &ctx.http,
-                CreateInteractionResponseFollowup::new()
-                    .content(chunk)
-                    .ephemeral(true),
-            )
-            .await
-        {
-            eprintln!("failed to send /recap follow-up: {e}");
-        }
     }
 }

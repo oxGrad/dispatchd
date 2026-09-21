@@ -376,6 +376,48 @@ pub fn split_into_messages(full: &str, limit: usize) -> Vec<String> {
     out
 }
 
+/// Renders a GFM table with every column padded to its widest cell
+/// (header included) - meant for a `.md` file attachment, where the
+/// alignment can actually be seen, unlike a chat message which just shows
+/// the raw pipe characters. Shared by every table-shaped report
+/// (`recap::format_day_table_file`, `followups::format_missed_report_file`)
+/// so the padding logic lives in one place. Callers are responsible for
+/// sanitizing cell text (no pipes or newlines) - this only pads and joins.
+pub fn render_aligned_table(headers: &[&str], rows: &[Vec<String>]) -> String {
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
+    for row in rows {
+        for (w, cell) in widths.iter_mut().zip(row) {
+            *w = (*w).max(cell.chars().count());
+        }
+    }
+
+    let line = |cells: &[String]| -> String {
+        let padded: Vec<String> = cells
+            .iter()
+            .zip(&widths)
+            .map(|(c, w)| format!("{c:<width$}", width = w))
+            .collect();
+        format!("| {} |", padded.join(" | "))
+    };
+
+    let header_cells: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
+    let mut out = line(&header_cells);
+    out.push('\n');
+    out.push_str(&format!(
+        "|{}|",
+        widths
+            .iter()
+            .map(|w| "-".repeat(w + 2))
+            .collect::<Vec<_>>()
+            .join("|")
+    ));
+    for row in rows {
+        out.push('\n');
+        out.push_str(&line(row));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -905,6 +947,31 @@ mod tests {
     #[test]
     fn split_into_messages_empty_input_is_empty() {
         assert_eq!(split_into_messages("", 2000), Vec::<String>::new());
+    }
+
+    #[test]
+    fn render_aligned_table_pads_every_line_to_the_same_width() {
+        let headers = ["Member", "Missed /todo", "Missed /progress"];
+        let rows = vec![
+            vec!["Alice".to_string(), "3".to_string(), "1".to_string()],
+            vec!["Bo".to_string(), "0".to_string(), "12".to_string()],
+        ];
+        let out = render_aligned_table(&headers, &rows);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4);
+        let width = lines[0].chars().count();
+        for line in &lines {
+            assert_eq!(line.chars().count(), width, "misaligned line: {line:?}");
+        }
+        assert!(lines[1].starts_with("|-"));
+        assert!(lines[2].contains("Alice"));
+        assert!(lines[3].contains("Bo"));
+    }
+
+    #[test]
+    fn render_aligned_table_with_no_rows_is_just_header_and_separator() {
+        let out = render_aligned_table(&["A", "B"], &[]);
+        assert_eq!(out, "| A | B |\n|---|---|");
     }
 
     #[test]

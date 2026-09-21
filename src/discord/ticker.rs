@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use chrono::{Datelike, NaiveTime, Weekday};
 use rusqlite::Connection;
-use serenity::all::{ChannelId, ChannelType, CreateMessage, CreateThread, Http};
+use serenity::all::{ChannelId, ChannelType, CreateAttachment, CreateMessage, CreateThread, Http};
 
 use crate::config::Config;
-use crate::{entries, followups, members, recap, reminders, status};
+use crate::{entries, followups, members, recap, reminders};
 
 /// Pure time comparison - testable without a live clock or Discord types.
 fn is_due(now: NaiveTime, trigger: NaiveTime) -> bool {
@@ -219,12 +219,15 @@ async fn maybe_fire_meeting_reminder(
     maybe_fire_simple_reminder(http, db, date, "meeting_reminder", &message).await;
 }
 
-/// Posts the full-detail day progress table into today's standup thread -
-/// the same per-day table `/recap` renders (one row per todo, plus any
-/// ad-hoc updates), for just today. Fires on the clock at
+/// Posts the full-detail day progress table into today's standup thread as
+/// a column-aligned `.md` file attachment - the same per-day table
+/// `/recap` renders (one row per todo, plus any ad-hoc updates), for just
+/// today. A file sidesteps Discord's 2000-char message cap (and lets the
+/// columns actually line up, which chat text can't) rather than chunking
+/// the table across several messages. Fires on the clock at
 /// `config.day_summary_time` like every other entry in `tick()`, not on
 /// whether everyone has actually submitted yet - a still-open todo just
-/// shows up as "no report yet" (see `recap::format_day_table`).
+/// shows up as "no report yet" (see `recap::format_day_table_file`).
 async fn maybe_fire_day_summary(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, date: &str) {
     match already_sent(db, date, "day_summary") {
         Ok(true) => return,
@@ -267,38 +270,36 @@ async fn maybe_fire_day_summary(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, d
             return;
         }
     };
-    let chunks = day_summary_chunks(date, day.as_ref());
-
-    // Same at-most-once stance as the other automated posts below: only
-    // mark `day_summary` sent once every chunk has actually gone out (or
-    // the thread turns out to be gone), so a mid-send failure retries the
-    // whole summary next tick rather than silently posting a partial one.
-    let mut posted_ok = true;
-    for chunk in chunks {
-        match channel_id
-            .send_message(http, CreateMessage::new().content(chunk))
-            .await
-        {
-            Ok(_) => {}
-            Err(e) if super::is_unknown_channel_error(&e) => {
-                eprintln!(
-                    "standup thread for {date} no longer exists (deleted?) - giving up on day_summary for today: {e}"
-                );
-                break;
-            }
-            Err(e) => {
-                eprintln!("failed to post day_summary chunk for {date}: {e}");
-                posted_ok = false;
-                break;
-            }
-        }
+    let (content, file) = day_summary_content(date, day.as_ref());
+    let mut msg = CreateMessage::new().content(content);
+    if let Some(table) = file {
+        msg = msg.add_file(CreateAttachment::bytes(
+            table.into_bytes(),
+            format!("day-summary-{date}.md"),
+        ));
     }
 
-    if posted_ok {
-        let conn = db.lock().expect("db mutex poisoned");
-        if let Err(e) = reminders::mark_sent(&conn, date, "day_summary") {
-            eprintln!("failed to mark day_summary sent: {e}");
+    if let Err(e) = channel_id.send_message(http, msg).await {
+        if super::is_unknown_channel_error(&e) {
+            // The thread was deleted - marking sent anyway stops this from
+            // retrying (and failing identically) every tick for the rest
+            // of the day.
+            eprintln!(
+                "standup thread for {date} no longer exists (deleted?) - giving up on day_summary for today: {e}"
+            );
+            let conn = db.lock().expect("db mutex poisoned");
+            if let Err(e) = reminders::mark_sent(&conn, date, "day_summary") {
+                eprintln!("failed to mark day_summary sent: {e}");
+            }
+        } else {
+            eprintln!("failed to post day_summary for {date}: {e}");
         }
+        return;
+    }
+
+    let conn = db.lock().expect("db mutex poisoned");
+    if let Err(e) = reminders::mark_sent(&conn, date, "day_summary") {
+        eprintln!("failed to mark day_summary sent: {e}");
     }
 }
 
@@ -364,19 +365,24 @@ async fn maybe_record_missed(db: &Arc<Mutex<Connection>>, date: &str) {
     }
 }
 
-/// Pure - builds the day progress message chunks (header + the full-detail
-/// day table, chunked for Discord's 2000-char cap) for `date`, given the
-/// already-fetched recap row for that day (`None` when there's no activity
-/// yet). Split out from `maybe_fire_day_summary` so the formatting is
-/// unit-testable without a live Discord connection - same split as
-/// `format_sync_message` above.
-fn day_summary_chunks(date: &str, day: Option<&recap::DayRecap>) -> Vec<String> {
-    let table = match day {
-        Some(day) => recap::format_day_table(day),
-        None => format!("**{date}**\nNo activity today."),
-    };
-    let full = format!("📊 **Day progress**\n\n{table}");
-    status::split_into_messages(&full, 1900)
+/// Pure - builds the day-summary message content and, when there's any
+/// activity to show, the column-aligned `.md` file content for `date`
+/// (`recap::format_day_table_file`), given the already-fetched recap row
+/// for that day (`None` when there's no activity yet - no file needed, the
+/// message says so directly). Split out from `maybe_fire_day_summary` so
+/// the formatting is unit-testable without a live Discord connection - same
+/// split as `format_sync_message` above.
+fn day_summary_content(date: &str, day: Option<&recap::DayRecap>) -> (String, Option<String>) {
+    match day {
+        Some(day) => (
+            format!("📊 **Day progress — {date}**"),
+            Some(recap::format_day_table_file(day)),
+        ),
+        None => (
+            format!("📊 **Day progress — {date}**\nNo activity today."),
+            None,
+        ),
+    }
 }
 
 /// Pure - builds the "no submissions today" message @mentioning every
@@ -754,16 +760,17 @@ mod tests {
     }
 
     #[test]
-    fn day_summary_chunks_reports_no_activity_when_theres_nothing_yet() {
-        let chunks = day_summary_chunks("2026-09-19", None);
+    fn day_summary_content_reports_no_activity_and_no_file_when_theres_nothing_yet() {
+        let (content, file) = day_summary_content("2026-09-19", None);
         assert_eq!(
-            chunks,
-            vec!["📊 **Day progress**\n\n**2026-09-19**\nNo activity today.".to_string()]
+            content,
+            "📊 **Day progress — 2026-09-19**\nNo activity today."
         );
+        assert_eq!(file, None);
     }
 
     #[test]
-    fn day_summary_chunks_renders_the_full_day_table() {
+    fn day_summary_content_attaches_the_aligned_day_table_when_theres_activity() {
         let day = recap::DayRecap {
             date: "2026-09-19".to_string(),
             rows: vec![recap::RecapRow {
@@ -774,14 +781,12 @@ mod tests {
                 blocker: None,
             }],
         };
-        let chunks = day_summary_chunks("2026-09-19", Some(&day));
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(
-            chunks[0],
-            format!("📊 **Day progress**\n\n{}", recap::format_day_table(&day))
-        );
-        assert!(chunks[0].contains("Alice"));
-        assert!(chunks[0].contains("Ship it"));
+        let (content, file) = day_summary_content("2026-09-19", Some(&day));
+        assert_eq!(content, "📊 **Day progress — 2026-09-19**");
+        let file = file.expect("activity today should attach a file");
+        assert_eq!(file, recap::format_day_table_file(&day));
+        assert!(file.contains("Alice"));
+        assert!(file.contains("Ship it"));
     }
 
     #[test]

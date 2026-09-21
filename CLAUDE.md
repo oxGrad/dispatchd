@@ -261,7 +261,12 @@ src/
                  tag list appended to their line; also team_report /
                  format_report / split_into_messages - the full per-member
                  detail for /team report and its 2000-char message
-                 chunking. team_status / team_report take
+                 chunking. Also render_aligned_table - a shared GFM-table
+                 renderer that pads every column to its widest cell,
+                 meant for a `.md` file attachment (alignment only reads
+                 right in a fixed-width viewer, not a chat message);
+                 used by recap::format_day_table_file and
+                 followups::format_missed_report_file. team_status / team_report take
                  carryover_lookback_days; MemberStatus gains
                  carried_count, MemberReport gains carried
                  (Vec<CarryoverDetail>); matched_update_count is now
@@ -281,14 +286,26 @@ src/
                  no todo at all, since that's already the 'todo' miss -
                  called once daily by the ticker alongside day_summary)
                  + missed_detail/
-                 format_missed_report (the report /missed renders,
-                 MissedDetail { member, missed_todo_dates,
+                 format_missed_report_file (the report /missed renders
+                 as `.md` file content, `None` when there's nothing
+                 missed - the command falls back to a plain "nothing
+                 missed" message with no attachment then), MissedDetail
+                 { member, missed_todo_dates,
                  missed_update_dates } - per-member exact dates, folded
                  in Rust from rows ordered member/date rather than a SQL
                  GROUP BY, since the report needs every date, not just a
-                 count; format_missed_report renders that detail first,
-                 then a summary table separately ranked by total missed
-                 days, most first)
+                 count; format_missed_report_file renders that detail
+                 first, then a summary table (status::render_aligned_table)
+                 separately ranked by total missed days, most first)
+  recap.rs       resolve_range (shared `/recap`+`/missed` start/end
+                 validation, defaults/caps a range) + recap_range/day_rows
+                 (per-day todo+latest-update rows, bucketed
+                 blocked/no-report/in-progress/done, plus ad-hoc updates
+                 as "(unplanned)" rows) + format_day_table_file (one
+                 day's rows as a column-aligned GFM table via
+                 status::render_aligned_table, for a `.md` attachment)
+                 + format_recap_file (joins one table per day for
+                 `/recap`, `None` for an empty range)
   init.rs        `dispatchd init` subcommand
   discord_login.rs `dispatchd discord login` - prompts, validates against
                  Discord (Http::get_current_user), then shells out to
@@ -425,11 +442,17 @@ src/
                     retry) on a deleted standup thread instead of
                     retrying every tick; also posts a day_summary at
                     day_summary_time (default 16:00, the same moment
-                    meeting_time defaults to) - one markdown table, the
-                    same per-day format /recap renders (recap::recap_range
-                    + recap::format_day_table) for just today, chunked
-                    through status::split_into_messages. Fires on the clock
-                    like every other entry here, not once everyone's
+                    meeting_time defaults to) - a short header plus a
+                    column-aligned `.md` file attachment (day-summary-
+                    <date>.md), the same per-day table /recap renders
+                    (recap::recap_range + recap::format_day_table_file)
+                    for just today; a file rather than chunked messages
+                    since an attachment isn't bound by Discord's 2000-char
+                    cap and the columns actually line up
+                    (day_summary_content builds the (header, Some(file))
+                    pair, or (header, None) when there's no activity yet).
+                    Fires on the clock like every other entry here, not
+                    once everyone's
                     actually submitted - a still-open todo just shows "no
                     report yet". Right after it, a separate
                     day_summary_missing message (own reminders_sent kind,
@@ -448,13 +471,21 @@ src/
                     thread existing at all): maybe_record_missed calls
                     followups::record_missed to persist the day's misses
                     into missed_submissions, feeding /missed
+    recap.rs       /recap start:<date> end:<date> - tech-lead-only,
+                    multi-day recap. Same reply shape as /missed: a short
+                    header (or "No activity between ..." when the range is
+                    empty) plus, when there's anything to show, a
+                    `recap-<start>_<end>.md` attachment
+                    (recap::format_recap_file - one column-aligned day
+                    table per day, recap::recap_range) - no chunking, an
+                    attachment isn't bound by Discord's 2000-char cap
     missed.rs      /missed start:<date> end:<date> - tech-lead-only,
                     reads missed_submissions (the ticker's daily snapshot
                     above, not a live query) via followups::missed_detail
-                    + format_missed_report - per-member dates first, a
-                    ranked summary table after; same date-range handling
-                    as /recap (recap::resolve_range, reused directly) and
-                    the same status::split_into_messages chunking, since
-                    the detail section can outgrow the 2000-char cap on a
-                    long enough range even for a 6-person team
+                    + format_missed_report_file - per-member dates first,
+                    a ranked summary table after, as a `missed-<start>_
+                    <end>.md` file attachment (same short-header-plus-file
+                    reply shape as /recap, no chunking needed); same
+                    date-range handling as /recap (recap::resolve_range,
+                    reused directly)
 ```

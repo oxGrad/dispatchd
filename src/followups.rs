@@ -139,8 +139,9 @@ pub fn record_missed(conn: &Connection, date: &str) -> Result<()> {
 /// The `/missed` report's underlying data: one `MissedDetail` per member
 /// with at least one miss in `[start, end]` (inclusive) per
 /// `missed_submissions`, alphabetical by name (the summary table
-/// `format_missed_report` renders below the detail re-sorts by day count -
-/// this order is about finding a specific member's section quickly).
+/// `format_missed_report_file` renders below the detail re-sorts by day
+/// count - this order is about finding a specific member's section
+/// quickly).
 /// `start`/`end` are trusted to already be validated `YYYY-MM-DD` strings
 /// (see `recap::resolve_range`, reused by the command).
 pub fn missed_detail(conn: &Connection, start: &str, end: &str) -> Result<Vec<MissedDetail>> {
@@ -180,32 +181,35 @@ pub fn missed_detail(conn: &Connection, start: &str, end: &str) -> Result<Vec<Mi
     Ok(details)
 }
 
-/// Renders the `/missed` report body: a per-member detail section - which
-/// exact dates they missed `/todo` and which they missed `/progress` - then
-/// a summary table of day counts across the whole range ranked most-missed
-/// first, or a plain "nothing missed" line when `details` is empty. Dates
-/// render short (`entries::short_date`, e.g. "Sep 15"), same as everywhere
-/// else a date reaches a Discord reply. No trailing newline - same
-/// convention as `recap::format_day_table`, and callers can feed the
-/// result straight into `status::split_into_messages` for Discord's
-/// 2000-char cap.
-pub fn format_missed_report(details: &[MissedDetail], start: &str, end: &str) -> String {
+/// Renders the `/missed` report as `.md` file content: a per-member
+/// detail section - which exact dates they missed `/todo` and which they
+/// missed `/progress` - then a summary table of day counts across the
+/// whole range ranked most-missed first (`status::render_aligned_table`,
+/// so the columns actually line up in the file). `None` when `details` is
+/// empty - the caller shows a plain "nothing missed" message instead, no
+/// file needed. Dates render short (`entries::short_date`, e.g. "Sep 15"),
+/// same as everywhere else a date reaches a Discord reply.
+pub fn format_missed_report_file(
+    details: &[MissedDetail],
+    start: &str,
+    end: &str,
+) -> Option<String> {
     if details.is_empty() {
-        return format!("✅ No missed submissions between {start} and {end}.");
+        return None;
     }
 
-    let mut out = format!("📉 **Missed submissions ({start} to {end})**");
+    let mut out = format!("# Missed submissions ({start} to {end})\n");
     for detail in details {
-        out.push_str(&format!("\n\n**{}**", detail.member.replace('|', "/")));
+        out.push_str(&format!("\n## {}\n", detail.member.replace('|', "/")));
         if !detail.missed_todo_dates.is_empty() {
             out.push_str(&format!(
-                "\nMissed /todo: {}",
+                "- Missed /todo: {}\n",
                 short_date_list(&detail.missed_todo_dates)
             ));
         }
         if !detail.missed_update_dates.is_empty() {
             out.push_str(&format!(
-                "\nMissed /progress: {}",
+                "- Missed /progress: {}\n",
                 short_date_list(&detail.missed_update_dates)
             ));
         }
@@ -217,16 +221,22 @@ pub fn format_missed_report(details: &[MissedDetail], start: &str, end: &str) ->
             .cmp(&a.missed_days())
             .then_with(|| a.member.cmp(&b.member))
     });
-    out.push_str("\n\n**Summary**\n| Member | Missed /todo | Missed /progress |\n|---|---|---|");
-    for detail in ranked {
-        out.push_str(&format!(
-            "\n| {} | {} | {} |",
-            detail.member.replace('|', "/"),
-            detail.missed_todo_dates.len(),
-            detail.missed_update_dates.len()
-        ));
-    }
-    out
+    let headers = ["Member", "Missed /todo", "Missed /progress"];
+    let rows: Vec<Vec<String>> = ranked
+        .iter()
+        .map(|d| {
+            vec![
+                d.member.replace('|', "/"),
+                d.missed_todo_dates.len().to_string(),
+                d.missed_update_dates.len().to_string(),
+            ]
+        })
+        .collect();
+    out.push_str(&format!(
+        "\n## Summary\n\n{}",
+        crate::status::render_aligned_table(&headers, &rows)
+    ));
+    Some(out)
 }
 
 fn short_date_list(dates: &[String]) -> String {
@@ -477,15 +487,15 @@ mod tests {
     }
 
     #[test]
-    fn format_missed_report_reports_nothing_missed_when_details_are_empty() {
+    fn format_missed_report_file_is_none_when_details_are_empty() {
         assert_eq!(
-            format_missed_report(&[], "2026-08-01", "2026-08-14"),
-            "✅ No missed submissions between 2026-08-01 and 2026-08-14."
+            format_missed_report_file(&[], "2026-08-01", "2026-08-14"),
+            None
         );
     }
 
     #[test]
-    fn format_missed_report_lists_dates_per_member_then_a_ranked_summary_table() {
+    fn format_missed_report_file_lists_dates_per_member_then_an_aligned_ranked_summary_table() {
         let details = vec![
             MissedDetail {
                 member: "Alice".to_string(),
@@ -498,22 +508,21 @@ mod tests {
                 missed_update_dates: vec!["2026-08-02".to_string()],
             },
         ];
-        assert_eq!(
-            format_missed_report(&details, "2026-08-01", "2026-08-14"),
-            "📉 **Missed submissions (2026-08-01 to 2026-08-14)**\n\
-             \n\
-             **Alice**\n\
-             Missed /progress: Aug 1\n\
-             \n\
-             **Zed**\n\
-             Missed /todo: Aug 1, Aug 2\n\
-             Missed /progress: Aug 2\n\
-             \n\
-             **Summary**\n\
-             | Member | Missed /todo | Missed /progress |\n\
-             |---|---|---|\n\
-             | Zed | 2 | 1 |\n\
-             | Alice | 0 | 1 |"
-        );
+        let out = format_missed_report_file(&details, "2026-08-01", "2026-08-14").unwrap();
+        assert!(out.starts_with("# Missed submissions (2026-08-01 to 2026-08-14)\n"));
+        assert!(out.contains("## Alice\n- Missed /progress: Aug 1\n"));
+        assert!(out.contains("## Zed\n- Missed /todo: Aug 1, Aug 2\n- Missed /progress: Aug 2\n"));
+        assert!(out.contains("## Summary\n\n| Member"));
+
+        // Zed (2+1=3 missed days) outranks Alice (0+1=1) in the summary,
+        // and every table line (header, separator, both rows) lines up.
+        let table_lines: Vec<&str> = out.lines().skip_while(|l| !l.starts_with('|')).collect();
+        assert_eq!(table_lines.len(), 4);
+        let width = table_lines[0].chars().count();
+        for line in &table_lines {
+            assert_eq!(line.chars().count(), width, "misaligned line: {line:?}");
+        }
+        assert!(table_lines[2].contains("Zed"));
+        assert!(table_lines[3].contains("Alice"));
     }
 }

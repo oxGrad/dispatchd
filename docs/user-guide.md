@@ -22,12 +22,13 @@ posts into a "Standup: YYYY-MM-DD" thread in the team's standup channel:
    it for the day with `/team skip-meeting` (see below), which posts a "no
    meeting today" note and suppresses this ping if it hasn't fired yet.
 5. **Day progress summary** (16:00 by default - the same moment the meeting
-   starts, unless you've changed one of the two times) - a full-detail
-   markdown table of the day's todos and progress (same format as
-   `/recap`, one day instead of a range) is posted into the thread. This
-   fires on the clock, not once everyone's actually submitted - a
-   still-open todo just shows as "no report yet" in the table. Right
-   after it, a separate message `@mentions` anyone who submitted neither a
+   starts, unless you've changed one of the two times) - a short message
+   with a `.md` file attached, containing a full-detail, column-aligned
+   table of the day's todos and progress (same format as `/recap`, one
+   day instead of a range) is posted into the thread. This fires on the
+   clock, not once everyone's actually submitted - a still-open todo just
+   shows as "no report yet" in the table. Right after it, a separate
+   message `@mentions` anyone who submitted neither a
    todo nor a progress update today at all - skipped entirely if nobody
    qualifies. Either way, today's misses (per-member, `/todo` and
    `/progress` tracked independently) are recorded permanently, so the
@@ -239,14 +240,16 @@ meeting.
 
 ## `/recap` - tech lead only
 
-`/recap start:<date> end:<date>` renders one markdown table per day in the
-range, each row a todo (or an "(unplanned)" ad-hoc update) with its latest
-status, progress, and blocker - the same detail `/team report` shows for
-today, but across as many days back as you need. Both dates are optional:
-omitting `end` defaults to today, omitting `start` defaults to 14 days
-before `end`. Days with no activity at all are left out rather than shown
-empty. Long ranges are split across several ephemeral follow-up messages
-to stay under Discord's 2000-character limit per message.
+`/recap start:<date> end:<date>` replies with a short message and a
+`.md` file attached, containing one column-aligned table per day in the
+range - each row a todo (or an "(unplanned)" ad-hoc update) with its
+latest status, progress, and blocker - the same detail `/team report`
+shows for today, but across as many days back as you need. Both dates
+are optional: omitting `end` defaults to today, omitting `start` defaults
+to 14 days before `end`. Days with no activity at all are left out rather
+than shown empty. It's an attachment rather than chat text so a long
+range's table isn't squeezed into (or split across) Discord's
+2000-character message limit, and so the columns actually line up.
 
 ## `/missed` - tech lead only
 
@@ -254,14 +257,16 @@ to stay under Discord's 2000-character limit per message.
 `/progress` update, or both, on each day in the range. "Missed
 `/progress`" means a todo that day with no report filed against it, not
 just an entirely quiet day - if you had nothing planned, that's a missed
-`/todo` instead, not double-counted as a missed update too. The reply is
-two parts: first a section per member listing the exact dates they missed
-each one, then a summary table ranking everyone by total missed days.
+`/todo` instead, not double-counted as a missed update too. Like
+`/recap`, the reply is a short message with a `.md` file attached: a
+section per member listing the exact dates they missed each one, then a
+column-aligned summary table ranking everyone by total missed days.
 Same date handling as `/recap`. This reads from a daily snapshot the bot
 takes at `day_summary_time` (see "The daily ritual" above), not a live
 query, so a day only shows up here once that snapshot has run - don't
 expect today's entry to appear before then. Members with a clean record
-for the whole range aren't listed at all.
+for the whole range aren't listed at all, and if nobody missed anything
+you just get a plain "nothing missed" message with no attachment.
 
 ## View-only access - the `viewer` role
 
