@@ -261,10 +261,10 @@ async fn maybe_fire_day_summary(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, d
 
     let day = {
         let conn = db.lock().expect("db mutex poisoned");
-        recap::recap_range(&conn, date, date)
+        recap::today_recap(&conn, date)
     };
     let day = match day {
-        Ok(mut days) => days.pop(),
+        Ok(day) => day,
         Err(e) => {
             eprintln!("failed to build day_summary for {date}: {e}");
             return;
