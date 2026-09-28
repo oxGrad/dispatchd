@@ -475,6 +475,16 @@ pub async fn handle_help(ctx: &SerenityContext, command: &CommandInteraction) {
     reply_ephemeral(ctx, command, TODO_HELP_TEXT, "/todo help").await;
 }
 
+/// Autocomplete suggestion label for `/todo edit`|`delete` - shows the id
+/// the option value carries so the member knows what they're picking,
+/// plus the SOW ref if any (the `id` help text promises both).
+fn format_todo_choice_label(id: i64, task: &str, sow_ref: &Option<String>) -> String {
+    match sow_ref {
+        Some(r) => format!("#{id} {task} [{r}]"),
+        None => format!("#{id} {task}"),
+    }
+}
+
 pub async fn handle_autocomplete(
     ctx: &SerenityContext,
     autocomplete: &AutocompleteInteraction,
@@ -497,7 +507,12 @@ pub async fn handle_autocomplete(
         Ok(rows) => {
             let choices = rows
                 .into_iter()
-                .map(|(id, task, _sow_ref)| AutocompleteChoice::new(task, id.to_string()))
+                .map(|(id, task, sow_ref)| {
+                    AutocompleteChoice::new(
+                        format_todo_choice_label(id, &task, &sow_ref),
+                        id.to_string(),
+                    )
+                })
                 .collect();
             CreateAutocompleteResponse::new().set_choices(choices)
         }
@@ -549,6 +564,18 @@ mod tests {
         assert_eq!(normalize_sow_ref(None), None);
         assert_eq!(normalize_sow_ref(Some(String::new())), None);
         assert_eq!(normalize_sow_ref(Some("   ".to_string())), None);
+    }
+
+    #[test]
+    fn format_todo_choice_label_includes_id_and_sow_ref() {
+        assert_eq!(
+            format_todo_choice_label(12, "Write tests", &Some("M1D2".to_string())),
+            "#12 Write tests [M1D2]"
+        );
+        assert_eq!(
+            format_todo_choice_label(13, "Ship the release", &None),
+            "#13 Ship the release"
+        );
     }
 
     #[test]
