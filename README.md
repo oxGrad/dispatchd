@@ -24,6 +24,11 @@ unit can find it). No Rust toolchain needed. For a local install without
 `sudo`, plus version pinning and the `INSTALL_DIR` override, see
 [`docs/installing.md`](docs/installing.md).
 
+The same script is also served at `https://get.graditya.com/dispatchd`,
+part of a shared installer hub for oxGrad's other tools
+([`oxGrad/get`](https://github.com/oxGrad/get)) - use whichever domain
+you prefer, both fetch `install.sh` straight from this repo.
+
 To build from source instead: `cargo build --release`.
 
 ## Quick start

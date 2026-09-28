@@ -12,6 +12,11 @@ Raspberry Pi, where compiling this project's dependency tree isn't
 practical. It does **not** run `dispatchd init` or touch any config for
 you - see "Next steps" below.
 
+The same command also works against `https://get.graditya.com/dispatchd`
+(part of [`oxGrad/get`](https://github.com/oxGrad/get), a shared
+installer hub for oxGrad's other tools) - both domains serve this
+repo's `install.sh` unmodified, so pick whichever you prefer.
+
 `sudo` is used because dispatchd runs as a systemd service: the binary
 has to live somewhere `sudo dispatchd ...` (which has a sanitized
 `PATH`) and the systemd unit can both find it. `/usr/local/bin` is that
@@ -303,3 +308,13 @@ whatever's actually in the repo - merging a change to `install.sh`,
 `cloudflare/tos.html`, or `cloudflare/privacy-policy.html` is the only
 step needed to update what the domain serves; the Worker itself only
 needs redeploying if you change its routing in `worker.js`.
+
+## Also served at `get.graditya.com/dispatchd`
+
+[`oxGrad/get`](https://github.com/oxGrad/get) is a separate Cloudflare
+Pages app that acts as a shared installer hub for oxGrad's tools. Its
+`functions/dispatchd.js` route proxies this repo's `install.sh` the same
+way `cloudflare/worker.js` above does for the dedicated domain - fetched
+straight from `main` at Cloudflare's edge, cached 5 minutes. There is
+nothing to set up or keep in sync from this repo's side: editing
+`install.sh` here updates both domains.
