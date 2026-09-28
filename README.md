@@ -14,7 +14,7 @@ host.
 ## Install
 
 ```sh
-curl -fsSL https://dispatchd.graditya.com | sudo sh
+curl -fsSL https://get.graditya.com/dispatchd | sudo sh
 ```
 
 Downloads the prebuilt binary for your platform (static `musl` on Linux
@@ -23,6 +23,11 @@ installs it to `/usr/local/bin` (so `sudo dispatchd ...` and the systemd
 unit can find it). No Rust toolchain needed. For a local install without
 `sudo`, plus version pinning and the `INSTALL_DIR` override, see
 [`docs/installing.md`](docs/installing.md).
+
+The installer, and this bot's Terms of Service / Privacy Policy pages,
+are generated and hosted by [`oxGrad/get`](https://github.com/oxGrad/get),
+a shared hub for oxGrad's tools - there is no Cloudflare setup in this
+repo.
 
 To build from source instead: `cargo build --release`.
 

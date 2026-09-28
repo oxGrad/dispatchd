@@ -1,7 +1,7 @@
 # Installing dispatchd
 
 ```sh
-curl -fsSL https://dispatchd.graditya.com | sudo sh
+curl -fsSL https://get.graditya.com/dispatchd | sudo sh
 ```
 
 This downloads the right prebuilt binary for your machine from the
@@ -11,6 +11,12 @@ never compiles anything - no Rust toolchain required, including on a
 Raspberry Pi, where compiling this project's dependency tree isn't
 practical. It does **not** run `dispatchd init` or touch any config for
 you - see "Next steps" below.
+
+`get.graditya.com` is [`oxGrad/get`](https://github.com/oxGrad/get), a
+shared Cloudflare Pages app that hosts installers (and, for dispatchd,
+the Terms of Service / Privacy Policy pages below) for oxGrad's tools -
+see "Where the installer actually lives" further down. This repo itself
+has no Cloudflare setup.
 
 `sudo` is used because dispatchd runs as a systemd service: the binary
 has to live somewhere `sudo dispatchd ...` (which has a sanitized
@@ -32,14 +38,14 @@ the script detects this automatically via `uname`.
 - **`DISPATCHD_VERSION`** - pin a specific release instead of installing
   latest, e.g.:
   ```sh
-  curl -fsSL https://dispatchd.graditya.com | sudo DISPATCHD_VERSION=v0.2.0 sh
+  curl -fsSL https://get.graditya.com/dispatchd | sudo DISPATCHD_VERSION=v0.2.0 sh
   ```
 - **`INSTALL_DIR`** - install somewhere other than `/usr/local/bin`. The
   common case is a local install with no `sudo`, into a directory you
   own (handy for trying dispatchd outside systemd, with
   `DISPATCHD_DISCORD_TOKEN` set directly):
   ```sh
-  curl -fsSL https://dispatchd.graditya.com | INSTALL_DIR="$HOME/.local/bin" sh
+  curl -fsSL https://get.graditya.com/dispatchd | INSTALL_DIR="$HOME/.local/bin" sh
   ```
   Note that a binary under `$HOME` can't be used for the systemd
   deployment - `sudo` and systemd won't find it (and on SELinux systems
@@ -96,7 +102,7 @@ from source to update instead.
 Re-run the installer - it overwrites the binary in place:
 
 ```sh
-curl -fsSL https://dispatchd.graditya.com | sudo sh
+curl -fsSL https://get.graditya.com/dispatchd | sudo sh
 ```
 
 systemd keeps running the old binary until the service is restarted (the
@@ -214,7 +220,7 @@ SSH in and install as usual:
 gcloud compute ssh dispatchd --zone=us-central1-a
 
 # on the VM:
-curl -fsSL https://dispatchd.graditya.com | sudo sh
+curl -fsSL https://get.graditya.com/dispatchd | sudo sh
 sudo timedatectl set-timezone Asia/Jakarta   # optional - match your team
 dispatchd init
 # edit ~/.config/dispatchd/config.toml (discord_guild_id,
@@ -235,71 +241,37 @@ The same recipe works on any small always-on Linux VM (Oracle Cloud's
 always-free Ampere instances, a Raspberry Pi, etc.) - only the
 provisioning command changes.
 
-## Hosting the installer at `dispatchd.graditya.com` (Cloudflare)
+## Where the installer (and the bot's legal pages) actually live
 
-`install.sh` is committed at the repo root, so
-`curl -fsSL https://raw.githubusercontent.com/oxGrad/dispatchd/main/install.sh | sudo sh`
-already works with no extra setup. Serving it at the bare custom domain
-(no path) needs a small proxy in front, since GitHub's raw content isn't
-served from that domain - `cloudflare/worker.js` in this repo is exactly
-that proxy. It routes:
+This repo has no Cloudflare setup of its own - no `install.sh`, no
+`cloudflare/` directory. Everything is hosted by
+[`oxGrad/get`](https://github.com/oxGrad/get), a Cloudflare Pages
+Functions app shared across oxGrad's tools:
 
-| Path | Serves |
+| URL | Serves |
 | --- | --- |
-| `/` and `/install.sh` | `install.sh` (so `curl … \| sh` works) |
-| `/tos` | `cloudflare/tos.html` - the bot's Terms of Service |
-| `/privacy-policy` | `cloudflare/privacy-policy.html` - the bot's Privacy Policy |
-| anything else | `404` |
+| `https://get.graditya.com/dispatchd` | the install script |
+| `https://get.graditya.com/dispatchd/tos` | Terms of Service |
+| `https://get.graditya.com/dispatchd/privacy-policy` | Privacy Policy |
 
-Every route is fetched from the repo's `main` branch (cached 5 minutes at
-Cloudflare's edge), so editing one of those files in the repo is all it
-takes to update what the domain serves. The `/tos` and `/privacy-policy`
-URLs are what you put in the Discord Developer Portal (**App → General
-Information → Terms of Service URL / Privacy Policy URL**); Discord asks
-for them once a bot is in enough servers to need verification. **Fill in
-the `[effective date]` and `[operator contact email]` placeholders in
-both HTML files before publishing** - and have a lawyer look them over if
-anything real is riding on them; they are a plain-English starting point,
-not legal advice.
+The `/tos` and `/privacy-policy` URLs are what you put in the Discord
+Developer Portal (**App → General Information → Terms of Service URL /
+Privacy Policy URL**); Discord asks for them once a bot is in enough
+servers to need verification. Their content lives in `oxGrad/get` (not
+here) - **fill in the `[effective date]` and `[operator contact email]`
+placeholders there before publishing**, and have a lawyer look them
+over if anything real is riding on them; they are a plain-English
+starting point, not legal advice.
 
-To wire up the Worker (needs your own Cloudflare account - this is a
-one-time setup step, not something dispatchd's CI does for you):
-
-1. **Create the Worker.** Cloudflare dashboard → **Workers & Pages** →
-   **Create** → paste in `cloudflare/worker.js`'s contents. (Or, if you
-   prefer the CLI: `cd cloudflare && wrangler deploy`, using the
-   `wrangler.toml` already in that directory.)
-2. **Bind the Custom Domain.** On that Worker's **Settings → Domains &
-   Routes → Add → Custom Domain**, enter `dispatchd.graditya.com`.
-   Custom Domains (not the older Routes mechanism) provision the DNS
-   record and TLS certificate automatically, and bind the *entire*
-   domain directly to the Worker's `fetch` handler - so `/` (what a bare
-   `curl dispatchd.graditya.com` requests) is answered by the script,
-   with no extra path configuration needed.
-3. That's it - `curl -fsSL https://dispatchd.graditya.com | sudo sh` now
-   works directly, no `-L` needed (the Worker serves the script itself
-   rather than redirecting to GitHub), and `/tos` / `/privacy-policy`
-   serve the two HTML pages.
-
-### Deploying via a Git-connected build (Workers Builds)
-
-If instead of pasting/`wrangler deploy` you connect the Worker to this
-GitHub repo (Worker → **Settings → Builds**), two settings matter, because
-`wrangler.toml` lives in `cloudflare/`, not the repo root:
-
-- **Root directory:** set it to `cloudflare`. Without this the build fails
-  with *"Missing entry-point to Worker script or to assets directory"* -
-  Wrangler is looking for a config file at the repo root and there isn't
-  one. (Alternatively, leave the root at `/` and set the deploy command to
-  `npx wrangler deploy --config cloudflare/wrangler.toml`.)
-- **Worker name:** `name` in `cloudflare/wrangler.toml` must equal the
-  connected Worker's name. If they differ, Cloudflare flags it after each
-  build and (Wrangler ≥ 3.109.0) opens a PR to rewrite the file to match -
-  so pick the name when you create the Worker and keep the file in sync.
-
-The Worker fetches each route's file from the `main` branch on every
-request (cached at Cloudflare's edge for 5 minutes), so it always mirrors
-whatever's actually in the repo - merging a change to `install.sh`,
-`cloudflare/tos.html`, or `cloudflare/privacy-policy.html` is the only
-step needed to update what the domain serves; the Worker itself only
-needs redeploying if you change its routing in `worker.js`.
+The install script is generated from `oxGrad/get`'s
+`functions/_shared/install-script.js`, a template kept in sync with
+this repo's actual release contract: the musl targets and armv7 support
+above, the `SHA256SUMS` checksum file, `/usr/local/bin` as the default
+install dir, and the `systemctl restart` prompt. If this repo's release
+build ever changes - a new target, a renamed checksum file, a different
+default install directory - update `oxGrad/get`'s `PRODUCTS.dispatchd`
+entry (and, if the shape changes, `renderInstallScript`) to match;
+that repo's README explains the template. A release here (see
+`.github/workflows/release.yml`) just needs to keep producing the same
+asset names and checksum format the template expects - there's nothing
+to redeploy on this side.
