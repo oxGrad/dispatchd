@@ -475,14 +475,34 @@ pub async fn handle_help(ctx: &SerenityContext, command: &CommandInteraction) {
     reply_ephemeral(ctx, command, TODO_HELP_TEXT, "/todo help").await;
 }
 
+/// Discord rejects an autocomplete response outright if any choice's name
+/// exceeds this - and the task modal input has no length cap, unlike
+/// `SOW_REF_INPUT_ID`.
+const AUTOCOMPLETE_NAME_MAX_CHARS: usize = 100;
+
 /// Autocomplete suggestion label for `/todo edit`|`delete` - shows the id
 /// the option value carries so the member knows what they're picking,
-/// plus the SOW ref if any (the `id` help text promises both).
+/// plus the SOW ref if any (the `id` help text promises both). Truncates
+/// the task so the whole label always fits Discord's 100-char choice
+/// name limit - one oversized choice would otherwise fail the entire
+/// autocomplete response, hiding every suggestion.
 fn format_todo_choice_label(id: i64, task: &str, sow_ref: &Option<String>) -> String {
-    match sow_ref {
-        Some(r) => format!("#{id} {task} [{r}]"),
-        None => format!("#{id} {task}"),
+    let prefix = format!("#{id} ");
+    let suffix = sow_ref
+        .as_deref()
+        .map(|r| format!(" [{r}]"))
+        .unwrap_or_default();
+    let task_budget =
+        AUTOCOMPLETE_NAME_MAX_CHARS.saturating_sub(prefix.chars().count() + suffix.chars().count());
+    format!("{prefix}{}{suffix}", truncate_chars(task, task_budget))
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
     }
+    let keep: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{keep}…")
 }
 
 pub async fn handle_autocomplete(
@@ -576,6 +596,18 @@ mod tests {
             format_todo_choice_label(13, "Ship the release", &None),
             "#13 Ship the release"
         );
+    }
+
+    #[test]
+    fn format_todo_choice_label_truncates_to_discords_100_char_choice_limit() {
+        // The task input has no length cap - an oversized choice name would
+        // otherwise make Discord reject the *entire* autocomplete response,
+        // hiding every suggestion, not just this one.
+        let long_task = "a".repeat(200);
+        let label = format_todo_choice_label(12, &long_task, &Some("M1D2".to_string()));
+        assert!(label.chars().count() <= 100, "label was {label:?}");
+        assert!(label.starts_with("#12 "));
+        assert!(label.ends_with("[M1D2]"));
     }
 
     #[test]
