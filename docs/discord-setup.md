@@ -202,6 +202,11 @@ optional — the bot-side check is the real gate either way.
 
 ### The `is_admin` flag
 
+`members.toml` is the whole roster: only people listed there can use
+`/todo` and `/progress`, and on every start the bot replaces its member
+list with the file's - removing someone (or their `is_admin`) revokes
+their access at the next restart.
+
 `members.toml` roles are `lead | designer | senior | medior | junior |
 viewer` — they control `is_lead` (`lead` and `viewer` pass it; `viewer`
 additionally never gets nagged to submit `/todo`/`/progress`, for someone

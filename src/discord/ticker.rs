@@ -3,7 +3,10 @@ use std::time::Duration;
 
 use chrono::{Datelike, NaiveTime, Weekday};
 use rusqlite::Connection;
-use serenity::all::{ChannelId, ChannelType, CreateAttachment, CreateMessage, CreateThread, Http};
+use serenity::all::{
+    ChannelId, ChannelType, CreateAllowedMentions, CreateAttachment, CreateMessage, CreateThread,
+    Http,
+};
 
 use crate::config::Config;
 use crate::{entries, followups, members, recap, reminders};
@@ -28,6 +31,21 @@ pub async fn run(
     channel_id: ChannelId,
     config: Config,
 ) {
+    {
+        let today = chrono::Utc::now()
+            .with_timezone(&config.timezone)
+            .format("%Y-%m-%d")
+            .to_string();
+        let conn = db.lock().expect("db mutex poisoned");
+        match followups::backfill_missed(&conn, &today, config.run_on_weekends) {
+            Ok(dates) if !dates.is_empty() => {
+                println!("backfilled missed submissions for {}", dates.join(", "))
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("failed to backfill missed submissions: {e}"),
+        }
+    }
+
     let mut interval = tokio::time::interval(Duration::from_secs(config.ticker_interval_seconds));
     loop {
         interval.tick().await;
@@ -355,13 +373,10 @@ async fn maybe_record_missed(db: &Arc<Mutex<Connection>>, date: &str) {
         }
     }
 
+    // record_missed writes the missed_recorded marker itself, atomically.
     let conn = db.lock().expect("db mutex poisoned");
     if let Err(e) = followups::record_missed(&conn, date) {
         eprintln!("failed to record missed submissions for {date}: {e}");
-        return;
-    }
-    if let Err(e) = reminders::mark_sent(&conn, date, "missed_recorded") {
-        eprintln!("failed to mark missed_recorded sent: {e}");
     }
 }
 
@@ -535,10 +550,12 @@ async fn maybe_sync_thread(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, date: 
     let mut synced_through = cursor;
     for entry in &new_entries {
         let content = format_sync_message(entry);
-        if let Err(e) = channel_id
-            .send_message(http, CreateMessage::new().content(content))
-            .await
-        {
+        // No pings at all: task/notes/progress are free text a member typed,
+        // so a `<@id>`/`<@&role>`/`@everyone` in them must render inert.
+        let msg = CreateMessage::new()
+            .content(content)
+            .allowed_mentions(CreateAllowedMentions::new());
+        if let Err(e) = channel_id.send_message(http, msg).await {
             if super::is_unknown_channel_error(&e) {
                 eprintln!(
                     "standup thread for {date} no longer exists (deleted?) - skipping sync for entry {}: {e}",

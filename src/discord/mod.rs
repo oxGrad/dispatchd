@@ -21,6 +21,7 @@ use serenity::all::{
 use serenity::async_trait;
 
 use crate::config::Config;
+use crate::members;
 
 pub struct Handler {
     guild_id: GuildId,
@@ -65,6 +66,23 @@ impl EventHandler for Handler {
                     }
                 }
                 "help" => help::handle_command(&ctx, &command).await,
+                // Both write entries (synced into the shared thread), so
+                // they're roster-only. Gating the command is enough - their
+                // modals can only be opened from here.
+                "todo" | "progress" if !self.is_member(&command.user.id.to_string()) => {
+                    let reply = CreateInteractionResponseMessage::new()
+                        .content("⛔ This command is for team members listed in members.toml.")
+                        .ephemeral(true);
+                    if let Err(e) = command
+                        .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+                        .await
+                    {
+                        eprintln!(
+                            "failed to respond to non-member /{}: {e}",
+                            command.data.name
+                        );
+                    }
+                }
                 "todo" => match todo::subcommand(&command.data.options) {
                     Some(("add", _)) => todo::handle_add(&ctx, &command).await,
                     Some(("edit", opts)) => {
@@ -180,6 +198,17 @@ impl EventHandler for Handler {
             }
             _ => {}
         }
+    }
+}
+
+impl Handler {
+    /// Fails closed: a DB error denies rather than lets a non-member in.
+    fn is_member(&self, discord_user_id: &str) -> bool {
+        let conn = self.db.lock().expect("db mutex poisoned");
+        members::is_member(&conn, discord_user_id).unwrap_or_else(|e| {
+            eprintln!("failed to check is_member: {e}");
+            false
+        })
     }
 }
 

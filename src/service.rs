@@ -32,6 +32,11 @@ pub(crate) const UPGRADE_PATH_PATH: &str = "/etc/systemd/system/dispatchd-upgrad
 /// `/run/dispatchd` for the `/admin upgrade` request/status files;
 /// `RuntimeDirectoryPreserve=yes` keeps it across the upgrade restart so
 /// the status file survives for the bot to read back afterward.
+///
+/// `HARDENING` is shared with the maintenance service; it's deliberately
+/// not applied to the root upgrade helper, which has to write the binary
+/// under `/usr`. `ProtectSystem=full` (not `strict`) leaves `/var` and the
+/// user's home - where the DB lives by default - writable.
 fn render_unit(exe_path: &str, user: &str) -> String {
     format!(
         "[Unit]\n\
@@ -46,6 +51,7 @@ fn render_unit(exe_path: &str, user: &str) -> String {
          LoadCredentialEncrypted=discord_token:{CRED_PATH}\n\
          RuntimeDirectory=dispatchd\n\
          RuntimeDirectoryPreserve=yes\n\
+         {HARDENING}\
          Restart=on-failure\n\
          RestartSec=5\n\
          \n\
@@ -53,6 +59,8 @@ fn render_unit(exe_path: &str, user: &str) -> String {
          WantedBy=multi-user.target\n"
     )
 }
+
+const HARDENING: &str = "NoNewPrivileges=yes\nPrivateTmp=yes\nProtectSystem=full\n";
 
 /// The oneshot service the maintenance timer below actually triggers -
 /// the handover doc's weekly `DELETE ... VACUUM` cron.
@@ -64,7 +72,8 @@ fn render_maintenance_service(exe_path: &str, user: &str) -> String {
          [Service]\n\
          Type=oneshot\n\
          User={user}\n\
-         ExecStart={exe_path} maintenance run\n"
+         ExecStart={exe_path} maintenance run\n\
+         {HARDENING}"
     )
 }
 
@@ -131,6 +140,25 @@ fn parse_systemd_version(version_output: &str) -> anyhow::Result<u32> {
         .with_context(|| format!("could not parse systemd version from: {first_line:?}"))
 }
 
+/// `path` is root-owned and not group/world-writable - i.e. only root can
+/// change it.
+#[cfg(unix)]
+fn ensure_root_only_writable(path: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::os::unix::fs::MetadataExt;
+
+    let meta =
+        std::fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+    anyhow::ensure!(
+        meta.uid() == 0 && meta.mode() & 0o022 == 0,
+        "{} must be owned by root and not group/world-writable: the root upgrade helper \
+         executes and replaces this binary. Install dispatchd to /usr/local/bin \
+         (see docs/installing.md) and retry.",
+        path.display()
+    );
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn systemd_version() -> anyhow::Result<u32> {
     use anyhow::Context;
@@ -155,6 +183,21 @@ pub fn install() -> anyhow::Result<()> {
     let user = std::env::var("SUDO_USER")
         .or_else(|_| std::env::var("USER"))
         .context("could not determine which user to run the service as (set $USER)")?;
+    // From a root shell (`sudo -i`, or logged in as root) there's no
+    // SUDO_USER, and the bot - a network-facing process - would run as root.
+    if user == "root" {
+        anyhow::bail!(
+            "refusing to run dispatchd.service as root - run this via sudo from the \
+             (non-root) account the bot should run as, e.g. `sudo dispatchd service install`"
+        );
+    }
+    // dispatchd-upgrade.service runs this binary as root and rewrites it in
+    // place, so the bot's own user must not be able to modify either.
+    let exe_path = std::path::Path::new(exe);
+    ensure_root_only_writable(exe_path)?;
+    if let Some(dir) = exe_path.parent() {
+        ensure_root_only_writable(dir)?;
+    }
 
     let version = systemd_version()?;
     if version < MIN_SYSTEMD_VERSION {
@@ -479,6 +522,27 @@ mod tests {
         assert!(timer.contains("OnCalendar=weekly"));
         assert!(timer.contains("Persistent=true"));
         assert!(timer.contains("WantedBy=timers.target"));
+    }
+
+    #[test]
+    fn bot_and_maintenance_units_are_hardened() {
+        for unit in [
+            render_unit("/usr/local/bin/dispatchd", "pi"),
+            render_maintenance_service("/usr/local/bin/dispatchd", "pi"),
+        ] {
+            assert!(unit.contains("\nNoNewPrivileges=yes\n"), "{unit}");
+            assert!(unit.contains("\nPrivateTmp=yes\n"), "{unit}");
+            assert!(unit.contains("\nProtectSystem=full\n"), "{unit}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_root_only_writable_rejects_a_user_owned_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // Test runs as a normal user, so the tempdir is user-owned.
+        assert!(ensure_root_only_writable(dir.path()).is_err());
+        assert!(ensure_root_only_writable(std::path::Path::new("/")).is_ok());
     }
 
     #[test]

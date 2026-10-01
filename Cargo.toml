@@ -9,6 +9,8 @@ chrono = "0.4.45"
 chrono-tz = "0.10.4"
 clap = { version = "4.6.6", features = ["derive"] }
 flate2 = "1.0"
+libc = "0.2"
+minisign-verify = "0.3.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rpassword = "7.5.4"
 rusqlite = { version = "0.39.0", features = ["bundled"] }

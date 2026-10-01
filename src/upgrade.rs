@@ -81,6 +81,27 @@ pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> bool {
     got_hex.eq_ignore_ascii_case(expected_hex.trim())
 }
 
+/// The release-signing public key (minisign). The release workflow signs
+/// each release's `SHA256SUMS` with the matching secret key (the
+/// `MINISIGN_SECRET_KEY` Actions secret), so the per-asset checksum below
+/// is only trusted once this key vouches for the file it came from. The
+/// checksum alone catches a corrupted download, not a tampered release -
+/// whoever can publish a release can publish a matching `SHA256SUMS`.
+const RELEASE_PUBLIC_KEY: &str = include_str!("../minisign.pub");
+
+/// `true` when `sig` (a `.minisig` file's contents) is a valid signature by
+/// `RELEASE_PUBLIC_KEY` over `data`.
+pub fn verify_release_signature(data: &[u8], sig: &str) -> bool {
+    use minisign_verify::{PublicKey, Signature};
+    let (Ok(key), Ok(sig)) = (
+        PublicKey::decode(RELEASE_PUBLIC_KEY),
+        Signature::decode(sig),
+    ) else {
+        return false;
+    };
+    key.verify(data, &sig, false).is_ok()
+}
+
 /// What `/admin upgrade` writes to `REQUEST_PATH` for the root helper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
@@ -281,6 +302,20 @@ async fn download_and_stage(tag: &str, dest_dir: &Path) -> Result<StagedBinary> 
         .text()
         .await
         .context("failed to read SHA256SUMS")?;
+    let sums_sig = github_get(
+        &meta_client,
+        &format!("{base}/SHA256SUMS.minisig"),
+        "SHA256SUMS.minisig (releases before signing was added have none)",
+    )
+    .await?
+    .text()
+    .await
+    .context("failed to read SHA256SUMS.minisig")?;
+    if !verify_release_signature(sums.as_bytes(), &sums_sig) {
+        anyhow::bail!(
+            "SHA256SUMS signature verification failed for {tag} - refusing to install a release not signed by the dispatchd release key"
+        );
+    }
 
     // The two-space separator is `sha256sum` text-mode output, which is what
     // dispatchd's own release pipeline writes - not an arbitrary format.
@@ -470,22 +505,52 @@ impl Drop for RequestGuard {
     }
 }
 
-/// Appends one `StatusLine` as JSON + newline to `path`. Best-effort - a
-/// failed status write must not abort the upgrade.
-fn append_status_to(path: &Path, line: &StatusLine) {
-    use std::io::Write;
-    if let Ok(json) = serde_json::to_string(line)
-        && let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-    {
-        let _ = writeln!(f, "{json}");
+/// The root helper's write handle on `STATUS_PATH`. `/run/dispatchd` is
+/// owned by the unprivileged bot user, so opening that path by name as root
+/// would follow anything the bot planted there - a symlink to `/etc/shadow`
+/// would get truncated and appended to. Instead: unlink whatever is there,
+/// `create_new` a fresh file (O_EXCL, which refuses to follow a link), and
+/// write only through that one handle - if the path is swapped afterwards,
+/// writes land in the orphaned inode, nowhere else. Best-effort: a status
+/// file that can't be created must not abort the upgrade.
+struct StatusFile(Option<std::fs::File>);
+
+impl StatusFile {
+    fn create(path: &Path) -> Self {
+        let _ = std::fs::remove_file(path);
+        StatusFile(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .ok(),
+        )
+    }
+
+    /// Appends one `StatusLine` as JSON + newline.
+    fn append(&mut self, line: &StatusLine) {
+        use std::io::Write;
+        if let (Some(f), Ok(json)) = (self.0.as_mut(), serde_json::to_string(line)) {
+            let _ = writeln!(f, "{json}");
+        }
     }
 }
 
-fn append_status(line: &StatusLine) {
-    append_status_to(Path::new(STATUS_PATH), line);
+/// Reads the bot-written request without following a symlink - otherwise
+/// the bot could point it at any root-readable file and have its contents
+/// echoed back through the parse error.
+fn read_request(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut contents = String::new();
+    opts.open(path)?.read_to_string(&mut contents)?;
+    Ok(contents)
 }
 
 /// The `dispatchd-upgrade.service` (root oneshot) entry point. Reads the
@@ -494,29 +559,28 @@ fn append_status(line: &StatusLine) {
 /// `REQUEST_PATH` is deleted no matter how this returns.
 async fn run_from_request(_args: UpgradeArgs) -> Result<()> {
     let _guard = RequestGuard::new(PathBuf::from(REQUEST_PATH));
+    // Fresh status file for this run.
+    let mut status = StatusFile::create(Path::new(STATUS_PATH));
 
-    let raw = std::fs::read_to_string(REQUEST_PATH)
-        .with_context(|| format!("no upgrade request at {REQUEST_PATH}"))?;
+    let raw = read_request(Path::new(REQUEST_PATH))
+        .with_context(|| format!("no readable upgrade request at {REQUEST_PATH}"))?;
     let request: Request = match serde_json::from_str(&raw) {
         Ok(r) => r,
         Err(e) => {
-            append_status(&StatusLine::Error {
+            status.append(&StatusLine::Error {
                 message: format!("unreadable upgrade request: {e}"),
                 channel_id: String::new(),
             });
             anyhow::bail!("unreadable upgrade request: {e}");
         }
     };
-
-    // Fresh status file for this run.
-    let _ = std::fs::write(STATUS_PATH, b"");
     let chan = request.channel_id.clone();
 
-    let result = perform_from_request(&request).await;
+    let result = perform_from_request(&request, &mut status).await;
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
-            append_status(&StatusLine::Error {
+            status.append(&StatusLine::Error {
                 message: e.to_string(),
                 channel_id: chan,
             });
@@ -525,21 +589,21 @@ async fn run_from_request(_args: UpgradeArgs) -> Result<()> {
     }
 }
 
-async fn perform_from_request(request: &Request) -> Result<()> {
+async fn perform_from_request(request: &Request, status: &mut StatusFile) -> Result<()> {
     let current = current_version().to_string();
 
-    append_status(&StatusLine::Checking);
+    status.append(&StatusLine::Checking);
     let target = match &request.target_version {
         Some(v) => normalize_tag(v)?,
         None => fetch_latest_tag().await?,
     };
-    append_status(&StatusLine::Found {
+    status.append(&StatusLine::Found {
         current: current.clone(),
         latest: target.clone(),
     });
 
     if request.target_version.is_none() && !is_newer(&target, &current) {
-        append_status(&StatusLine::Done {
+        status.append(&StatusLine::Done {
             from: current.clone(),
             to: current.clone(),
             channel_id: request.channel_id.clone(),
@@ -555,21 +619,21 @@ async fn perform_from_request(request: &Request) -> Result<()> {
         .parent()
         .context("dispatchd's path has no parent directory")?;
 
-    append_status(&StatusLine::Downloading {
+    status.append(&StatusLine::Downloading {
         asset: asset_name(),
     });
     let mut staged = download_and_stage(&target, dir).await?;
-    append_status(&StatusLine::Verified);
+    status.append(&StatusLine::Verified);
     install_staged(staged.path(), &exe)?;
     staged.disarm();
-    append_status(&StatusLine::Swapped);
+    status.append(&StatusLine::Swapped);
 
-    append_status(&StatusLine::Restarting);
+    status.append(&StatusLine::Restarting);
     // Delete the request now, before the restart, so a crash mid-restart
     // can't leave a re-triggering request behind. The guard is a backstop.
     let _ = std::fs::remove_file(REQUEST_PATH);
 
-    append_status(&StatusLine::Done {
+    status.append(&StatusLine::Done {
         from: current,
         to: target.trim_start_matches('v').to_string(),
         channel_id: request.channel_id.clone(),
@@ -780,13 +844,85 @@ bbbb  dispatchd-aarch64-unknown-linux-musl.tar.gz
     }
 
     #[test]
-    fn append_status_writes_one_json_line_per_call() {
+    fn status_file_writes_one_json_line_per_call() {
         let dir = tempfile::tempdir().unwrap();
         let status = dir.path().join("upgrade.status");
-        append_status_to(&status, &StatusLine::Checking);
-        append_status_to(&status, &StatusLine::Verified);
-        let parsed = parse_status(&std::fs::read_to_string(&status).unwrap());
-        assert_eq!(parsed, vec![StatusLine::Checking, StatusLine::Verified]);
+        std::fs::write(&status, "stale\n").unwrap();
+        let mut f = StatusFile::create(&status);
+        f.append(&StatusLine::Checking);
+        f.append(&StatusLine::Verified);
+        let contents = std::fs::read_to_string(&status).unwrap();
+        assert!(
+            !contents.contains("stale"),
+            "a previous run's lines are gone"
+        );
+        assert_eq!(
+            parse_status(&contents),
+            vec![StatusLine::Checking, StatusLine::Verified]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_file_replaces_a_planted_symlink_without_touching_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("shadow");
+        std::fs::write(&target, "root:secret\n").unwrap();
+        let status = dir.path().join("upgrade.status");
+        std::os::unix::fs::symlink(&target, &status).unwrap();
+
+        let mut f = StatusFile::create(&status);
+        f.append(&StatusLine::Checking);
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "root:secret\n");
+        assert!(!std::fs::symlink_metadata(&status).unwrap().is_symlink());
+        assert_eq!(
+            parse_status(&std::fs::read_to_string(&status).unwrap()),
+            vec![StatusLine::Checking]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_request_refuses_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("secret");
+        std::fs::write(&target, "\"root-only\"").unwrap();
+        let req = dir.path().join("upgrade.request");
+        std::os::unix::fs::symlink(&target, &req).unwrap();
+        assert!(read_request(&req).is_err());
+
+        std::fs::remove_file(&req).unwrap();
+        std::fs::write(&req, "{}").unwrap();
+        assert_eq!(read_request(&req).unwrap(), "{}");
+    }
+
+    /// Signed with the real release key (`rsign sign`), so this also proves
+    /// the embedded `minisign.pub` parses and matches.
+    const FIXTURE_SUMS: &str = "abc123  dispatchd-x86_64-unknown-linux-musl.tar.gz\n";
+    const FIXTURE_SIG: &str = "untrusted comment: signature from rsign secret key
+RUQ1xk/AyFSk7tNJeTj1kkJIJuBvjKPmJ5Om4KgrO7JCJredHeYG/PgSQWMud0ZZFu1y2y58gyPwBnWhRJwsIb8oQv05tTdqWQ0=
+trusted comment: dispatchd test fixture
+cNiaWqoZVYYcOLUHxxLLHvYDUIPNM+UMjYo13b9nQ60U0KkF1B0/Ex6aIEC3LAIxrwGaYtrOiZ0EKKjBSOCjCQ==
+";
+
+    #[test]
+    fn release_signature_accepts_a_file_signed_by_the_release_key() {
+        assert!(verify_release_signature(
+            FIXTURE_SUMS.as_bytes(),
+            FIXTURE_SIG
+        ));
+    }
+
+    #[test]
+    fn release_signature_rejects_tampered_data_and_garbage() {
+        let tampered = FIXTURE_SUMS.replace("abc123", "evil00");
+        assert!(!verify_release_signature(tampered.as_bytes(), FIXTURE_SIG));
+        assert!(!verify_release_signature(
+            FIXTURE_SUMS.as_bytes(),
+            "not a signature"
+        ));
+        assert!(!verify_release_signature(FIXTURE_SUMS.as_bytes(), ""));
     }
 
     #[test]

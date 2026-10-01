@@ -92,23 +92,22 @@ pub fn validate() -> Result<usize> {
     Ok(load_and_validate()?.map_or(0, |file| file.members.len()))
 }
 
-/// Reads `members.toml` (if present) and upserts each row into `members`.
-/// Returns the number of rows upserted (0 if no file was found).
+/// Replaces the `members` table with `members.toml`'s roster, atomically.
+/// The file is the source of truth: a member removed from it (or the whole
+/// file removed) loses their row - and with it `is_lead`/`is_admin` - on
+/// the next start, rather than keeping stale privileges. Nothing references
+/// `members` by foreign key, and history queries `LEFT JOIN` it, so past
+/// entries survive (shown by raw ID). Returns the number of rows written.
 pub fn seed(conn: &Connection) -> Result<usize> {
-    let Some(file) = load_and_validate()? else {
-        return Ok(0);
-    };
+    let members = load_and_validate()?.map_or_else(Vec::new, |file| file.members);
 
-    for member in &file.members {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM members", [])?;
+    for member in &members {
         let is_lead = matches!(member.role.as_str(), "lead" | "viewer");
-        conn.execute(
+        tx.execute(
             "INSERT INTO members (discord_user_id, name, role, is_lead, is_admin)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(discord_user_id) DO UPDATE SET
-                 name = excluded.name,
-                 role = excluded.role,
-                 is_lead = excluded.is_lead,
-                 is_admin = excluded.is_admin",
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 member.discord_user_id,
                 member.name,
@@ -117,10 +116,24 @@ pub fn seed(conn: &Connection) -> Result<usize> {
                 member.is_admin
             ],
         )
-        .with_context(|| format!("failed to upsert member {:?}", member.discord_user_id))?;
+        .with_context(|| format!("failed to insert member {:?}", member.discord_user_id))?;
     }
+    tx.commit()?;
 
-    Ok(file.members.len())
+    Ok(members.len())
+}
+
+/// `true` when `discord_user_id` is on the roster at all - the gate for
+/// `/todo` and `/progress`, so only team members can write entries.
+pub fn is_member(conn: &Connection, discord_user_id: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM members WHERE discord_user_id = ?1",
+            [discord_user_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 /// `true` when the member has tech-lead privileges - role `lead` or
@@ -264,7 +277,46 @@ mod tests {
     }
 
     #[test]
-    fn no_file_present_seeds_nothing() {
+    fn reseed_removes_members_dropped_from_the_file() {
+        let conn = open_test_db();
+        seed_from(
+            &conn,
+            r#"
+            [[members]]
+            discord_user_id = "1"
+            name = "Alice"
+            role = "lead"
+            is_admin = true
+
+            [[members]]
+            discord_user_id = "2"
+            name = "Budi"
+            role = "senior"
+            "#,
+        )
+        .unwrap();
+        assert!(is_admin(&conn, "1").unwrap());
+
+        seed_from(
+            &conn,
+            r#"
+            [[members]]
+            discord_user_id = "2"
+            name = "Budi"
+            role = "senior"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(row_count(&conn), 1);
+        assert!(!is_admin(&conn, "1").unwrap());
+        assert!(!is_lead(&conn, "1").unwrap());
+        assert!(!is_member(&conn, "1").unwrap());
+        assert!(is_member(&conn, "2").unwrap());
+    }
+
+    #[test]
+    fn no_file_present_clears_the_roster() {
         let _guard = ENV_LOCK.lock().unwrap();
         // SAFETY: held under ENV_LOCK; both vars removed before returning.
         // No MEMBERS_PATH_OVERRIDE_ENV set (an override pointing at a
@@ -278,6 +330,7 @@ mod tests {
             env::set_var("XDG_CONFIG_HOME", empty_xdg.path());
         }
         let conn = crate::db::open(&tempfile::tempdir().unwrap().path().join("d.sqlite3")).unwrap();
+        seed_member(&conn, "1", "Stale");
         let count = seed(&conn).unwrap();
         unsafe {
             env::remove_var("XDG_CONFIG_HOME");
