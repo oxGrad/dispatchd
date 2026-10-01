@@ -30,7 +30,7 @@ pub fn command() -> CreateCommand {
             CreateCommandOption::new(
                 CommandOptionType::String,
                 "end",
-                "End date YYYY-MM-DD (default: today)",
+                "End date YYYY-MM-DD (default: today, or yesterday if start is omitted too)",
             )
             .required(false),
         )

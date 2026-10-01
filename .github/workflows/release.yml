@@ -98,6 +98,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Only for minisign.pub, to check the signature below against the key
+      # dispatchd actually embeds.
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -106,6 +110,23 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: sha256sum -- *.tar.gz > SHA256SUMS
+
+      # `dispatchd upgrade` refuses a SHA256SUMS that minisign.pub's key
+      # didn't sign (src/upgrade.rs), so fail the release rather than ship
+      # one nobody can upgrade to. The verify step catches a secret that
+      # doesn't match the committed public key.
+      - name: Sign checksums
+        working-directory: dist
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          test -n "$MINISIGN_SECRET_KEY" || { echo "the MINISIGN_SECRET_KEY secret is not set" >&2; exit 1; }
+          cargo install rsign2 --locked
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          rsign sign -W -s "$RUNNER_TEMP/minisign.key" -p ../minisign.pub -x SHA256SUMS.minisig SHA256SUMS
+          rm -f "$RUNNER_TEMP/minisign.key"
+          rsign verify -p ../minisign.pub -x SHA256SUMS.minisig SHA256SUMS
 
       - uses: softprops/action-gh-release@v3
         with:

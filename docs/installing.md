@@ -81,10 +81,14 @@ sudo dispatchd upgrade --version v0.4.0   # install a specific tag (pin / downgr
 
 `dispatchd upgrade` resolves the latest GitHub release, and if it's newer
 than the running binary, downloads the right prebuilt for this machine,
-verifies its SHA-256 against the release `SHA256SUMS`, swaps it in place,
+checks the release's `SHA256SUMS` is signed by the dispatchd release key
+(`SHA256SUMS.minisig`, verified against the `minisign.pub` built into
+the binary), verifies the download's SHA-256 against it, swaps it in place,
 and runs `systemctl restart dispatchd`. `--no-restart` skips the restart
 and prints the command instead; a restart that fails is reported, not
-fatal. `--version` installs any tag, including an older one to downgrade.
+fatal. `--version` installs any tag, including an older one to downgrade -
+except releases from before signing was added (v0.10.3 and older), which
+have no signature and are refused; use the installer for those.
 It needs root to write `/usr/local/bin/dispatchd` and to restart the
 service, hence `sudo`.
 

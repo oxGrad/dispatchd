@@ -38,7 +38,14 @@ a job-level `uses:`:
 - `.github/workflows/release.yml` (on a `v*` tag) runs the same
   `rust-verify-version` -> `rust-check` -> `rust-audit` gates, then a
   bespoke binary build (static musl for x86_64/aarch64/armv7 + macOS
-  arm64, `SHA256SUMS`, GitHub Release). `rust-build-binaries` (also now a
+  arm64, `SHA256SUMS` + `SHA256SUMS.minisig`, GitHub Release). The
+  signature uses the `MINISIGN_SECRET_KEY` Actions secret, whose public
+  half is the committed `minisign.pub` (embedded into the binary;
+  `dispatchd upgrade` refuses an unsigned or mis-signed release). The
+  secret key also lives at `~/.minisign/dispatchd.key` on the
+  maintainer's machine - rotating it means a new `minisign.pub`, and a
+  binary built with the old key can't verify releases signed with the new
+  one. `rust-build-binaries` (also now a
   composite action) is deliberately not used - it's glibc-only and drops
   armv7 (Raspberry Pi), and dispatchd is not a crates.io crate so
   `rust-publish-crates` is skipped too. See `docs/installing.md`.
@@ -101,8 +108,9 @@ dispatchd discord login   # (Linux, root) prompts for the bot token (hidden
                      # runs the encryption itself. See docs/discord-setup.md.
 dispatchd discord logout  # (Linux, root) removes /etc/dispatchd/discord_token.cred.
                      # Idempotent - a missing credential is not an error.
-dispatchd            # loads config, opens/migrates the DB, seeds members.toml
-                     # if present, prints a status block, then connects to
+dispatchd            # loads config, opens/migrates the DB, replaces the
+                     # members table with members.toml (no file = empty
+                     # roster - removed members lose access), prints a status block, then connects to
                      # Discord if configured (see below) - otherwise exits 0
                      # after the status block, which is the normal state
                      # during initial setup
@@ -122,7 +130,8 @@ dispatchd status     # reports the systemd side (version, unit
                      # pings Discord's API, reports round-trip latency).
 dispatchd upgrade    # resolves the latest GitHub release; if newer,
                      # downloads the matching prebuilt, verifies its
-                     # SHA-256 against the release SHA256SUMS, atomically
+                     # SHA256SUMS minisign signature (minisign.pub)
+                     # and SHA-256 against it, atomically
                      # swaps the binary, restarts dispatchd. Flags: --check
                      # (report current vs latest, do nothing), --no-restart
                      # (swap only, print the restart command), --version
@@ -227,7 +236,8 @@ src/
                  /team look for unfinished todos
   db/            SQLite connection + embedded migrations (0005 adds
                  members.is_admin, 0006 adds missed_submissions - never
-                 pruned by maintenance.rs, same as entries)
+                 pruned by maintenance.rs, same as entries; 0007 indexes
+                 entries by (date, discord_user_id) and todo_id)
   entries.rs     todo/update row DB logic, incl. entries.sow_ref - a
                  purely informational, unvalidated cross-reference into
                  an external scope-of-work doc (e.g. "M1D2"), todo-only.
@@ -242,7 +252,10 @@ src/
                  /team report ("Carried over" block) and /todo list.
                  short_date formats an origin date ("2026-08-27" ->
                  "Aug 27")
-  members.rs     roster seeding + is_lead/is_active_lead checks +
+  members.rs     roster seeding (seed replaces the whole table in one
+                 transaction - members.toml is the source of truth) +
+                 is_member (gates /todo + /progress in discord/mod.rs) +
+                 is_lead/is_active_lead checks +
                  all_member_ids + roster/name_of (used by /team remind's
                  member autocomplete). role (`lead | designer | senior |
                  medior | junior | viewer`) and is_admin (a separate
@@ -285,7 +298,12 @@ src/
                  todo left with no report against it, not a blanket
                  zero-updates day, and correctly silent for a member with
                  no todo at all, since that's already the 'todo' miss -
-                 called once daily by the ticker alongside day_summary)
+                 called once daily by the ticker alongside day_summary;
+                 writes the missed_recorded marker itself, in the same
+                 transaction) + backfill_missed (run once at ticker
+                 startup: records past unrecorded days within 14 days
+                 that had any entry - covers the bot being down at
+                 day_summary_time until after midnight)
                  + missed_detail/
                  format_missed_report_file (the report /missed renders
                  as `.md` file content, `None` when there's nothing
@@ -345,7 +363,11 @@ src/
                  re-arms. DISPATCHD_TARGET (baked by build.rs) picks the
                  release asset
   service.rs     `dispatchd service install` (systemd unit, Linux only,
-                 requires systemd >= 250 for LoadCredentialEncrypted=) and
+                 requires systemd >= 250 for LoadCredentialEncrypted=;
+                 refuses User=root and a binary/dir the service user could
+                 modify, since the root upgrade helper executes it; the bot
+                 + maintenance units get NoNewPrivileges/PrivateTmp/
+                 ProtectSystem=full) and
                  `dispatchd status`'s systemd-side checks. `install()` also
                  writes dispatchd-upgrade.service (root oneshot) +
                  dispatchd-upgrade.path (watches upgrade.request) and adds

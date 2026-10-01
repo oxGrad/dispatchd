@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
@@ -325,10 +326,18 @@ async fn edit(ctx: &SerenityContext, command: &CommandInteraction, content: impl
     }
 }
 
-/// Called once on `ready`. If the previous instance was upgraded via
-/// `/admin upgrade`, post a confirmation into the requesting channel and
-/// clear the status/request files so it fires exactly once.
+/// Called on `ready`, but only acts on the first one per process: `ready`
+/// also fires on gateway reconnects, and clearing the status file then
+/// would wipe an in-flight `/admin upgrade`'s progress. If the previous
+/// instance was upgraded via `/admin upgrade`, post a confirmation into the
+/// requesting channel and clear the status file so it fires exactly once.
+/// The request file is the root helper's to delete (its `RequestGuard`),
+/// not ours.
 pub async fn post_upgrade_confirmation(ctx: &SerenityContext) {
+    static RAN: AtomicBool = AtomicBool::new(false);
+    if RAN.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let Ok(contents) = std::fs::read_to_string(upgrade::STATUS_PATH) else {
         return;
     };
@@ -381,7 +390,6 @@ pub async fn post_upgrade_confirmation(ctx: &SerenityContext) {
     }
 
     let _ = std::fs::remove_file(upgrade::STATUS_PATH);
-    let _ = std::fs::remove_file(upgrade::REQUEST_PATH);
 }
 
 #[cfg(test)]

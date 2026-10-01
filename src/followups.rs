@@ -115,25 +115,81 @@ impl MissedDetail {
 /// day", and one that correctly excludes a member with no todo at all,
 /// since `members_missing_todo` already covers that case). A member
 /// hitting both gets a row of each kind, so `/missed` can report on
-/// either independently. `INSERT OR IGNORE` makes this idempotent - safe
-/// to call more than once for the same date - though the ticker only
-/// ever does so once, gated by its own `reminders_sent` marker (see
-/// `discord::ticker`). Unlike `followups_sent`/`reminders_sent`, nothing
-/// prunes this table - it's retained history, same as `entries`.
+/// either independently. Writes the day's `missed_recorded` marker in
+/// the same transaction, so a day is never half-recorded or recorded
+/// without its marker (which the ticker and `backfill_missed` check).
+/// `INSERT OR IGNORE` throughout makes this idempotent - safe to call more
+/// than once for the same date. Unlike `followups_sent`/`reminders_sent`,
+/// nothing prunes `missed_submissions` - it's retained history, same as
+/// `entries`.
 pub fn record_missed(conn: &Connection, date: &str) -> Result<()> {
-    for id in members_missing_todo(conn, date)? {
-        conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    for id in members_missing_todo(&tx, date)? {
+        tx.execute(
             "INSERT OR IGNORE INTO missed_submissions (date, discord_user_id, kind) VALUES (?1, ?2, 'todo')",
             params![date, id],
         )?;
     }
-    for id in members_missing_update(conn, date)? {
-        conn.execute(
+    for id in members_missing_update(&tx, date)? {
+        tx.execute(
             "INSERT OR IGNORE INTO missed_submissions (date, discord_user_id, kind) VALUES (?1, ?2, 'update')",
             params![date, id],
         )?;
     }
+    tx.execute(
+        "INSERT OR IGNORE INTO reminders_sent (date, type) VALUES (?1, 'missed_recorded')",
+        params![date],
+    )?;
+    tx.commit()?;
     Ok(())
+}
+
+/// How far back `backfill_missed` looks. Must stay well under
+/// `maintenance`'s 90-day `reminders_sent` retention, or a day whose
+/// `missed_recorded` marker was pruned would be recorded a second time.
+const MISSED_BACKFILL_DAYS: i64 = 14;
+
+/// Records the miss snapshot for any past day in the last
+/// `MISSED_BACKFILL_DAYS` the ticker never got to - the bot was down at
+/// `day_summary_time` and only came back after midnight, so without this
+/// `/missed` would silently report nobody missing anything that day. Only
+/// days with at least one entry count: a day nobody submitted anything is
+/// far more likely a holiday (or the bot, and with it the ritual, being
+/// off) than the whole team missing it, and recording it would blame
+/// everyone. Weekends are skipped unless `include_weekends`. Uses today's
+/// roster, not the roster as it was on that day. Returns the dates
+/// recorded.
+pub fn backfill_missed(
+    conn: &Connection,
+    today: &str,
+    include_weekends: bool,
+) -> Result<Vec<String>> {
+    use chrono::{Datelike, NaiveDate, Weekday};
+
+    let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d")?;
+    let since = (today_date - chrono::Duration::days(MISSED_BACKFILL_DAYS))
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT date FROM entries
+         WHERE date >= ?1 AND date < ?2
+           AND date NOT IN (SELECT date FROM reminders_sent WHERE type = 'missed_recorded')
+         ORDER BY date",
+    )?;
+    let dates = stmt
+        .query_map(params![since, today], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut recorded = Vec::new();
+    for date in dates {
+        let weekday = NaiveDate::parse_from_str(&date, "%Y-%m-%d")?.weekday();
+        if !include_weekends && matches!(weekday, Weekday::Sat | Weekday::Sun) {
+            continue;
+        }
+        record_missed(conn, &date)?;
+        recorded.push(date);
+    }
+    Ok(recorded)
 }
 
 /// The `/missed` report's underlying data: one `MissedDetail` per member
@@ -361,6 +417,48 @@ mod tests {
 
         let missing = members_with_no_activity(&conn, DATE).unwrap();
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn backfill_missed_records_only_unrecorded_past_working_days_with_activity() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Alice");
+        seed_member(&conn, "2", "Budi");
+        for date in [
+            "2026-09-10", // older than the backfill window
+            "2026-09-27", // Sunday
+            "2026-09-29", // Tuesday, never recorded - the one to backfill
+            "2026-09-30", // Wednesday, already recorded below
+            "2026-10-01", // today - the ticker's job, not backfill's
+        ] {
+            entries::insert_todo(&conn, "1", date, "a", None, None).unwrap();
+        }
+        // 2026-09-28 (Monday) has no entries at all - skipped as a likely holiday.
+        record_missed(&conn, "2026-09-30").unwrap();
+
+        let recorded = backfill_missed(&conn, "2026-10-01", false).unwrap();
+        assert_eq!(recorded, vec!["2026-09-29".to_string()]);
+        assert!(crate::reminders::already_sent(&conn, "2026-09-29", "missed_recorded").unwrap());
+        let budi_missed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM missed_submissions
+                 WHERE date = '2026-09-29' AND discord_user_id = '2' AND kind = 'todo'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(budi_missed, 1);
+
+        // Idempotent: nothing left to backfill. Weekends opt in.
+        assert!(
+            backfill_missed(&conn, "2026-10-01", false)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            backfill_missed(&conn, "2026-10-01", true).unwrap(),
+            vec!["2026-09-27".to_string()]
+        );
     }
 
     #[test]
