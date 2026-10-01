@@ -25,8 +25,8 @@ pub struct DayRecap {
 
 /// Resolves `/recap`'s `start`/`end` options into a validated `(start,
 /// end)` pair of `YYYY-MM-DD` strings - both omitted defaults to the last
-/// `DEFAULT_RECAP_DAYS` days ending today; either alone fills in from the
-/// other. Returns a user-facing error string rather than `anyhow::Error`:
+/// `DEFAULT_RECAP_DAYS` days ending yesterday (today is still in
+/// progress); either alone fills in from the other, `end` from today. Returns a user-facing error string rather than `anyhow::Error`:
 /// every failure here is bad caller input (unparsable date, inverted or
 /// oversized range), not an internal fault.
 pub fn resolve_range(
@@ -40,6 +40,7 @@ pub fn resolve_range(
     let end_date = match end {
         Some(e) => NaiveDate::parse_from_str(e, "%Y-%m-%d")
             .map_err(|_| format!("⚠️ Invalid end date {e:?} - use YYYY-MM-DD."))?,
+        None if start.is_none() => today_date - chrono::Duration::days(1),
         None => today_date,
     };
     let start_date = match start {
@@ -327,9 +328,9 @@ mod tests {
     // --- resolve_range ---
 
     #[test]
-    fn resolve_range_defaults_to_last_14_days_when_both_omitted() {
-        let got = resolve_range(None, None, "2026-09-14").unwrap();
-        assert_eq!(got, ("2026-09-01".to_string(), "2026-09-14".to_string()));
+    fn resolve_range_defaults_to_14_days_ending_yesterday_when_both_omitted() {
+        let got = resolve_range(None, None, "2026-10-01").unwrap();
+        assert_eq!(got, ("2026-09-17".to_string(), "2026-09-30".to_string()));
     }
 
     #[test]

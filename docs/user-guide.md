@@ -246,7 +246,9 @@ range - each row a todo (or an "(unplanned)" ad-hoc update) with its
 latest status, progress, and blocker - the same detail `/team report`
 shows for today, but across as many days back as you need. Both dates
 are optional: omitting `end` defaults to today, omitting `start` defaults
-to 14 days before `end`. Days with no activity at all are left out rather
+to 14 days before `end`, and omitting both gives the 14 days ending
+yesterday (run on Oct 1, that's Sep 17 to Sep 30) - today is left out
+since it's still in progress. Days with no activity at all are left out rather
 than shown empty. It's an attachment rather than chat text so a long
 range's table isn't squeezed into (or split across) Discord's
 2000-character message limit, and so the columns actually line up.
