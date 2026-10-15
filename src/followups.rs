@@ -199,7 +199,7 @@ pub fn backfill_missed(
 /// count - this order is about finding a specific member's section
 /// quickly).
 /// `start`/`end` are trusted to already be validated `YYYY-MM-DD` strings
-/// (see `recap::resolve_range`, reused by the command).
+/// (see `recap::resolve_day_or_range`, reused by the command).
 pub fn missed_detail(conn: &Connection, start: &str, end: &str) -> Result<Vec<MissedDetail>> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(m.name, ms.discord_user_id) AS member, ms.date, ms.kind

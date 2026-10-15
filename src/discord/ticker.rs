@@ -17,7 +17,7 @@ fn is_due(now: NaiveTime, trigger: NaiveTime) -> bool {
 }
 
 /// Pure weekday check - testable without a live clock or Discord types.
-fn is_weekend(day: Weekday) -> bool {
+pub(super) fn is_weekend(day: Weekday) -> bool {
     matches!(day, Weekday::Sat | Weekday::Sun)
 }
 
