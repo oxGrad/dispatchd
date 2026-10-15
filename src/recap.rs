@@ -23,30 +23,57 @@ pub struct DayRecap {
     pub rows: Vec<RecapRow>,
 }
 
-/// Resolves `/recap`'s `start`/`end` options into a validated `(start,
-/// end)` pair of `YYYY-MM-DD` strings - both omitted defaults to the last
-/// `DEFAULT_RECAP_DAYS` days ending yesterday (today is still in
-/// progress); either alone fills in from the other, `end` from today. Returns a user-facing error string rather than `anyhow::Error`:
-/// every failure here is bad caller input (unparsable date, inverted or
-/// oversized range), not an internal fault.
-pub fn resolve_range(
+fn parse_today(today: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(today, "%Y-%m-%d")
+        .map_err(|_| "⚠️ Internal error resolving today's date.".to_string())
+}
+
+fn parse_option_date(value: &str, which: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| format!("⚠️ Invalid {which} date {value:?} - use YYYY-MM-DD."))
+}
+
+fn format_range(start: NaiveDate, end: NaiveDate) -> (String, String) {
+    (
+        start.format("%Y-%m-%d").to_string(),
+        end.format("%Y-%m-%d").to_string(),
+    )
+}
+
+/// `/recap-biweekly`'s fixed range: the `DEFAULT_RECAP_DAYS` days ending
+/// yesterday (today is still in progress) - run on Oct 1, that's Sep 17 to
+/// Sep 30.
+pub fn biweekly_range(today: &str) -> Result<(String, String), String> {
+    let end = parse_today(today)? - chrono::Duration::days(1);
+    let start = end - chrono::Duration::days(DEFAULT_RECAP_DAYS - 1);
+    Ok(format_range(start, end))
+}
+
+/// Resolves the `start`/`end` options shared by `/recap` and `/missed`:
+/// neither given = today, exactly one given = that single day, both given
+/// = the inclusive range (at most `MAX_RECAP_DAYS`). Returns a user-facing
+/// error string rather than `anyhow::Error`: every failure here is bad
+/// caller input (unparsable date, inverted or oversized range), not an
+/// internal fault.
+pub fn resolve_day_or_range(
     start: Option<&str>,
     end: Option<&str>,
     today: &str,
 ) -> Result<(String, String), String> {
-    let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d")
-        .map_err(|_| "⚠️ Internal error resolving today's date.".to_string())?;
-
-    let end_date = match end {
-        Some(e) => NaiveDate::parse_from_str(e, "%Y-%m-%d")
-            .map_err(|_| format!("⚠️ Invalid end date {e:?} - use YYYY-MM-DD."))?,
-        None if start.is_none() => today_date - chrono::Duration::days(1),
-        None => today_date,
-    };
-    let start_date = match start {
-        Some(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d")
-            .map_err(|_| format!("⚠️ Invalid start date {s:?} - use YYYY-MM-DD."))?,
-        None => end_date - chrono::Duration::days(DEFAULT_RECAP_DAYS - 1),
+    let (start_date, end_date) = match (start, end) {
+        (None, None) => {
+            let today = parse_today(today)?;
+            (today, today)
+        }
+        (Some(s), None) => {
+            let day = parse_option_date(s, "start")?;
+            (day, day)
+        }
+        (None, Some(e)) => {
+            let day = parse_option_date(e, "end")?;
+            (day, day)
+        }
+        (Some(s), Some(e)) => (parse_option_date(s, "start")?, parse_option_date(e, "end")?),
     };
 
     if start_date > end_date {
@@ -55,20 +82,17 @@ pub fn resolve_range(
     let span_days = (end_date - start_date).num_days() + 1;
     if span_days > MAX_RECAP_DAYS {
         return Err(format!(
-            "⚠️ That's {span_days} days - /recap covers at most {MAX_RECAP_DAYS}. Pick a narrower range."
+            "⚠️ That's {span_days} days - a range covers at most {MAX_RECAP_DAYS}. Pick a narrower range."
         ));
     }
 
-    Ok((
-        start_date.format("%Y-%m-%d").to_string(),
-        end_date.format("%Y-%m-%d").to_string(),
-    ))
+    Ok(format_range(start_date, end_date))
 }
 
 /// One `DayRecap` per calendar day in `[start, end]` (inclusive) that has
 /// at least one entry - empty days are omitted rather than rendered blank.
 /// `start`/`end` are trusted to already be validated `YYYY-MM-DD` strings
-/// (see `resolve_range`).
+/// (see `resolve_day_or_range` / `biweekly_range`).
 pub fn recap_range(conn: &Connection, start: &str, end: &str) -> Result<Vec<DayRecap>> {
     let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d").context("invalid start date")?;
     let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d").context("invalid end date")?;
@@ -325,57 +349,80 @@ mod tests {
         .unwrap();
     }
 
-    // --- resolve_range ---
+    // --- biweekly_range ---
 
     #[test]
-    fn resolve_range_defaults_to_14_days_ending_yesterday_when_both_omitted() {
-        let got = resolve_range(None, None, "2026-10-01").unwrap();
+    fn biweekly_range_is_the_14_days_ending_yesterday() {
+        let got = biweekly_range("2026-10-01").unwrap();
         assert_eq!(got, ("2026-09-17".to_string(), "2026-09-30".to_string()));
     }
 
+    // --- resolve_day_or_range ---
+
     #[test]
-    fn resolve_range_defaults_start_when_only_end_given() {
-        let got = resolve_range(None, Some("2026-09-05"), "2026-09-14").unwrap();
-        assert_eq!(got, ("2026-08-23".to_string(), "2026-09-05".to_string()));
+    fn resolve_day_or_range_defaults_to_today_when_both_omitted() {
+        let got = resolve_day_or_range(None, None, "2026-10-01").unwrap();
+        assert_eq!(got, ("2026-10-01".to_string(), "2026-10-01".to_string()));
     }
 
     #[test]
-    fn resolve_range_defaults_end_to_today_when_only_start_given() {
-        let got = resolve_range(Some("2026-09-01"), None, "2026-09-14").unwrap();
-        assert_eq!(got, ("2026-09-01".to_string(), "2026-09-14".to_string()));
+    fn resolve_day_or_range_treats_start_alone_as_that_single_day() {
+        let got = resolve_day_or_range(Some("2026-09-01"), None, "2026-09-14").unwrap();
+        assert_eq!(got, ("2026-09-01".to_string(), "2026-09-01".to_string()));
     }
 
     #[test]
-    fn resolve_range_accepts_an_explicit_range() {
-        let got = resolve_range(Some("2026-08-01"), Some("2026-08-10"), "2026-09-14").unwrap();
+    fn resolve_day_or_range_treats_end_alone_as_that_single_day() {
+        let got = resolve_day_or_range(None, Some("2026-09-05"), "2026-09-14").unwrap();
+        assert_eq!(got, ("2026-09-05".to_string(), "2026-09-05".to_string()));
+    }
+
+    #[test]
+    fn resolve_day_or_range_accepts_an_explicit_range() {
+        let got =
+            resolve_day_or_range(Some("2026-08-01"), Some("2026-08-10"), "2026-09-14").unwrap();
         assert_eq!(got, ("2026-08-01".to_string(), "2026-08-10".to_string()));
     }
 
     #[test]
-    fn resolve_range_rejects_start_after_end() {
-        let err = resolve_range(Some("2026-09-10"), Some("2026-09-01"), "2026-09-14").unwrap_err();
+    fn resolve_day_or_range_allows_a_future_single_day() {
+        // No "not in the future" rule - an empty day just renders as "no
+        // activity", same as any other quiet day.
+        let got = resolve_day_or_range(Some("2026-12-01"), None, "2026-09-14").unwrap();
+        assert_eq!(got, ("2026-12-01".to_string(), "2026-12-01".to_string()));
+    }
+
+    #[test]
+    fn resolve_day_or_range_rejects_start_after_end() {
+        let err =
+            resolve_day_or_range(Some("2026-09-10"), Some("2026-09-01"), "2026-09-14").unwrap_err();
         assert!(err.contains("start must be on or before end"), "{err}");
     }
 
     #[test]
-    fn resolve_range_rejects_invalid_date_format() {
-        let err = resolve_range(Some("not-a-date"), None, "2026-09-14").unwrap_err();
+    fn resolve_day_or_range_rejects_invalid_date_format() {
+        let err = resolve_day_or_range(Some("not-a-date"), None, "2026-09-14").unwrap_err();
         assert!(err.contains("Invalid start date"), "{err}");
 
-        let err = resolve_range(None, Some("2026-13-40"), "2026-09-14").unwrap_err();
+        let err = resolve_day_or_range(None, Some("2026-13-40"), "2026-09-14").unwrap_err();
+        assert!(err.contains("Invalid end date"), "{err}");
+
+        let err = resolve_day_or_range(Some("2026-09-01"), Some("nope"), "2026-09-14").unwrap_err();
         assert!(err.contains("Invalid end date"), "{err}");
     }
 
     #[test]
-    fn resolve_range_rejects_a_span_over_the_max() {
-        let err = resolve_range(Some("2026-01-01"), Some("2026-12-31"), "2026-09-14").unwrap_err();
+    fn resolve_day_or_range_rejects_a_span_over_the_max() {
+        let err =
+            resolve_day_or_range(Some("2026-01-01"), Some("2026-12-31"), "2026-09-14").unwrap_err();
         assert!(err.contains("60"), "{err}");
     }
 
     #[test]
-    fn resolve_range_accepts_a_span_exactly_at_the_max() {
+    fn resolve_day_or_range_accepts_a_span_exactly_at_the_max() {
         // 60 days inclusive: 2026-07-01 .. 2026-08-29
-        let got = resolve_range(Some("2026-07-01"), Some("2026-08-29"), "2026-09-14").unwrap();
+        let got =
+            resolve_day_or_range(Some("2026-07-01"), Some("2026-08-29"), "2026-09-14").unwrap();
         assert_eq!(got, ("2026-07-01".to_string(), "2026-08-29".to_string()));
     }
 

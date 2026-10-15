@@ -238,18 +238,27 @@ tells you it's already skipped. Needs today's thread to exist. Same
 `role = "lead"`-only gate as `/team remind` - a `viewer` can't cancel the
 meeting.
 
-## `/recap` - tech lead only
+## `/recap` and `/recap-biweekly` - tech lead only
 
 `/recap start:<date> end:<date>` replies with a short message and a
 `.md` file attached, containing one column-aligned table per day in the
 range - each row a todo (or an "(unplanned)" ad-hoc update) with its
 latest status, progress, and blocker - the same detail `/team report`
 shows for today, but across as many days back as you need. Both dates
-are optional: omitting `end` defaults to today, omitting `start` defaults
-to 14 days before `end`, and omitting both gives the 14 days ending
+are optional:
+
+| `start` | `end` | Covers |
+|---|---|---|
+| — | — | today |
+| set | — | just that day |
+| — | set | just that day |
+| set | set | `start` to `end`, inclusive (at most 60 days) |
+
+`/recap-biweekly` takes no options and covers the 14 days ending
 yesterday (run on Oct 1, that's Sep 17 to Sep 30) - today is left out
-since it's still in progress. Days with no activity at all are left out rather
-than shown empty. It's an attachment rather than chat text so a long
+since it's still in progress. That's the one to run for the biweekly
+recap. Days with no activity at all are left out rather than shown
+empty. It's an attachment rather than chat text so a long
 range's table isn't squeezed into (or split across) Discord's
 2000-character message limit, and so the columns actually line up.
 
@@ -263,10 +272,12 @@ just an entirely quiet day - if you had nothing planned, that's a missed
 `/recap`, the reply is a short message with a `.md` file attached: a
 section per member listing the exact dates they missed each one, then a
 column-aligned summary table ranking everyone by total missed days.
-Same date handling as `/recap`. This reads from a daily snapshot the bot
-takes at `day_summary_time` (see "The daily ritual" above), not a live
-query, so a day only shows up here once that snapshot has run - don't
-expect today's entry to appear before then. Members with a clean record
+Same date handling as `/recap` (no dates = today, one date = just that
+day, both = the range); there's no biweekly shortcut, pass both dates for
+a two-week view. This reads from a daily snapshot the bot takes at
+`day_summary_time` (see "The daily ritual" above), not a live query, so a
+day only shows up here once that snapshot has run - if your range
+includes today and the snapshot hasn't run yet, the reply says so. Members with a clean record
 for the whole range aren't listed at all, and if nobody missed anything
 you just get a plain "nothing missed" message with no attachment.
 

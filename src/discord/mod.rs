@@ -10,6 +10,7 @@ mod todo;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use chrono::NaiveTime;
 use chrono_tz::Tz;
 use rusqlite::Connection;
 use serenity::all::{
@@ -28,6 +29,8 @@ pub struct Handler {
     db: Arc<Mutex<Connection>>,
     timezone: Tz,
     carryover_lookback_days: u32,
+    day_summary_time: NaiveTime,
+    run_on_weekends: bool,
 }
 
 #[async_trait]
@@ -42,6 +45,7 @@ impl EventHandler for Handler {
             team::command(),
             admin::command(),
             recap::command(),
+            recap::biweekly_command(),
             missed::command(),
         ];
         if let Err(e) = self.guild_id.set_commands(&ctx.http, commands).await {
@@ -154,7 +158,20 @@ impl EventHandler for Handler {
                     _ => {}
                 },
                 "recap" => recap::handle(&ctx, &command, &self.db, &self.timezone).await,
-                "missed" => missed::handle(&ctx, &command, &self.db, &self.timezone).await,
+                "recap-biweekly" => {
+                    recap::handle_biweekly(&ctx, &command, &self.db, &self.timezone).await
+                }
+                "missed" => {
+                    missed::handle(
+                        &ctx,
+                        &command,
+                        &self.db,
+                        &self.timezone,
+                        self.day_summary_time,
+                        self.run_on_weekends,
+                    )
+                    .await
+                }
                 _ => {}
             },
             Interaction::Autocomplete(autocomplete) => match autocomplete.data.name.as_str() {
@@ -278,6 +295,8 @@ pub async fn run(
             db: db.clone(),
             timezone: config.timezone,
             carryover_lookback_days: config.carryover_lookback_days,
+            day_summary_time: config.day_summary_time,
+            run_on_weekends: config.run_on_weekends,
         })
         .await
         .context("failed to build Discord client")?;
