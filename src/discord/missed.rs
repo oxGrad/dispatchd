@@ -12,7 +12,7 @@ use serenity::all::{
 use crate::{entries, followups, members, recap, reminders};
 
 use super::get_option_string;
-use super::recap::{range_label, range_phrase};
+use super::recap::{attachment_name, range_label, range_phrase};
 
 pub fn command() -> CreateCommand {
     CreateCommand::new("missed")
@@ -108,7 +108,7 @@ pub async fn handle(
                         "📉 **Missed submissions ({})** - see attached.",
                         range_label(&start, &end)
                     ),
-                    Some((file, format!("missed-{start}_{end}.md"))),
+                    Some((file, attachment_name("missed", &start, &end))),
                 ),
                 None => (
                     format!("✅ No missed submissions {}.", range_phrase(&start, &end)),

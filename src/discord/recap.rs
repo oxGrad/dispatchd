@@ -109,7 +109,7 @@ async fn respond(
                     "📅 **Recap ({})** - see attached.",
                     range_label(&start, &end)
                 ),
-                Some((file, format!("recap-{start}_{end}.md"))),
+                Some((file, attachment_name("recap", &start, &end))),
             ),
             None => (format!("No activity {}.", range_phrase(&start, &end)), None),
         },
@@ -141,6 +141,16 @@ pub(super) fn range_label(start: &str, end: &str) -> String {
     }
 }
 
+/// "recap-2026-10-01.md" for a single day, "recap-2026-10-01_2026-10-14.md"
+/// for a range - same single-day collapse as `range_label`.
+pub(super) fn attachment_name(prefix: &str, start: &str, end: &str) -> String {
+    if start == end {
+        format!("{prefix}-{start}.md")
+    } else {
+        format!("{prefix}-{start}_{end}.md")
+    }
+}
+
 /// "on 2026-10-01" / "between 2026-10-01 and 2026-10-14", for the
 /// empty-result replies.
 pub(super) fn range_phrase(start: &str, end: &str) -> String {
@@ -161,6 +171,18 @@ mod tests {
         assert_eq!(
             range_label("2026-10-01", "2026-10-14"),
             "2026-10-01 to 2026-10-14"
+        );
+    }
+
+    #[test]
+    fn attachment_name_collapses_a_single_day() {
+        assert_eq!(
+            attachment_name("recap", "2026-10-01", "2026-10-01"),
+            "recap-2026-10-01.md"
+        );
+        assert_eq!(
+            attachment_name("missed", "2026-10-01", "2026-10-14"),
+            "missed-2026-10-01_2026-10-14.md"
         );
     }
 

@@ -504,7 +504,8 @@ src/
                     short header (range_label / range_phrase collapse a
                     single day to just the date; "No activity on/between
                     ..." when empty) plus, when there's anything to show, a
-                    `recap-<start>_<end>.md` attachment
+                    `recap-<start>_<end>.md` attachment (`recap-<date>.md`
+                    for a single day - attachment_name, shared with /missed)
                     (recap::format_recap_file - one column-aligned day
                     table per day, recap::recap_range) - no chunking, an
                     attachment isn't bound by Discord's 2000-char cap
