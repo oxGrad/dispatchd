@@ -343,8 +343,10 @@ src/
                  count; format_missed_report_file renders that detail
                  first, then a summary table (status::render_aligned_table)
                  separately ranked by total missed days, most first)
-  recap.rs       resolve_range (shared `/recap`+`/missed` start/end
-                 validation, defaults/caps a range) + recap_range/day_rows
+  recap.rs       resolve_day_or_range (shared `/recap`+`/missed` start/end
+                 validation: none = today, one = that day, both = range,
+                 capped at 60 days) + biweekly_range (`/recap-biweekly`'s
+                 fixed 14 days ending yesterday) + recap_range/day_rows
                  (per-day todo+latest-update rows, bucketed
                  blocked/no-report/in-progress/done, plus ad-hoc updates
                  as "(unplanned)" rows) + format_day_table_file (one
@@ -541,11 +543,16 @@ src/
                     thread existing at all): maybe_record_missed calls
                     followups::record_missed to persist the day's misses
                     into missed_submissions, feeding /missed
-    recap.rs       /recap start:<date> end:<date> - tech-lead-only,
-                    multi-day recap. Same reply shape as /missed: a short
-                    header (or "No activity between ..." when the range is
-                    empty) plus, when there's anything to show, a
-                    `recap-<start>_<end>.md` attachment
+    recap.rs       /recap start:<date> end:<date> (none = today, one =
+                    that day, both = range - recap::resolve_day_or_range)
+                    and /recap-biweekly (no options, recap::biweekly_range
+                    - what a bare /recap meant before) - tech-lead-only,
+                    both share `respond`. Same reply shape as /missed: a
+                    short header (range_label / range_phrase collapse a
+                    single day to just the date; "No activity on/between
+                    ..." when empty) plus, when there's anything to show, a
+                    `recap-<start>_<end>.md` attachment (`recap-<date>.md`
+                    for a single day - attachment_name, shared with /missed)
                     (recap::format_recap_file - one column-aligned day
                     table per day, recap::recap_range) - no chunking, an
                     attachment isn't bound by Discord's 2000-char cap
@@ -556,6 +563,10 @@ src/
                     a ranked summary table after, as a `missed-<start>_
                     <end>.md` file attachment (same short-header-plus-file
                     reply shape as /recap, no chunking needed); same
-                    date-range handling as /recap (recap::resolve_range,
-                    reused directly)
+                    date handling as /recap (recap::resolve_day_or_range,
+                    reused directly). When the range includes today and
+                    today's snapshot hasn't run yet (no missed_recorded
+                    marker, on a day the ritual runs), appends a
+                    pending_today_note naming day_summary_time instead of
+                    letting today read as clean
 ```
