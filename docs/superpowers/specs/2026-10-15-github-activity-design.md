@@ -193,8 +193,17 @@ per day, nothing else:
 
 #### After
 
-Same Discord message. The attachment gains a stakeholder-facing summary
-on top; the per-day log stays underneath as the detail/appendix.
+Same Discord message. The attachment becomes a **stakeholder-facing,
+person-free** report: deliverable progress only, no names anywhere. Who
+did what is the lead's business, covered by `/team github`, `/team
+report` and the daily summaries in the standup threads.
+
+The per-day, per-person tables that make up today's whole `/recap` move
+behind a new opt-in flag, so the default file is safe to forward as-is:
+
+```
+/recap [start:<date>] [end:<date>] [daily_log:<true|false>]   # daily_log defaults to false
+```
 
 ```
 # Recap 2026-10-01 → 2026-10-14
@@ -210,37 +219,25 @@ on top; the per-day log stays underneath as the detail/appendix.
 
 ### D.P.1.2 — Payment gateway integration (5/7 closed)
 
-| Sub-issue                       | State          | PRs                          | People     | Last activity            |
-|---------------------------------|----------------|------------------------------|------------|--------------------------|
-| api#201 Stripe webhook handler  | ✅ closed       | api#210 merged               | Budi       | Oct 6 closed             |
-| api#202 Payment intent API      | ✅ closed       | api#211 merged, api#214 merged | Budi, Sari | Oct 8 closed           |
-| api#205 Refund flow             | ⛔ blocked      | api#219 open                 | Sari       | Oct 14 "waiting on vendor" |
-| api#206 Webhook retries         | ⏳ in progress  | api#221 draft                | Sari       | Oct 14 PR updated        |
-| api#207 Invoice PDF             | ⬜ not started  | —                            | —          | —                        |
-| … (closed before this period: api#198, api#199)                                                                   |
+| Sub-issue                      | State          | PRs                            | Last activity              |
+|--------------------------------|----------------|--------------------------------|----------------------------|
+| api#205 Refund flow            | ⛔ blocked      | api#219 open                   | Oct 14 "waiting on vendor" |
+| api#206 Webhook retries        | ⏳ in progress  | api#221 draft                  | Oct 14 PR updated          |
+| api#207 Invoice PDF            | ⬜ not started  | —                              | —                          |
+| api#201 Stripe webhook handler | ✅ closed       | api#210 merged                 | Oct 6 closed               |
+| api#202 Payment intent API     | ✅ closed       | api#211 merged, api#214 merged | Oct 8 closed               |
+
+Closed before this period: api#198, api#199
 
 ### D.P.1.3 — Admin dashboard (2/6 closed)
 ...
 
-## Team
-
-| Member | Todos done / planned | PRs merged | Reviews | Issues closed |
-|--------|----------------------|------------|---------|---------------|
-| Andi   | 7/9                  | —          | —       | —             |
-| Budi   | 12/14                | 7          | 9       | 4             |
-| Rina   | 9/10                 | 5          | 11      | 2             |
-| Sari   | 10/13                | 4          | 6       | 1             |
-
-## Daily log
-
-### 2026-10-01
-
-(same "Standup" / "GitHub work not on a todo" / "Code reviews" tables
-as the daily summary, headings shifted one level down)
-
-### 2026-10-02
-...
 ```
+
+With `daily_log:true`, a `## Daily log` section is appended: one
+`### <date>` per day with the same "Standup" / "GitHub work not on a
+todo" / "Code reviews" tables as the daily summary (names included).
+That's the lead's own working copy, not the one to forward.
 
 How each section is computed:
 
@@ -265,19 +262,18 @@ How each section is computed:
   - *State* = issue closed → `✅ closed`; else the latest manual
     `/progress` status on a todo linked to it (so `⛔ blocked` surfaces
     here); else any open PR → `⏳ in progress`; else `⬜ not started`.
-  - Sorted by the same bucket order as the day tables (blocked first).
-    Sub-issues closed before the range collapse into one trailing line.
-- **Team table.** Plain counts for the range, sorted by name. It's
-  context for the lead, not a ranking (see open question 1). A member
-  without `github_user` shows `—`, not `0`. Same counting rules and code
-  as `/team github` below (`github::store::member_activity`), so the two
-  never disagree.
-- **Daily log.** Exactly the daily summary's tables per day, for the
-  per-day appendix. Empty days are still skipped, as today.
+  - Sorted by the same bucket order as the day tables (blocked first,
+    closed last). Sub-issues closed before the range collapse into one
+    trailing line.
+  - No assignee/author/reviewer column, by design.
+- **Daily log** (`daily_log:true` only). Exactly the daily summary's
+  tables per day. Empty days are still skipped, as today.
 
-With `[github]` unset, `/recap` and the day summary render **exactly as
-today** (no SOW column either; that addition ships with the GitHub
-column in phase 3, so a non-GitHub install sees no change at all).
+With `[github]` unset, the day summary renders **exactly as today** (no
+SOW column either; that addition ships with the GitHub column in phase
+3). `/recap` without GitHub has no sub-issue data to build deliverables
+from, so it keeps today's output (the per-day tables) regardless of
+`daily_log`. A non-GitHub install sees no change at all.
 
 ### New command: `/team github`
 
@@ -291,12 +287,19 @@ The day-summary headline (`GitHub: 3 PRs merged · 1 sub-issue closed
 - Part of the `/team` group, so the same gate as `/team status` /
   `report`: `MANAGE_GUILD` plus the bot-side `members::is_lead` check
   (`lead` or `viewer`). Ephemeral reply, like `/team report`.
-- **Range:** both omitted → **today**. One date → that day (`start`
-  alone = `start..today`, `end` alone = just `end`). Max span 60 days.
-  Same validation and error messages as `recap::resolve_range`, but
-  with today as the default rather than "14 days ending yesterday": this
-  is a "what's happening now" check, while `/recap` is the look-back.
-  Implemented as a `default` argument on `resolve_range`.
+- **Range:**
+
+  | `start` | `end` | Covers |
+  |---|---|---|
+  | — | — | today |
+  | set | — | **that day only** |
+  | — | set | that day only |
+  | set | set | `start..end` inclusive, max 60 days |
+
+  This differs from `/recap` (where `start` alone runs to today) on
+  purpose: `/team github` is a "what happened on day X" check, `/recap`
+  is a look-back. A separate small resolver, sharing `resolve_range`'s
+  date parsing, ordering and max-span checks and error messages.
 - Plain chat message, not a file (six short lines fit easily under
   2000 chars; it's chunked via `status::split_into_messages` if a bigger
   roster ever overflows).
@@ -335,12 +338,17 @@ Line rules:
   in range shows `— no GitHub activity`; a member without `github_user`
   shows `— no GitHub account linked`. Both are stated plainly, not
   flagged or highlighted.
-- Attribution:
-  - **PR merged / opened** → the PR's author (opened = created in range
-    and still open at the end of it).
+- Attribution: credit goes to **whoever did the work, never whoever
+  clicked the button**. Who merged a PR or closed an issue isn't stored
+  or shown at all; merging someone else's PR is a review-like act and
+  is already credited via their review.
+  - **PR merged / opened** → the PR's author, even when someone else
+    merged it (opened = created in range and still open at the end of
+    it).
   - **Sub-issue closed** (closed as completed, in range) → the author(s)
-    of the merged PR(s) linked to it. If it was closed with no linked PR,
-    its assignees. The SOW ref in parentheses is the parent's.
+    of the merged PR(s) linked to it, not whoever closed it. If it was
+    closed with no linked PR, its assignees. The SOW ref in parentheses
+    is the parent's.
   - **Issue opened** → the issue's author.
   - **Review** → the reviewer; counts distinct PRs reviewed, not review
     submissions (three "comment" rounds on one PR = 1).
@@ -563,9 +571,10 @@ Following the existing "DB logic has no serenity types" split:
 | `src/github/client.rs` | reqwest calls (the only untested-by-unit I/O, same as `upgrade.rs`'s) |
 | `src/github/store.rs` | upserts + report queries (tempfile DB tests) |
 | `src/github_login.rs` | `dispatchd github login/logout`, mirrors `discord_login.rs` (Linux-only `run`, non-Linux stub) |
-| `src/recap.rs` | `RecapRow` gains `sow_ref` + `github: Vec<GithubRef>`; new `DeliverableSummary`, `MemberTotals`; `format_*` render the new sections |
+| `src/recap.rs` | `RecapRow` gains `sow_ref` + `github: Vec<GithubRef>`; new `DeliverableSummary` (person-free); `format_recap_file` takes `daily_log: bool` |
+| `src/discord/recap.rs` | new optional `daily_log` boolean option |
 | `src/discord/ticker.rs` | sync step + headline line in `day_summary_content` |
-| `src/discord/team.rs` | `github` subcommand: option parsing + reply; formatting lives in a pure `format_member_activity` next to the query |
+| `src/discord/team.rs` | `github` subcommand: option parsing + reply; counting in `github::store::member_activity`, formatting in a pure `format_member_activity` |
 | `src/discord/todo.rs`, `progress.rs` | phase 4 autocomplete |
 
 ## Phase 4–5 details (input side)
@@ -584,7 +593,7 @@ Following the existing "DB logic has no serenity types" split:
 - **Auto-done (phase 5):** the `✅ done (GitHub)` rule from the report
   section, plus: such a todo no longer counts as "still open" for
   carry-over, and doesn't trigger the afternoon update nag. See open
-  question 3 for `/missed`.
+  question 2 for `/missed`.
 
 ## Testing
 
@@ -620,18 +629,14 @@ CLAUDE.md layout entries as modules land.
 
 ## Open questions
 
-1. **Team table in `/recap`.** Now that `/team github` gives the same
-   per-person counts on demand for any range, is the table still worth
-   having in the recap file too? Proposed: keep it. The recap is the
-   one artifact you hand over, and it's the same data.
-2. **SOW label naming.** A label literally named `D.P.1.2`, or a prefix
+1. **SOW label naming.** A label literally named `D.P.1.2`, or a prefix
    like `sow:D.P.1.2`? The plain name is assumed above; a prefix avoids
    clashes with unrelated labels.
-3. **Auto-done vs `/missed`.** If a merged PR auto-completes a todo and
+2. **Auto-done vs `/missed`.** If a merged PR auto-completes a todo and
    the member files no `/progress` at all that day, should that still
    record a missed `update` in `missed_submissions`? Proposed: no, the
    work is evidently reported. The no-activity-at-all nag is unaffected
    either way (a todo was still submitted).
-4. **Repo scope.** All org repos, or a subset (e.g. exclude infra/docs
+3. **Repo scope.** All org repos, or a subset (e.g. exclude infra/docs
    repos from "not on a todo")? Proposed: whatever the App installation
    covers; scope it at install time rather than in config.
