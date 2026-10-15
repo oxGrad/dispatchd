@@ -1,7 +1,7 @@
 # GitHub activity in the standup — design
 
 **Date:** 2026-10-15
-**Status:** Draft, awaiting review
+**Status:** Draft, open questions resolved, awaiting final review
 
 ## Summary
 
@@ -63,9 +63,12 @@ every report renders exactly as today.
 | Member mapping | `github_user` (GitHub username) in `members.toml`, optional per member |
 | Auth | GitHub App, read-only, installed on the org |
 | PR ↔ issue link | Sidebar "Development" link (GraphQL `closingIssuesReferences`) |
-| SOW ref source | Parent issue **label** first, **title** as fallback |
+| SOW ref source | Parent issue **label** `sow:D.P.a.b` first, **title** as fallback |
 | SOW ref formats | Both `D.P.a.b` and legacy `M<a>D<b>`, treated as equivalent, displayed as `D.P.a.b` |
-| Report delivery | Unchanged: daily in the standup thread, biweekly via `/recap` |
+| Report delivery | Daily in the standup thread (unchanged); biweekly via new `/recap-biweekly`, ad-hoc via `/recap` |
+| Date options | `/recap` and `/team github` share one rule: no dates = today, one date = that day, both = range |
+| Auto-done vs `/missed` | A GitHub-auto-done todo does **not** record a missed `update` |
+| Repo scope | Whatever repos the App installation covers; no repo list in config |
 
 ---
 
@@ -199,11 +202,41 @@ did what is the lead's business, covered by `/team github`, `/team
 report` and the daily summaries in the standup threads.
 
 The per-day, per-person tables that make up today's whole `/recap` move
-behind a new opt-in flag, so the default file is safe to forward as-is:
+behind a new opt-in flag, so the default file is safe to forward as-is.
+
+The command also splits in two:
 
 ```
-/recap [start:<date>] [end:<date>] [daily_log:<true|false>]   # daily_log defaults to false
+/recap-biweekly [daily_log:<true|false>]
+/recap [start:<date>] [end:<date>] [daily_log:<true|false>]
 ```
+
+`daily_log` defaults to `false` on both. Both stay lead-only (`is_lead`),
+same gate as today's `/recap`.
+
+- **`/recap-biweekly`** is today's no-argument `/recap`: the 14 days
+  ending yesterday (`DEFAULT_RECAP_DAYS`), no date options at all. This
+  is the one you run every other week for the stakeholder.
+- **`/recap`** switches to the same date rule as `/team github`:
+
+  | `start` | `end` | Covers |
+  |---|---|---|
+  | — | — | today |
+  | set | — | that day only |
+  | — | set | that day only |
+  | set | set | `start..end` inclusive, max 60 days |
+
+  Behaviour change for existing users: `/recap` with no options used to
+  mean "last 14 days" and now means "today"; `start` alone used to run to
+  today and now means that single day. `docs/user-guide.md` and `/help`
+  get updated in the same PR.
+- `/missed` keeps its current date handling (no options = 14 days ending
+  yesterday), unchanged by this design.
+- Implementation: `recap::resolve_range` stays as-is for `/missed`; a new
+  `recap::resolve_day_or_range` implements the table above (same date
+  parsing, ordering check, 60-day cap and error strings), shared by
+  `/recap` and `/team github`. `/recap-biweekly` calls `resolve_range(None,
+  None, today)` directly.
 
 ```
 # Recap 2026-10-01 → 2026-10-14
@@ -273,7 +306,9 @@ With `[github]` unset, the day summary renders **exactly as today** (no
 SOW column either; that addition ships with the GitHub column in phase
 3). `/recap` without GitHub has no sub-issue data to build deliverables
 from, so it keeps today's output (the per-day tables) regardless of
-`daily_log`. A non-GitHub install sees no change at all.
+`daily_log`. The one change a non-GitHub install *does* see is the
+`/recap` / `/recap-biweekly` split and the new date rule, which aren't
+tied to GitHub.
 
 ### New command: `/team github`
 
@@ -287,19 +322,9 @@ The day-summary headline (`GitHub: 3 PRs merged · 1 sub-issue closed
 - Part of the `/team` group, so the same gate as `/team status` /
   `report`: `MANAGE_GUILD` plus the bot-side `members::is_lead` check
   (`lead` or `viewer`). Ephemeral reply, like `/team report`.
-- **Range:**
-
-  | `start` | `end` | Covers |
-  |---|---|---|
-  | — | — | today |
-  | set | — | **that day only** |
-  | — | set | that day only |
-  | set | set | `start..end` inclusive, max 60 days |
-
-  This differs from `/recap` (where `start` alone runs to today) on
-  purpose: `/team github` is a "what happened on day X" check, `/recap`
-  is a look-back. A separate small resolver, sharing `resolve_range`'s
-  date parsing, ordering and max-span checks and error messages.
+- **Range:** same rule as `/recap` (`recap::resolve_day_or_range`): no
+  dates = today, `start` or `end` alone = that day only, both = the
+  inclusive range, max 60 days.
 - Plain chat message, not a file (six short lines fit easily under
   2000 chars; it's chunked via `status::split_into_messages` if a bigger
   roster ever overflows).
@@ -398,8 +423,11 @@ sync logs a warning and re-resolves.
 **Permissions (repository, all read-only):** Issues, Pull requests,
 Metadata. Nothing at org level, no write access anywhere.
 
-**Install:** on the org, "All repositories" (or a chosen subset; the bot
-only sees what the installation sees).
+**Install:** on the org, "All repositories" or a chosen subset. That
+choice *is* the repo scope: there's no repo allow/deny list in
+`config.toml`, the bot simply sees what the installation sees. To leave a
+repo (e.g. infra, docs) out of the reports, deselect it in the App's
+installation settings.
 
 **Private key:** the downloaded `.pem` is the only secret. It's stored
 the same way as the Discord token:
@@ -476,10 +504,14 @@ One pure function, `sow::parse(&str) -> Option<SowRef>`, with
 
 Where it's read from:
 
-- **Parent issue label:** the whole label name must parse (e.g. a label
-  literally named `D.P.1.2`). If several labels parse, the most specific
-  wins (one with a deliverable over milestone-only), ties → lowest; the
-  sync logs a warning.
+- **Parent issue label:** a label named `sow:<ref>`, e.g. `sow:D.P.1.2`
+  (prefix case-insensitive, `<ref>` parsed per the table above, so
+  `sow:M1D2` works too). Labels without the `sow:` prefix are ignored,
+  so unrelated labels can never be mistaken for a SOW ref. If several
+  `sow:` labels parse, the most specific wins (one with a deliverable
+  over milestone-only), ties → lowest; the sync logs a warning. A
+  `sow:` label that doesn't parse (e.g. `sow:TBD`) is ignored with a
+  warning and the title fallback applies.
 - **Parent issue title** (fallback): only the `D.P.` form, as a whole
   token anywhere in the title. The bare `M1` form is **not** searched in
   titles, to avoid false hits on words like "M2 Mac".
@@ -572,7 +604,7 @@ Following the existing "DB logic has no serenity types" split:
 | `src/github/store.rs` | upserts + report queries (tempfile DB tests) |
 | `src/github_login.rs` | `dispatchd github login/logout`, mirrors `discord_login.rs` (Linux-only `run`, non-Linux stub) |
 | `src/recap.rs` | `RecapRow` gains `sow_ref` + `github: Vec<GithubRef>`; new `DeliverableSummary` (person-free); `format_recap_file` takes `daily_log: bool` |
-| `src/discord/recap.rs` | new optional `daily_log` boolean option |
+| `src/discord/recap.rs` | `/recap` switches to `resolve_day_or_range`; new `/recap-biweekly` command (no date options); both get the optional `daily_log` boolean |
 | `src/discord/ticker.rs` | sync step + headline line in `day_summary_content` |
 | `src/discord/team.rs` | `github` subcommand: option parsing + reply; counting in `github::store::member_activity`, formatting in a pure `format_member_activity` |
 | `src/discord/todo.rs`, `progress.rs` | phase 4 autocomplete |
@@ -592,8 +624,12 @@ Following the existing "DB logic has no serenity types" split:
   with `github_pr_id` set.
 - **Auto-done (phase 5):** the `✅ done (GitHub)` rule from the report
   section, plus: such a todo no longer counts as "still open" for
-  carry-over, and doesn't trigger the afternoon update nag. See open
-  question 2 for `/missed`.
+  carry-over, doesn't trigger the afternoon update nag, and does **not**
+  record a missed `update` in `missed_submissions` (the merged PR is the
+  report). `followups::members_missing_update` gains the same exclusion,
+  so the live nag and `record_missed` stay in lockstep as they are today.
+  The no-activity-at-all `day_summary_missing` message is unaffected
+  (a todo was still submitted).
 
 ## Testing
 
@@ -617,8 +653,8 @@ Following the existing "DB logic has no serenity types" split:
    line, status line.
 2. **Sync + storage.** Migration 0008, `sow.rs`, `github/store.rs`,
    ticker sync step.
-3. **Reports.** Day summary + `/recap` changes above, plus
-   `/team github`. This is the stakeholder value, and it needs no change
+3. **Reports.** Day summary + `/recap` changes above (incl. the
+   `/recap-biweekly` split and the new date rule), plus `/team github`. This is the stakeholder value, and it needs no change
    in how engineers work.
 4. **Autocomplete.** `/todo add issue:`, PRs in `/progress add`.
 5. **Auto-done.** GitHub-derived done status, carry-over + nag effects.
@@ -629,14 +665,4 @@ CLAUDE.md layout entries as modules land.
 
 ## Open questions
 
-1. **SOW label naming.** A label literally named `D.P.1.2`, or a prefix
-   like `sow:D.P.1.2`? The plain name is assumed above; a prefix avoids
-   clashes with unrelated labels.
-2. **Auto-done vs `/missed`.** If a merged PR auto-completes a todo and
-   the member files no `/progress` at all that day, should that still
-   record a missed `update` in `missed_submissions`? Proposed: no, the
-   work is evidently reported. The no-activity-at-all nag is unaffected
-   either way (a todo was still submitted).
-3. **Repo scope.** All org repos, or a subset (e.g. exclude infra/docs
-   repos from "not on a todo")? Proposed: whatever the App installation
-   covers; scope it at install time rather than in config.
+None. All resolved; see the Decisions table at the top.
