@@ -207,12 +207,16 @@ behind a new opt-in flag, so the default file is safe to forward as-is.
 The command also splits in two:
 
 ```
-/recap-biweekly [daily_log:<true|false>]
-/recap [start:<date>] [end:<date>] [daily_log:<true|false>]
+/recap-biweekly [include_member_detail:<true|false>]
+/recap [start:<date>] [end:<date>] [include_member_detail:<true|false>]
 ```
 
-`daily_log` is a Discord **boolean option**: Discord shows it as a
-True/False picker, and leaving it out means `false`. With `false` the file
+`include_member_detail` is a Discord **boolean option**: Discord shows it
+as a True/False picker, and leaving it out means `false`. Its description
+in the Discord picker reads: *"Add per-day tables with each member's
+tasks, PRs and reviews. Leave off for stakeholders."* The name says what
+it adds (per-member detail) rather than how it's laid out, and the
+default-off reminder sits right where you choose it. With `false` the file
 has only the person-free deliverable sections. With `true` it also gets
 the per-day tables, whose `Member` / `Author` / `Reviewer` columns carry
 **team members' names** (the `name` from `members.toml`). Both commands
@@ -275,7 +279,7 @@ Closed before this period: api#198, api#199
 
 ```
 
-With `daily_log:true`, a `## Daily log` section is appended: one
+With `include_member_detail:true`, a `## Member detail by day` section is appended: one
 `### <date>` per day with the same "Standup" / "GitHub work not on a
 todo" / "Code reviews" tables as the daily summary (names included).
 That's the lead's own working copy, not the one to forward.
@@ -307,14 +311,14 @@ How each section is computed:
     closed last). Sub-issues closed before the range collapse into one
     trailing line.
   - No assignee/author/reviewer column, by design.
-- **Daily log** (`daily_log:true` only). Exactly the daily summary's
+- **Member detail by day** (`include_member_detail:true` only). Exactly the daily summary's
   tables per day. Empty days are still skipped, as today.
 
 With `[github]` unset, the day summary renders **exactly as today** (no
 SOW column either; that addition ships with the GitHub column in phase
 3). `/recap` without GitHub has no sub-issue data to build deliverables
 from, so it keeps today's output (the per-day tables) regardless of
-`daily_log`. The one change a non-GitHub install *does* see is the
+`include_member_detail`. The one change a non-GitHub install *does* see is the
 `/recap-biweekly` split and the new date rule for `/recap` and `/missed`, which aren't
 tied to GitHub.
 
@@ -611,8 +615,8 @@ Following the existing "DB logic has no serenity types" split:
 | `src/github/client.rs` | reqwest calls (the only untested-by-unit I/O, same as `upgrade.rs`'s) |
 | `src/github/store.rs` | upserts + report queries (tempfile DB tests) |
 | `src/github_login.rs` | `dispatchd github login/logout`, mirrors `discord_login.rs` (Linux-only `run`, non-Linux stub) |
-| `src/recap.rs` | `RecapRow` gains `sow_ref` + `github: Vec<GithubRef>`; new `DeliverableSummary` (person-free); `format_recap_file` takes `daily_log: bool` |
-| `src/discord/recap.rs` | `/recap` switches to `resolve_day_or_range`; new `/recap-biweekly` command (no date options); both get the optional `daily_log` boolean |
+| `src/recap.rs` | `RecapRow` gains `sow_ref` + `github: Vec<GithubRef>`; new `DeliverableSummary` (person-free); `format_recap_file` takes `include_member_detail: bool` |
+| `src/discord/recap.rs` | `/recap` switches to `resolve_day_or_range`; new `/recap-biweekly` command (no date options); both get the optional `include_member_detail` boolean |
 | `src/discord/ticker.rs` | sync step + headline line in `day_summary_content` |
 | `src/discord/team.rs` | `github` subcommand: option parsing + reply; counting in `github::store::member_activity`, formatting in a pure `format_member_activity` |
 | `src/discord/todo.rs`, `progress.rs` | phase 4 autocomplete |
