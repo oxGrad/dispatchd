@@ -41,7 +41,7 @@ pub async fn run() -> Result<()> {
             crate::service::ENV_DIR
         )
     })?;
-    encrypt_token(&token, crate::service::CRED_PATH)?;
+    encrypt_secret("discord_token", &token, crate::service::CRED_PATH)?;
     drop(token);
 
     println!("Logged in as {} ({}).", user.name, user.id);
@@ -60,29 +60,30 @@ pub async fn run() -> Result<()> {
     anyhow::bail!("`dispatchd discord login` is only supported on Linux (systemd-creds)")
 }
 
-/// Pipes `token` into `systemd-creds encrypt ... - cred_path`, so the
-/// plaintext token only ever exists in memory and in the pipe to that
-/// child process, never as an intermediate file. Overwrites `cred_path` if
-/// it already exists - re-running `discord login` is how you rotate the
-/// token.
+/// Pipes `secret` into `systemd-creds encrypt --name=<name> ... -
+/// cred_path`, so the plaintext only ever exists in memory and in the pipe
+/// to that child process, never as an intermediate file. Overwrites
+/// `cred_path` if it already exists - re-running `discord login` (or
+/// `github login`) is how you rotate it. `name` must match the credential
+/// name in the unit's `LoadCredentialEncrypted=<name>:...`.
 #[cfg(target_os = "linux")]
-fn encrypt_token(token: &str, cred_path: &str) -> Result<()> {
+pub(crate) fn encrypt_secret(name: &str, secret: &str, cred_path: &str) -> Result<()> {
     let mut child = Command::new("systemd-creds")
-        .args(["encrypt", "--name=discord_token", "--with-key=host", "-"])
+        .args(["encrypt", &format!("--name={name}"), "--with-key=host", "-"])
         .arg(cred_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .spawn()
         .context(
-            "failed to run `systemd-creds encrypt` (are you root? try: sudo dispatchd discord login)",
+            "failed to run `systemd-creds encrypt` (are you root? try running it with sudo)",
         )?;
 
     child
         .stdin
         .take()
         .expect("stdin was piped")
-        .write_all(token.as_bytes())
-        .context("failed to write the token to systemd-creds' stdin")?;
+        .write_all(secret.as_bytes())
+        .context("failed to write the secret to systemd-creds' stdin")?;
 
     let status = child
         .wait()

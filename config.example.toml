@@ -85,3 +85,20 @@
 # "Done" progress report is filed against it, or until it ages past this
 # window. Set to 0 to turn carry-over off.
 # lookback_days = 7
+
+# [github]
+# Optional GitHub integration (tracks the team's issues, PRs and reviews
+# alongside /todo and /progress). Off unless BOTH app_id and org are set -
+# uncomment the [github] line above too. See docs/github-setup.md for
+# creating the GitHub App; its private key is a secret and never goes in
+# this file - store it with `sudo dispatchd github login --key <file.pem>`.
+#
+# The GitHub App's ID, from its settings page ("App ID"). Not a secret.
+# app_id = 123456
+#
+# The organization the App is installed on. The repos the bot can see are
+# whatever that installation was granted - choose them on GitHub, not here.
+# org = "your-org"
+#
+# How often new GitHub activity is pulled in, in minutes.
+# sync_interval_minutes = 10

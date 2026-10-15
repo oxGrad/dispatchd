@@ -20,6 +20,9 @@
 # is_admin (default false) unlocks the /admin command group (bot-operator
 # only: self-upgrade, systemd/Discord health). It's independent of role -
 # set both role = "lead" and is_admin = true if one person needs both.
+# github_user (optional) is the member's GitHub username, for the GitHub
+# integration (see docs/github-setup.md) - leave it out for anyone who
+# doesn't work on GitHub. Each GitHub account can belong to one member.
 # See docs/user-guide.md.
 
 # [[members]]
@@ -42,6 +45,7 @@
 # discord_user_id = "000000000000000003"
 # name = "Senior Engineer's Name"
 # role = "senior"
+# github_user = "their-github-username"
 
 # [[members]]
 # discord_user_id = "000000000000000004"

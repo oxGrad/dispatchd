@@ -27,6 +27,7 @@ const DEFAULT_RUN_ON_WEEKENDS: bool = false;
 const DEFAULT_TIMEZONE: &str = "UTC";
 const DEFAULT_DB_FILE_NAME: &str = "dispatchd.sqlite3";
 const DEFAULT_CARRYOVER_LOOKBACK_DAYS: u32 = 7;
+const DEFAULT_GITHUB_SYNC_INTERVAL_MINUTES: u32 = 10;
 
 /// The resolved, fully-typed, flat config actually used by the rest of the
 /// program. Every field is guaranteed valid.
@@ -54,6 +55,19 @@ pub struct Config {
     pub db_path: PathBuf,
     pub discord_guild_id: Option<u64>,
     pub discord_standup_channel_id: Option<u64>,
+    /// `None` = the GitHub integration is off (no `[github]` section, or
+    /// one without `app_id`/`org`) - every report renders as without it.
+    pub github: Option<GithubConfig>,
+}
+
+/// `[github]` - the GitHub App dispatchd authenticates as. Neither value
+/// is a secret; the App's private key is (see `dispatchd github login`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubConfig {
+    pub app_id: u64,
+    pub org: String,
+    /// How often the ticker pulls new GitHub activity (phase 2).
+    pub sync_interval_minutes: u32,
 }
 
 impl Default for Config {
@@ -76,6 +90,7 @@ impl Default for Config {
             db_path: xdg_default_db_path().expect("default db_path is resolvable"),
             discord_guild_id: None,
             discord_standup_channel_id: None,
+            github: None,
         }
     }
 }
@@ -90,6 +105,8 @@ struct RawConfig {
     followup: RawFollowup,
     #[serde(default)]
     carryover: RawCarryover,
+    #[serde(default)]
+    github: RawGithub,
     timezone: Option<String>,
     db_path: Option<String>,
     discord_guild_id: Option<u64>,
@@ -119,6 +136,40 @@ struct RawCarryover {
     lookback_days: Option<u32>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RawGithub {
+    app_id: Option<u64>,
+    org: Option<String>,
+    sync_interval_minutes: Option<u32>,
+}
+
+/// `app_id` and `org` together switch the integration on; neither = off.
+/// Exactly one of them is almost certainly a half-finished edit, so it's an
+/// error rather than silently staying off.
+fn github_from_raw(raw: RawGithub) -> Result<Option<GithubConfig>> {
+    let org = raw.org.map(|o| o.trim().to_string());
+    let (app_id, org) = match (raw.app_id, org) {
+        (None, None) => return Ok(None),
+        (Some(app_id), Some(org)) => (app_id, org),
+        (Some(_), None) => anyhow::bail!("github.app_id is set but github.org is not - set both"),
+        (None, Some(_)) => anyhow::bail!("github.org is set but github.app_id is not - set both"),
+    };
+    if org.is_empty() {
+        anyhow::bail!("github.org must not be empty");
+    }
+    let sync_interval_minutes = raw
+        .sync_interval_minutes
+        .unwrap_or(DEFAULT_GITHUB_SYNC_INTERVAL_MINUTES);
+    if sync_interval_minutes == 0 {
+        anyhow::bail!("github.sync_interval_minutes must be at least 1");
+    }
+    Ok(Some(GithubConfig {
+        app_id,
+        org,
+        sync_interval_minutes,
+    }))
+}
+
 impl Config {
     /// Loads the effective config: hardcoded defaults merged with any
     /// overrides found in the XDG-located (or explicitly pointed-at) config
@@ -136,6 +187,27 @@ impl Config {
             config.db_path = PathBuf::from(path);
         }
         Ok(config)
+    }
+
+    /// `Config::load` for root-only CLI commands (`github login`,
+    /// `status`) that read config the bot normally owns. `sudo` usually
+    /// resets `HOME`, so plain XDG lookup would see root's (usually
+    /// absent) config instead of the operator's. When this process has no
+    /// config file of its own and was started via `sudo`, falls back to
+    /// the invoking user's `~/.config/dispatchd/config.toml`. Returns the
+    /// file actually used, if any, so the caller can say which it read.
+    pub fn load_for_sudo() -> Result<(Config, Option<PathBuf>)> {
+        if let Some(path) = config_file_path()? {
+            return Ok((Config::load()?, Some(path)));
+        }
+        let sudo_home = env::var("SUDO_USER").ok().and_then(|user| home_of(&user));
+        match sudo_home.map(|home| sudo_user_config_path(&home)) {
+            Some(path) if path.exists() => {
+                let config = Config::from_raw(read_raw_config(&path)?)?;
+                Ok((config, Some(path)))
+            }
+            _ => Ok((Config::load()?, None)),
+        }
     }
 
     fn from_raw(raw: RawConfig) -> Result<Config> {
@@ -177,6 +249,7 @@ impl Config {
             Some(s) => PathBuf::from(s),
             None => defaults.db_path,
         };
+        let github = github_from_raw(raw.github)?;
 
         Ok(Config {
             thread_creation_time,
@@ -212,6 +285,7 @@ impl Config {
             db_path,
             discord_guild_id: raw.discord_guild_id,
             discord_standup_channel_id: raw.discord_standup_channel_id,
+            github,
         })
     }
 }
@@ -265,6 +339,35 @@ fn xdg_default_db_path() -> Result<PathBuf> {
         .context("could not determine data directory (is $HOME set?); set DISPATCHD_DB_PATH")
 }
 
+/// Where `user`'s config lives by default, given their home directory -
+/// the XDG default, since their own `XDG_CONFIG_HOME` isn't visible from
+/// a `sudo` process.
+fn sudo_user_config_path(home: &Path) -> PathBuf {
+    home.join(".config").join("dispatchd").join("config.toml")
+}
+
+/// `user`'s home directory via `getent passwd` (covers NSS/LDAP accounts,
+/// not just `/etc/passwd`). `None` if the lookup fails.
+fn home_of(user: &str) -> Option<PathBuf> {
+    let output = std::process::Command::new("getent")
+        .args(["passwd", user])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    passwd_home(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The home directory (6th field) of a `passwd` line.
+fn passwd_home(line: &str) -> Option<PathBuf> {
+    line.trim()
+        .split(':')
+        .nth(5)
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
 fn read_raw_config(path: &Path) -> Result<RawConfig> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file {}", path.display()))?;
@@ -284,6 +387,24 @@ mod tests {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(contents.as_bytes()).unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn passwd_home_reads_the_sixth_field() {
+        assert_eq!(
+            passwd_home("pi:x:1000:1000:,,,:/home/pi:/bin/bash\n"),
+            Some(PathBuf::from("/home/pi"))
+        );
+        assert_eq!(passwd_home("broken"), None);
+        assert_eq!(passwd_home("nohome:x:1:1:::/bin/sh"), None);
+    }
+
+    #[test]
+    fn sudo_user_config_path_is_the_xdg_default_under_their_home() {
+        assert_eq!(
+            sudo_user_config_path(Path::new("/home/pi")),
+            PathBuf::from("/home/pi/.config/dispatchd/config.toml")
+        );
     }
 
     #[test]
@@ -330,6 +451,56 @@ mod tests {
             config.carryover_lookback_days,
             defaults.carryover_lookback_days
         );
+    }
+
+    fn github_from(toml: &str) -> Result<Option<GithubConfig>> {
+        let (_dir, path) = write_config(toml);
+        Config::from_raw(read_raw_config(&path).unwrap()).map(|c| c.github)
+    }
+
+    #[test]
+    fn github_is_off_without_a_section() {
+        assert_eq!(github_from("").unwrap(), None);
+        assert_eq!(github_from("[github]\n").unwrap(), None);
+    }
+
+    #[test]
+    fn github_is_on_with_app_id_and_org_and_defaults_the_interval() {
+        assert_eq!(
+            github_from("[github]\napp_id = 123456\norg = \"oxgrad\"\n").unwrap(),
+            Some(GithubConfig {
+                app_id: 123456,
+                org: "oxgrad".into(),
+                sync_interval_minutes: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn github_sync_interval_is_overridable() {
+        let got =
+            github_from("[github]\napp_id = 1\norg = \"oxgrad\"\nsync_interval_minutes = 30\n")
+                .unwrap()
+                .unwrap();
+        assert_eq!(got.sync_interval_minutes, 30);
+    }
+
+    #[test]
+    fn github_rejects_only_one_of_app_id_and_org() {
+        let err = github_from("[github]\napp_id = 1\n").unwrap_err();
+        assert!(err.to_string().contains("github.org is not"), "{err}");
+        let err = github_from("[github]\norg = \"oxgrad\"\n").unwrap_err();
+        assert!(err.to_string().contains("github.app_id is not"), "{err}");
+    }
+
+    #[test]
+    fn github_rejects_an_empty_org_and_a_zero_interval() {
+        let err = github_from("[github]\napp_id = 1\norg = \"  \"\n").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+        let err =
+            github_from("[github]\napp_id = 1\norg = \"oxgrad\"\nsync_interval_minutes = 0\n")
+                .unwrap_err();
+        assert!(err.to_string().contains("at least 1"), "{err}");
     }
 
     #[test]

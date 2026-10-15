@@ -165,13 +165,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-fn user_agent() -> String {
+pub(crate) fn user_agent() -> String {
     format!("dispatchd/{}", current_version())
 }
 
 /// A `reqwest` client with connect + overall timeouts, so a hung GitHub /
 /// CDN connection can't wedge `/admin status` or a CLI upgrade forever.
-fn http_client(timeout: std::time::Duration) -> reqwest::Client {
+pub(crate) fn http_client(timeout: std::time::Duration) -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(timeout)
