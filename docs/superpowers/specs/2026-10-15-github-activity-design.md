@@ -104,7 +104,7 @@ per-person numbers in chat):
 
 ```
 📊 **Day progress — 2026-10-15**
-GitHub: 2 PRs merged · 1 sub-issue closed (D.P.1.2) · 4 reviews
+GitHub: 3 PRs merged · 1 sub-issue closed (D.P.1.2) · 4 reviews
 ```
 
 Attachment:
@@ -124,15 +124,15 @@ Attachment:
 
 ## GitHub work not on a todo
 
-| Member | Item                                  | SOW     | Today    |
+| Author | Item                                  | SOW     | Today    |
 |--------|---------------------------------------|---------|----------|
 | Budi   | PR api#224 Bump serde to 1.0.215      | —       | merged   |
 | Sari   | Issue api#230 Webhook signature check | D.P.1.2 | opened   |
 
 ## Code reviews
 
-| Member | Reviewed                                   |
-|--------|--------------------------------------------|
+| Reviewer | Reviewed                                   |
+|----------|--------------------------------------------|
 | Budi   | api#219 (changes requested)                |
 | Rina   | api#210 (approved), api#221 (commented)    |
 | Sari   | api#210 (approved)                         |
@@ -160,10 +160,14 @@ What changed, row by row:
    merged/opened and issues opened/closed today by a roster member that
    don't match any of today's (or carried-over) todos. This is the
    "unplanned" bucket for GitHub, mirroring the existing `(unplanned)`
-   rows. Members without `github_user` (e.g. a designer) simply never
-   appear here; nothing flags their absence.
+   rows. The `Author` column is the PR/issue author. Members without
+   `github_user` (e.g. a designer) simply never appear here; nothing
+   flags their absence.
 5. **"Code reviews"** (new section, omitted when empty). Review work is
-   real work that never appears in `/progress`. Sorted by member name.
+   real work that never appears in `/progress`. One row per **reviewer**
+   (the roster member who submitted the review, not the PR author),
+   listing the PRs they reviewed that day with their latest review state
+   on each. Sorted by reviewer name.
 
 "Today" means the configured `timezone`'s calendar day, applied to
 GitHub's UTC timestamps (`merged_at`, `closed_at`, `submitted_at`, …).
@@ -265,13 +269,84 @@ How each section is computed:
     Sub-issues closed before the range collapse into one trailing line.
 - **Team table.** Plain counts for the range, sorted by name. It's
   context for the lead, not a ranking (see open question 1). A member
-  without `github_user` shows `—`, not `0`.
+  without `github_user` shows `—`, not `0`. Same counting rules and code
+  as `/team github` below (`github::store::member_activity`), so the two
+  never disagree.
 - **Daily log.** Exactly the daily summary's tables per day, for the
   per-day appendix. Empty days are still skipped, as today.
 
 With `[github]` unset, `/recap` and the day summary render **exactly as
 today** (no SOW column either; that addition ships with the GitHub
 column in phase 3, so a non-GitHub install sees no change at all).
+
+### New command: `/team github`
+
+The day-summary headline (`GitHub: 3 PRs merged · 1 sub-issue closed
+(D.P.1.2) · 4 reviews`) broken down per person, on demand.
+
+```
+/team github [start:<YYYY-MM-DD>] [end:<YYYY-MM-DD>]
+```
+
+- Part of the `/team` group, so the same gate as `/team status` /
+  `report`: `MANAGE_GUILD` plus the bot-side `members::is_lead` check
+  (`lead` or `viewer`). Ephemeral reply, like `/team report`.
+- **Range:** both omitted → **today**. One date → that day (`start`
+  alone = `start..today`, `end` alone = just `end`). Max span 60 days.
+  Same validation and error messages as `recap::resolve_range`, but
+  with today as the default rather than "14 days ending yesterday": this
+  is a "what's happening now" check, while `/recap` is the look-back.
+  Implemented as a `default` argument on `resolve_range`.
+- Plain chat message, not a file (six short lines fit easily under
+  2000 chars; it's chunked via `status::split_into_messages` if a bigger
+  roster ever overflows).
+
+Example (`/team github`, today):
+
+```
+🐙 **GitHub — 2026-10-15**
+Team: 3 PRs merged · 1 sub-issue closed (D.P.1.2) · 4 reviews
+
+**Budi** — 2 PRs merged (api#210, api#224) · 1 sub-issue closed (api#201, D.P.1.2) · 1 review
+**Rina** — 1 PR merged (web#222) · 2 reviews
+**Sari** — 1 PR opened (api#219) · 1 issue opened (api#230) · 1 review
+**Andi** — no GitHub account linked
+```
+
+Example (`/team github start:2026-10-01 end:2026-10-14`): over a range,
+item lists are dropped (they'd blow the message size) and only counts
+remain; `/recap` has the item-level detail.
+
+```
+🐙 **GitHub — 2026-10-01 to 2026-10-14**
+Team: 16 PRs merged · 7 sub-issues closed (D.P.1.2 ×3, D.P.1.3 ×2, D.P.2.1 ×2) · 26 reviews
+
+**Budi** — 7 PRs merged · 4 sub-issues closed (D.P.1.2 ×2, D.P.1.3 ×2) · 9 reviews
+**Rina** — 5 PRs merged · 2 sub-issues closed (D.P.2.1 ×2) · 11 reviews
+**Sari** — 4 PRs merged · 1 sub-issue closed (D.P.1.2) · 6 reviews · 2 PRs open
+**Andi** — no GitHub account linked
+```
+
+Line rules:
+
+- Members sorted by **name**, never by volume (non-goal: no ranking).
+  `viewer`s are excluded, like the standup reminders.
+- Each segment appears only when non-zero. A linked member with nothing
+  in range shows `— no GitHub activity`; a member without `github_user`
+  shows `— no GitHub account linked`. Both are stated plainly, not
+  flagged or highlighted.
+- Attribution:
+  - **PR merged / opened** → the PR's author (opened = created in range
+    and still open at the end of it).
+  - **Sub-issue closed** (closed as completed, in range) → the author(s)
+    of the merged PR(s) linked to it. If it was closed with no linked PR,
+    its assignees. The SOW ref in parentheses is the parent's.
+  - **Issue opened** → the issue's author.
+  - **Review** → the reviewer; counts distinct PRs reviewed, not review
+    submissions (three "comment" rounds on one PR = 1).
+- **Team line** counts each PR / sub-issue / review once. It can be less
+  than the sum of member lines when two members co-own one sub-issue.
+  The day-summary headline is exactly this line for that day.
 
 ---
 
@@ -490,6 +565,7 @@ Following the existing "DB logic has no serenity types" split:
 | `src/github_login.rs` | `dispatchd github login/logout`, mirrors `discord_login.rs` (Linux-only `run`, non-Linux stub) |
 | `src/recap.rs` | `RecapRow` gains `sow_ref` + `github: Vec<GithubRef>`; new `DeliverableSummary`, `MemberTotals`; `format_*` render the new sections |
 | `src/discord/ticker.rs` | sync step + headline line in `day_summary_content` |
+| `src/discord/team.rs` | `github` subcommand: option parsing + reply; formatting lives in a pure `format_member_activity` next to the query |
 | `src/discord/todo.rs`, `progress.rs` | phase 4 autocomplete |
 
 ## Phase 4–5 details (input side)
@@ -532,8 +608,9 @@ Following the existing "DB logic has no serenity types" split:
    line, status line.
 2. **Sync + storage.** Migration 0008, `sow.rs`, `github/store.rs`,
    ticker sync step.
-3. **Reports.** Day summary + `/recap` changes above. This is the
-   stakeholder value, and it needs no change in how engineers work.
+3. **Reports.** Day summary + `/recap` changes above, plus
+   `/team github`. This is the stakeholder value, and it needs no change
+   in how engineers work.
 4. **Autocomplete.** `/todo add issue:`, PRs in `/progress add`.
 5. **Auto-done.** GitHub-derived done status, carry-over + nag effects.
 
@@ -543,10 +620,10 @@ CLAUDE.md layout entries as modules land.
 
 ## Open questions
 
-1. **Team table in `/recap`.** Keep the per-member counts (sorted by
-   name, lead-only), or drop it and keep only per-deliverable +
-   per-day detail? Counts are useful context, but they're the part
-   closest to a scoreboard.
+1. **Team table in `/recap`.** Now that `/team github` gives the same
+   per-person counts on demand for any range, is the table still worth
+   having in the recap file too? Proposed: keep it. The recap is the
+   one artifact you hand over, and it's the same data.
 2. **SOW label naming.** A label literally named `D.P.1.2`, or a prefix
    like `sow:D.P.1.2`? The plain name is assumed above; a prefix avoids
    clashes with unrelated labels.
