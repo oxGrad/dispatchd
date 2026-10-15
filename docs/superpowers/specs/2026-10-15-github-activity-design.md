@@ -66,7 +66,7 @@ every report renders exactly as today.
 | SOW ref source | Parent issue **label** `sow:D.P.a.b` first, **title** as fallback |
 | SOW ref formats | Both `D.P.a.b` and legacy `M<a>D<b>`, treated as equivalent, displayed as `D.P.a.b` |
 | Report delivery | Daily in the standup thread (unchanged); biweekly via new `/recap-biweekly`, ad-hoc via `/recap` |
-| Date options | `/recap` and `/team github` share one rule: no dates = today, one date = that day, both = range |
+| Date options | `/recap`, `/missed` and `/team github` share one rule: no dates = today, one date = that day, both = range |
 | Auto-done vs `/missed` | A GitHub-auto-done todo does **not** record a missed `update` |
 | Repo scope | Whatever repos the App installation covers; no repo list in config |
 
@@ -211,8 +211,12 @@ The command also splits in two:
 /recap [start:<date>] [end:<date>] [daily_log:<true|false>]
 ```
 
-`daily_log` defaults to `false` on both. Both stay lead-only (`is_lead`),
-same gate as today's `/recap`.
+`daily_log` is a Discord **boolean option**: Discord shows it as a
+True/False picker, and leaving it out means `false`. With `false` the file
+has only the person-free deliverable sections. With `true` it also gets
+the per-day tables, whose `Member` / `Author` / `Reviewer` columns carry
+**team members' names** (the `name` from `members.toml`). Both commands
+stay lead-only (`is_lead`), same gate as today's `/recap`.
 
 - **`/recap-biweekly`** is today's no-argument `/recap`: the 14 days
   ending yesterday (`DEFAULT_RECAP_DAYS`), no date options at all. This
@@ -230,13 +234,17 @@ same gate as today's `/recap`.
   mean "last 14 days" and now means "today"; `start` alone used to run to
   today and now means that single day. `docs/user-guide.md` and `/help`
   get updated in the same PR.
-- `/missed` keeps its current date handling (no options = 14 days ending
-  yesterday), unchanged by this design.
-- Implementation: `recap::resolve_range` stays as-is for `/missed`; a new
-  `recap::resolve_day_or_range` implements the table above (same date
-  parsing, ordering check, 60-day cap and error strings), shared by
-  `/recap` and `/team github`. `/recap-biweekly` calls `resolve_range(None,
-  None, today)` directly.
+- **`/missed`** switches to the same date rule (same table above).
+  Behaviour change: no options used to mean "last 14 days" and now means
+  today. There's no `/missed-biweekly`; use `start` + `end` for a range.
+  Caveat: misses are recorded at `day_summary_time`, so `/missed` for
+  today returns "nothing missed" until then; the reply says so instead
+  of implying a clean day ("Today's misses are recorded at 16:00").
+- Implementation: a new `recap::resolve_day_or_range` implements the
+  table above (same date parsing, ordering check, 60-day cap and error
+  strings), shared by `/recap`, `/missed` and `/team github`. The old
+  `resolve_range` keeps only its no-argument default, used by
+  `/recap-biweekly` (14 days ending yesterday).
 
 ```
 # Recap 2026-10-01 → 2026-10-14
@@ -307,7 +315,7 @@ SOW column either; that addition ships with the GitHub column in phase
 3). `/recap` without GitHub has no sub-issue data to build deliverables
 from, so it keeps today's output (the per-day tables) regardless of
 `daily_log`. The one change a non-GitHub install *does* see is the
-`/recap` / `/recap-biweekly` split and the new date rule, which aren't
+`/recap-biweekly` split and the new date rule for `/recap` and `/missed`, which aren't
 tied to GitHub.
 
 ### New command: `/team github`
@@ -648,13 +656,18 @@ Following the existing "DB logic has no serenity types" split:
 
 ## Rollout (one PR per phase)
 
+0. **Date rules (no GitHub needed).** `/recap-biweekly`, and the new
+   today / single-day / range rule for `/recap` and `/missed`
+   (`resolve_day_or_range`), plus `user-guide.md` and `/help`. Ships
+   first since it's independent of everything below.
+
 1. **App plumbing.** `[github]` config, `github_user` in members,
    `github login/logout`, token minting, `service install` credential
    line, status line.
 2. **Sync + storage.** Migration 0008, `sow.rs`, `github/store.rs`,
    ticker sync step.
-3. **Reports.** Day summary + `/recap` changes above (incl. the
-   `/recap-biweekly` split and the new date rule), plus `/team github`. This is the stakeholder value, and it needs no change
+3. **Reports.** Day summary + `/recap` changes above, plus
+   `/team github`. This is the stakeholder value, and it needs no change
    in how engineers work.
 4. **Autocomplete.** `/todo add issue:`, PRs in `/progress add`.
 5. **Auto-done.** GitHub-derived done status, carry-over + nag effects.
