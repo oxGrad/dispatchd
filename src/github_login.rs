@@ -118,6 +118,30 @@ fn logout_at(cred_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// `dispatchd github preview --days N`: the sync's queries, run once
+/// against the real org, printed instead of stored (`sync::preview`). Reads
+/// the key the same way `status` does, so it works under `sudo` with the
+/// encrypted credential or unprivileged with `DISPATCHD_GITHUB_APP_KEY_PATH`.
+pub async fn preview(days: u32) -> Result<()> {
+    let (config, _) = crate::config::Config::load_for_sudo()?;
+    let github = config.github.context(
+        "no GitHub App configured - set app_id and org under [github] in config.toml \
+         (see docs/github-setup.md)",
+    )?;
+    let pem = crate::github::app_key_pem()
+        .or_else(|| crate::discord_login::decrypt_cred_file(GITHUB_CRED_PATH))
+        .context(
+            "no GitHub App key found - run `sudo dispatchd github login --key <file.pem>` \
+             first (or set DISPATCHD_GITHUB_APP_KEY_PATH)",
+        )?;
+    let key = AppKey::from_pem(&pem).context("the stored GitHub App key is unusable")?;
+    print!(
+        "{}",
+        crate::github::sync::preview(&github, key, days).await?
+    );
+    Ok(())
+}
+
 pub struct GithubPing {
     /// `None` = no `[github]` section; nothing else is attempted.
     pub app: Option<(u64, String)>,
@@ -191,10 +215,61 @@ pub fn format_github_ping(p: &GithubPing) -> String {
     out
 }
 
+/// `/admin status`'s sync line(s), appended under the `github:` section:
+/// when it last ran, what's stored, and the last error if the most recent
+/// run failed. Only the bot itself can show this - it reads the DB.
+pub fn format_sync_summary(s: &crate::github::store::SyncSummary) -> String {
+    let mut out = match &s.last_sync_at {
+        Some(at) => format!(
+            "  sync:                 last ok {at} - {} PRs, {} issues, {} reviews stored\n",
+            s.prs, s.issues, s.reviews
+        ),
+        None => "  sync:                 no successful sync yet\n".to_string(),
+    };
+    if let Some(error) = &s.last_error {
+        // Already capped when stored (`store::record_sync_error`); capped
+        // again here in case an older build stored a longer one.
+        out.push_str(&format!(
+            "  sync error:           {}\n",
+            crate::github::store::truncate(error, crate::github::store::MAX_SYNC_ERROR_CHARS)
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::github::client::{AppInfo, Installation};
+    use crate::github::store::SyncSummary;
+
+    #[test]
+    fn format_sync_summary_reports_last_run_and_any_error() {
+        let ok = SyncSummary {
+            last_sync_at: Some("2026-10-16T02:00:00Z".into()),
+            last_error: None,
+            prs: 42,
+            issues: 30,
+            reviews: 77,
+        };
+        assert_eq!(
+            format_sync_summary(&ok),
+            "  sync:                 last ok 2026-10-16T02:00:00Z - 42 PRs, 30 issues, 77 reviews stored\n"
+        );
+        let failing = SyncSummary {
+            last_sync_at: None,
+            last_error: Some("2026-10-16T02:10:00Z: PR search failed".into()),
+            prs: 0,
+            issues: 0,
+            reviews: 0,
+        };
+        let out = format_sync_summary(&failing);
+        assert!(out.contains("no successful sync yet"), "{out}");
+        assert!(
+            out.contains("sync error:           2026-10-16T02:10:00Z: PR search failed"),
+            "{out}"
+        );
+    }
 
     fn sample_check() -> AppCheck {
         AppCheck {

@@ -305,6 +305,8 @@ pub async fn run(
         .await
         .context("failed to build Discord client")?;
 
+    spawn_github_sync(&config, &db);
+
     match config.discord_standup_channel_id {
         Some(channel_id) => {
             let http = client.http.clone();
@@ -317,6 +319,47 @@ pub async fn run(
 
     client.start().await.context("Discord client error")?;
     Ok(())
+}
+
+/// Starts the GitHub activity sync (`github::sync::run_loop`) when `[github]`
+/// is configured and the App key resolves. Independent of the standup
+/// ticker: it runs even without a standup channel, and a missing or broken
+/// key only disables the sync, never the bot.
+fn spawn_github_sync(config: &Config, db: &Arc<Mutex<Connection>>) {
+    let Some(github) = config.github.clone() else {
+        return;
+    };
+    let key = crate::github::app_key_pem()
+        .ok_or_else(|| {
+            "no App key was found - run `sudo dispatchd github login --key <file.pem>` \
+             (see docs/github-setup.md), then restart dispatchd"
+                .to_string()
+        })
+        .and_then(|pem| {
+            crate::github::auth::AppKey::from_pem(&pem)
+                .map_err(|e| format!("the App key is unusable: {e:#}"))
+        });
+    match key {
+        Ok(key) => {
+            println!(
+                "GitHub sync enabled for {} (every {} min)",
+                github.org, github.sync_interval_minutes
+            );
+            tokio::spawn(crate::github::sync::run_loop(db.clone(), github, key));
+        }
+        Err(reason) => {
+            eprintln!("GitHub sync disabled - {reason}");
+            // Recorded so /admin status says the sync isn't running, rather
+            // than showing a stale "last ok" from an earlier process.
+            let conn = db.lock().expect("db mutex poisoned");
+            if let Err(e) = crate::github::store::record_sync_error(
+                &conn,
+                &format!("sync not running - {reason}"),
+            ) {
+                eprintln!("failed to record the github sync status: {e}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

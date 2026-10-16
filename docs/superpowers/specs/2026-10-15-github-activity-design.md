@@ -473,9 +473,26 @@ GitHub:   app 123456 installed on oxgrad · 14 repos · last sync 3 min ago · 1
 
 ## Sync
 
-A new ticker step, every `sync_interval_minutes`, independent of the
-standup thread (like `maybe_record_missed`). A failed sync logs and
+A background task spawned next to the standup ticker (not a step inside
+it, so it runs even without a standup channel), every
+`sync_interval_minutes`. A failed sync logs, records
+`github_sync_state.last_sync_error` (shown in `/admin status`), and
 retries next interval; reports render from whatever's already stored.
+
+*As built (phase 2):* each search starts 10 minutes before its
+high-water mark, since GitHub's search index can lag a write; the mark
+only advances from the search hits themselves (never from parents or
+by-id lookups riding along) and only after every write succeeded.
+`dispatchd github preview --days N` runs the same queries once and
+prints a summary without touching the DB, for checking the integration
+end to end. The four queries are validated against GitHub's published
+GraphQL schema. Hardening from review: node-level FORBIDDEN/NOT_FOUND
+errors (items outside the installation, deleted ids) are skipped rather
+than failing the run, which would otherwise refetch and fail on the same
+item forever; each run writes in one transaction; a resolved
+`github_id` survives reseeds while `github_user` is unchanged; sub-issue
+lists are only refetched for deliverables with genuinely new activity,
+and a complete list unlinks children that were removed from it.
 
 Per run, GraphQL with the installation token, incremental from a stored
 `updated_at` high-water mark (first run backfills 14 days, matching
@@ -490,7 +507,9 @@ Per run, GraphQL with the installation token, incremental from a stored
 3. For every **parent** seen in 1–2 that carries a SOW ref: its full
    `subIssues` list with states, so the recap can show untouched
    sub-issues.
-4. Resolve any new `github_user` → user id.
+4. Resolve any new `github_user` → user id (`GET /users/{login}`). Every
+   reseed clears `members.github_id`, so this re-runs once per restart -
+   one request per member.
 
 Only activity by roster members is attributed to anyone. Everything else
 (external contributors, bots like dependabot) is stored for linking
@@ -536,7 +555,9 @@ not consulted, so one source of truth per deliverable.
 
 ## Data model
 
-Migration `0008_github.sql`. All new tables are **retained forever**
+Migration `0008_github.sql` (as built, PR/issue/review rows also keep
+the author's `author_login` next to `author_id`, for debugging and for
+spotting non-roster contributors). All new tables are **retained forever**
 (never pruned by `maintenance run`), same as `entries` and
 `missed_submissions`: they're recap history.
 

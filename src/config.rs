@@ -66,7 +66,8 @@ pub struct Config {
 pub struct GithubConfig {
     pub app_id: u64,
     pub org: String,
-    /// How often the ticker pulls new GitHub activity (phase 2).
+    /// How often the GitHub sync (`github::sync::run_loop`, its own task
+    /// next to the ticker) pulls new activity.
     pub sync_interval_minutes: u32,
 }
 
