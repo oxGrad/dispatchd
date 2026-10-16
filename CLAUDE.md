@@ -120,6 +120,10 @@ dispatchd github login --key <file.pem>   # (Linux, root) optional GitHub
 dispatchd github logout   # removes that line from the unit first (a unit
                      # pointing at a missing credential won't start), then
                      # the .cred. Idempotent.
+dispatchd github preview [--days N]   # runs the GitHub sync's own queries
+                     # once (default 1 day back, max 14) and prints totals +
+                     # a per-GitHub-user breakdown - no DB writes. The way
+                     # to check the integration end to end from the CLI.
 dispatchd            # loads config, opens/migrates the DB, replaces the
                      # members table with members.toml (no file = empty
                      # roster - removed members lose access), prints a status block, then connects to
@@ -261,7 +265,10 @@ src/
   db/            SQLite connection + embedded migrations (0005 adds
                  members.is_admin, 0006 adds missed_submissions - never
                  pruned by maintenance.rs, same as entries; 0007 indexes
-                 entries by (date, discord_user_id) and todo_id)
+                 entries by (date, discord_user_id) and todo_id; 0008 adds
+                 members.github_user/github_id, entries.github_issue_id/
+                 github_pr_id, and the github_* activity tables - also
+                 never pruned)
   entries.rs     todo/update row DB logic, incl. entries.sow_ref - a
                  purely informational, unvalidated cross-reference into
                  an external scope-of-work doc (e.g. "M1D2"), todo-only.
@@ -355,15 +362,36 @@ src/
                  + format_recap_file (joins one table per day for
                  `/recap`, `None` for an empty range)
   init.rs        `dispatchd init` subcommand
-  github/        GitHub App integration (design phase 1: auth only, no
-                 sync yet). auth.rs - AppKey (PKCS#1/PKCS#8 PEM -> ring
-                 RsaKeyPair) + app_jwt (RS256, signed with ring directly:
-                 JWT crates' RSA backends mean aws-lc-rs or the `rsa`
-                 crate's open RustSec advisory). client.rs - the REST calls
-                 (GET /app, GET /orgs/{org}/installation, POST
-                 .../access_tokens, GET /installation/repositories) with
-                 pure parse_* / describe_status helpers, and check() - the
-                 whole round-trip. mod.rs - app_key_pem(), resolved like
+  sow.rs         SowRef + parse (D.P.a.b and legacy M<a>D<b>, both
+                 displayed D.P.a.b), from_labels (`sow:` labels only, most
+                 specific wins) and from_title (D.P. form only - "M2" in a
+                 title must not match)
+  github/        GitHub App integration (design phases 1-2: auth + sync;
+                 nothing reads the synced data for reports yet).
+                 auth.rs - AppKey (PKCS#1/PKCS#8 PEM -> ring RsaKeyPair) +
+                 app_jwt (RS256, signed with ring directly: JWT crates' RSA
+                 backends mean aws-lc-rs or the `rsa` crate's open RustSec
+                 advisory) + InstallationToken::needs_refresh. client.rs -
+                 the REST calls (GET /app, /orgs/{org}/installation, POST
+                 .../access_tokens, /installation/repositories,
+                 /users/{login}) and graphql() (any `errors` entry fails
+                 the call - a partial page must never advance the
+                 high-water mark), pure parse_* / describe_status, check().
+                 graphql.rs - the four queries (PR search, issue search,
+                 issues by id, sub-issues; each defines only the fragments
+                 it uses, since GitHub rejects unused ones) + pure parsers
+                 into Issue/PullRequest/Review rows; Page::high_water comes
+                 from search hits only. store.rs - upserts, the
+                 github_sync_state bookkeeping (raise_high_water never
+                 lowers), members_needing_github_id, sync_summary.
+                 sync.rs - TokenSource (cached installation token),
+                 sync_once (search since high-water minus a 10-min
+                 overlap, then PR-linked issues by id, then every
+                 sub-issue of each SOW-tagged parent, then member id
+                 resolution; DB lock never held across a request),
+                 run_loop (spawned by discord::spawn_github_sync, next to
+                 but independent of the ticker), preview/format_preview
+                 (`github preview`). mod.rs - app_key_pem(), resolved like
                  discord_token. testdata/ holds throwaway test-only keys
   github_login.rs `dispatchd github login/logout` + the GitHub section of
                  `dispatchd status` and `/admin status` (ping_report ->

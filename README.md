@@ -78,6 +78,7 @@ activity. Full walkthrough in [`docs/user-guide.md`](docs/user-guide.md).
 | `dispatchd init` | write commented `config.toml` + `members.toml` templates to their resolved locations |
 | `dispatchd discord login` / `logout` | Linux, root: manage the `systemd-creds`-encrypted bot token |
 | `dispatchd github login --key <file.pem>` / `logout` | Linux, root: optional GitHub integration - validate and encrypt the GitHub App private key ([`docs/github-setup.md`](docs/github-setup.md)) |
+| `dispatchd github preview [--days N]` | run the GitHub sync's queries once and print a summary, without writing to the DB |
 | `dispatchd service install` | Linux, root: install/enable the systemd unit + weekly maintenance timer |
 | `dispatchd maintenance run` | prune old reminder/followup rows and VACUUM (the retained `entries` history is never touched) |
 | `dispatchd status` | report the systemd side, the Discord side (token resolution + API ping) and, if configured, the GitHub App |

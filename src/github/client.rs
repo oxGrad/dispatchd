@@ -96,6 +96,12 @@ pub fn describe_status(step: Step, status: u16, org: &str) -> String {
         (Step::Repos, 403) => "the installation token can't list repositories (403) - make \
                                sure the App has the Metadata: read permission"
             .to_string(),
+        (Step::Graphql, 401) => "GitHub rejected the installation token (401) - it may have \
+                                 expired mid-sync; the next sync mints a fresh one"
+            .to_string(),
+        (Step::Graphql, 403) => "GitHub refused the GraphQL query (403) - usually a rate \
+                                 limit; the next sync retries"
+            .to_string(),
         (_, status) => format!("{} failed with HTTP {status}", step.endpoint()),
     }
 }
@@ -106,6 +112,8 @@ pub enum Step {
     Installation,
     Token,
     Repos,
+    Graphql,
+    User,
 }
 
 impl Step {
@@ -115,6 +123,8 @@ impl Step {
             Step::Installation => "GET /orgs/{org}/installation",
             Step::Token => "POST /app/installations/{id}/access_tokens",
             Step::Repos => "GET /installation/repositories",
+            Step::Graphql => "POST /graphql",
+            Step::User => "GET /users/{login}",
         }
     }
 }
@@ -190,6 +200,92 @@ impl Client {
             .await?;
         parse_repo_count(&body)
     }
+
+    /// Runs one GraphQL query with the installation `token` and returns
+    /// its `data` (see `parse_graphql`).
+    pub async fn graphql(
+        &self,
+        token: &str,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let request = self
+            .http
+            .post(format!("{API}/graphql"))
+            .json(&serde_json::json!({ "query": query, "variables": variables }));
+        let body = self.send(request, token, Step::Graphql, "").await?;
+        parse_graphql(&body)
+    }
+
+    /// A GitHub username's numeric user id, `None` if no such user (renamed
+    /// or deleted). Usernames are public, so any token works.
+    pub async fn user_id(&self, token: &str, login: &str) -> Result<Option<i64>> {
+        let response = self
+            .http
+            .get(format!("{API}/users/{login}"))
+            .header(reqwest::header::USER_AGENT, user_agent())
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", API_VERSION)
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("GET /users/{login} failed - is GitHub reachable?")?;
+        match response.status().as_u16() {
+            404 => Ok(None),
+            status if !(200..300).contains(&status) => {
+                bail!(describe_status(Step::User, status, ""))
+            }
+            _ => {
+                let body = response
+                    .text()
+                    .await
+                    .context("failed to read the GET /users/{login} response")?;
+                Ok(Some(parse_user_id(&body)?))
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RawGraphql {
+    data: Option<serde_json::Value>,
+    #[serde(default)]
+    errors: Vec<RawGraphqlError>,
+}
+
+#[derive(Deserialize)]
+struct RawGraphqlError {
+    message: String,
+}
+
+/// A GraphQL response body's `data`. GitHub answers query errors with HTTP
+/// 200 and an `errors` array (sometimes alongside partial `data`); any
+/// error fails the whole call, since a partial page would silently drop
+/// rows and still advance the sync's high-water mark.
+pub fn parse_graphql(body: &str) -> Result<serde_json::Value> {
+    let raw: RawGraphql =
+        serde_json::from_str(body).context("unexpected response from POST /graphql")?;
+    if !raw.errors.is_empty() {
+        bail!(
+            "GitHub GraphQL error: {}",
+            raw.errors
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+    raw.data.context("GitHub GraphQL response had no data")
+}
+
+pub fn parse_user_id(body: &str) -> Result<i64> {
+    #[derive(Deserialize)]
+    struct RawUser {
+        id: i64,
+    }
+    let raw: RawUser =
+        serde_json::from_str(body).context("unexpected response from GET /users/{login}")?;
+    Ok(raw.id)
 }
 
 /// The full round-trip `github login` validates with and `dispatchd
@@ -268,6 +364,37 @@ mod tests {
     fn parse_repo_count_reads_total_count() {
         let body = r#"{"total_count": 14, "repositories": [{"name": "api"}]}"#;
         assert_eq!(parse_repo_count(body).unwrap(), 14);
+    }
+
+    #[test]
+    fn parse_graphql_returns_data() {
+        let data = parse_graphql(r#"{"data": {"search": {"nodes": []}}}"#).unwrap();
+        assert_eq!(data["search"]["nodes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn parse_graphql_fails_on_any_error_even_with_partial_data() {
+        let body = r#"{"data": {"search": null},
+                       "errors": [{"message": "Field 'subIssues' doesn't exist"},
+                                  {"message": "second"}]}"#;
+        let err = parse_graphql(body).unwrap_err().to_string();
+        assert!(
+            err.contains("Field 'subIssues' doesn't exist; second"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_graphql_fails_without_data() {
+        assert!(parse_graphql(r#"{"errors": []}"#).is_err());
+    }
+
+    #[test]
+    fn parse_user_id_reads_the_numeric_id() {
+        assert_eq!(
+            parse_user_id(r#"{"login": "budi-dev", "id": 583231, "type": "User"}"#).unwrap(),
+            583231
+        );
     }
 
     #[test]

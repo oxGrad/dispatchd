@@ -7,10 +7,11 @@ standup reports, next to what people submit with `/todo` and `/progress`
 [`docs/superpowers/specs/2026-10-15-github-activity-design.md`](superpowers/specs/2026-10-15-github-activity-design.md)).
 Without it, everything works exactly as before.
 
-> **Status:** this release only sets up and verifies the connection
-> (`dispatchd github login`, `dispatchd status`, `/admin status`). Pulling
-> in activity and showing it in the reports comes in the next releases;
-> setting the App up now means it's ready when they land.
+> **Status:** dispatchd connects (`dispatchd github login`) and, while
+> the bot runs, syncs the org's PRs, issues and reviews into its database
+> every `sync_interval_minutes` (`/admin status` shows the last sync).
+> Showing that activity in the daily summary and `/recap` comes in the
+> next release.
 
 dispatchd authenticates as a **GitHub App** that you create in your
 organization. An App isn't tied to any one person's account, can be
@@ -149,7 +150,21 @@ github:
   api:                  ok - "dispatchd-your-org" installed (all repositories), 14 repos visible, 182ms
 ```
 
-`/admin status` in Discord shows the same section.
+`/admin status` in Discord shows the same section, plus the last sync:
+
+```
+  sync:                 last ok 2026-10-16T02:00:00Z - 42 PRs, 30 issues, 77 reviews stored
+```
+
+To see what the sync would pick up without waiting for it (or without
+the bot running at all):
+
+```sh
+sudo dispatchd github preview --days 3
+```
+
+It runs the sync's own queries against your org and prints totals plus a
+per-GitHub-user breakdown, without writing anything.
 
 ## Troubleshooting
 
@@ -161,3 +176,5 @@ github:
 | `the installation token can't list repositories (403)` | The App is missing **Metadata: Read-only**. Fix the permissions, then accept the updated permissions in the org's installation settings. |
 | `key: not found` | Run `sudo dispatchd github login --key <file.pem>` (needs root, because the credential is root-only). |
 | `0 repos visible` | The installation has no repositories selected (step 2). |
+| `GitHub sync disabled - ... no App key was found` (bot log) | The bot started without the key: run `github login`, then restart dispatchd. |
+| `github_user "x" ... doesn't exist on GitHub` (bot log) | That member renamed their GitHub account; update `github_user` in `members.toml`. |
