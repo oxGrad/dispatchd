@@ -129,6 +129,7 @@ impl Step {
     }
 }
 
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
 }
@@ -140,6 +141,33 @@ impl Client {
         }
     }
 
+    /// Every GitHub call goes through here: the headers GitHub requires
+    /// plus the bearer token, sent, with a transport failure tagged by
+    /// `step`. The status is left to the caller.
+    async fn request(
+        &self,
+        request: reqwest::RequestBuilder,
+        bearer: &str,
+        step: Step,
+    ) -> Result<reqwest::Response> {
+        request
+            .header(reqwest::header::USER_AGENT, user_agent())
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", API_VERSION)
+            .bearer_auth(bearer)
+            .send()
+            .await
+            .with_context(|| format!("{} failed - is GitHub reachable?", step.endpoint()))
+    }
+
+    async fn body(response: reqwest::Response, step: Step) -> Result<String> {
+        response
+            .text()
+            .await
+            .with_context(|| format!("failed to read the {} response", step.endpoint()))
+    }
+
+    /// `request` plus "any non-2xx is an error", returning the body.
     async fn send(
         &self,
         request: reqwest::RequestBuilder,
@@ -147,22 +175,12 @@ impl Client {
         step: Step,
         org: &str,
     ) -> Result<String> {
-        let response = request
-            .header(reqwest::header::USER_AGENT, user_agent())
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", API_VERSION)
-            .bearer_auth(bearer)
-            .send()
-            .await
-            .with_context(|| format!("{} failed - is GitHub reachable?", step.endpoint()))?;
+        let response = self.request(request, bearer, step).await?;
         let status = response.status();
         if !status.is_success() {
             bail!(describe_status(step, status.as_u16(), org));
         }
-        response
-            .text()
-            .await
-            .with_context(|| format!("failed to read the {} response", step.endpoint()))
+        Self::body(response, step).await
     }
 
     pub async fn app(&self, jwt: &str) -> Result<AppInfo> {
@@ -201,14 +219,14 @@ impl Client {
         parse_repo_count(&body)
     }
 
-    /// Runs one GraphQL query with the installation `token` and returns
-    /// its `data` (see `parse_graphql`).
+    /// Runs one GraphQL query with the installation `token` (see
+    /// `parse_graphql` for which errors fail it).
     pub async fn graphql(
         &self,
         token: &str,
         query: &str,
         variables: serde_json::Value,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<GraphqlResponse> {
         let request = self
             .http
             .post(format!("{API}/graphql"))
@@ -220,28 +238,16 @@ impl Client {
     /// A GitHub username's numeric user id, `None` if no such user (renamed
     /// or deleted). Usernames are public, so any token works.
     pub async fn user_id(&self, token: &str, login: &str) -> Result<Option<i64>> {
-        let response = self
-            .http
-            .get(format!("{API}/users/{login}"))
-            .header(reqwest::header::USER_AGENT, user_agent())
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", API_VERSION)
-            .bearer_auth(token)
-            .send()
-            .await
-            .context("GET /users/{login} failed - is GitHub reachable?")?;
+        let request = self.http.get(format!("{API}/users/{login}"));
+        let response = self.request(request, token, Step::User).await?;
         match response.status().as_u16() {
             404 => Ok(None),
             status if !(200..300).contains(&status) => {
                 bail!(describe_status(Step::User, status, ""))
             }
-            _ => {
-                let body = response
-                    .text()
-                    .await
-                    .context("failed to read the GET /users/{login} response")?;
-                Ok(Some(parse_user_id(&body)?))
-            }
+            _ => Ok(Some(parse_user_id(
+                &Self::body(response, Step::User).await?,
+            )?)),
         }
     }
 }
@@ -256,26 +262,67 @@ struct RawGraphql {
 #[derive(Deserialize)]
 struct RawGraphqlError {
     message: String,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    path: Vec<serde_json::Value>,
 }
 
-/// A GraphQL response body's `data`. GitHub answers query errors with HTTP
-/// 200 and an `errors` array (sometimes alongside partial `data`); any
-/// error fails the whole call, since a partial page would silently drop
-/// rows and still advance the sync's high-water mark.
-pub fn parse_graphql(body: &str) -> Result<serde_json::Value> {
+/// A GraphQL call's `data`, plus the node-level errors it was allowed to
+/// carry (see `parse_graphql`), for the caller to log.
+#[derive(Debug, PartialEq)]
+pub struct GraphqlResponse {
+    pub data: serde_json::Value,
+    pub skipped: Vec<String>,
+}
+
+/// How many error messages an error string quotes before "(+N more)" - a
+/// page of 100 failing nodes must not become a multi-KB error that blows
+/// past Discord's message limit in `/admin status`.
+const MAX_QUOTED_ERRORS: usize = 3;
+
+fn summarize_errors(errors: &[RawGraphqlError]) -> String {
+    let mut out = errors
+        .iter()
+        .take(MAX_QUOTED_ERRORS)
+        .map(|e| e.message.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if errors.len() > MAX_QUOTED_ERRORS {
+        out.push_str(&format!(" (+{} more)", errors.len() - MAX_QUOTED_ERRORS));
+    }
+    out
+}
+
+/// Parses a GraphQL response body. GitHub answers query errors with HTTP
+/// 200 and an `errors` array, sometimes alongside partial `data`:
+///
+/// - A `FORBIDDEN` or `NOT_FOUND` error pinned to a field path (e.g. a
+///   sub-issue whose parent lives in a repo the App isn't installed on, or a
+///   `nodes(ids:)` id that was deleted) only nulls that one field. It's
+///   tolerated - the rest of the page is good - and reported in `skipped`.
+///   Failing the whole call instead would refetch the same item and fail
+///   again on every run, stalling the sync for good.
+/// - Any other error (a malformed query, a rate limit, no `data` at all)
+///   fails the call, since the page can't be trusted.
+pub fn parse_graphql(body: &str) -> Result<GraphqlResponse> {
     let raw: RawGraphql =
         serde_json::from_str(body).context("unexpected response from POST /graphql")?;
-    if !raw.errors.is_empty() {
-        bail!(
-            "GitHub GraphQL error: {}",
-            raw.errors
-                .iter()
-                .map(|e| e.message.as_str())
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
+    let node_level = |e: &RawGraphqlError| {
+        matches!(e.kind.as_deref(), Some("FORBIDDEN" | "NOT_FOUND")) && !e.path.is_empty()
+    };
+    let (skipped, fatal): (Vec<_>, Vec<_>) = raw.errors.into_iter().partition(node_level);
+    if !fatal.is_empty() {
+        bail!("GitHub GraphQL error: {}", summarize_errors(&fatal));
     }
-    raw.data.context("GitHub GraphQL response had no data")
+    let data = raw
+        .data
+        .filter(|d| !d.is_null())
+        .context("GitHub GraphQL response had no data")?;
+    Ok(GraphqlResponse {
+        data,
+        skipped: skipped.into_iter().map(|e| e.message).collect(),
+    })
 }
 
 pub fn parse_user_id(body: &str) -> Result<i64> {
@@ -368,12 +415,13 @@ mod tests {
 
     #[test]
     fn parse_graphql_returns_data() {
-        let data = parse_graphql(r#"{"data": {"search": {"nodes": []}}}"#).unwrap();
-        assert_eq!(data["search"]["nodes"], serde_json::json!([]));
+        let response = parse_graphql(r#"{"data": {"search": {"nodes": []}}}"#).unwrap();
+        assert_eq!(response.data["search"]["nodes"], serde_json::json!([]));
+        assert!(response.skipped.is_empty());
     }
 
     #[test]
-    fn parse_graphql_fails_on_any_error_even_with_partial_data() {
+    fn parse_graphql_fails_on_a_query_level_error_even_with_partial_data() {
         let body = r#"{"data": {"search": null},
                        "errors": [{"message": "Field 'subIssues' doesn't exist"},
                                   {"message": "second"}]}"#;
@@ -382,6 +430,39 @@ mod tests {
             err.contains("Field 'subIssues' doesn't exist; second"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn parse_graphql_tolerates_node_level_forbidden_and_not_found() {
+        let body = r#"{"data": {"nodes": [{"id": "I_1"}, null]},
+                       "errors": [
+                         {"type": "NOT_FOUND", "path": ["nodes", 1],
+                          "message": "Could not resolve to a node with the global id of 'I_gone'"},
+                         {"type": "FORBIDDEN", "path": ["search", "nodes", 0, "parent"],
+                          "message": "Resource not accessible by integration"}]}"#;
+        let response = parse_graphql(body).unwrap();
+        assert_eq!(response.data["nodes"][0]["id"], "I_1");
+        assert_eq!(response.skipped.len(), 2);
+    }
+
+    #[test]
+    fn parse_graphql_fails_on_forbidden_without_a_path_or_without_data() {
+        let no_path = r#"{"data": {"search": null},
+                          "errors": [{"type": "FORBIDDEN", "message": "nope"}]}"#;
+        assert!(parse_graphql(no_path).is_err());
+        let no_data = r#"{"data": null,
+                          "errors": [{"type": "NOT_FOUND", "path": ["x"], "message": "gone"}]}"#;
+        assert!(parse_graphql(no_data).is_err());
+    }
+
+    #[test]
+    fn parse_graphql_caps_how_many_errors_it_quotes() {
+        let errors: Vec<String> = (0..50)
+            .map(|i| format!(r#"{{"type": "INTERNAL", "message": "boom {i}"}}"#))
+            .collect();
+        let body = format!(r#"{{"data": null, "errors": [{}]}}"#, errors.join(","));
+        let err = parse_graphql(&body).unwrap_err().to_string();
+        assert!(err.ends_with("boom 0; boom 1; boom 2 (+47 more)"), "{err}");
     }
 
     #[test]

@@ -31,7 +31,8 @@ struct MemberSeed {
     /// a member without one (e.g. a designer) simply has no GitHub
     /// activity attributed to them. Validated (`is_valid_github_user`) and
     /// checked for duplicates here; seeded into `members.github_user`, which
-    /// the GitHub sync resolves to a numeric `github_id`.
+    /// the GitHub sync resolves to a numeric `github_id` (kept across
+    /// reseeds while `github_user` is unchanged).
     #[serde(default)]
     github_user: Option<String>,
 }
@@ -164,19 +165,39 @@ pub fn seed(conn: &Connection) -> Result<usize> {
     let members = load_and_validate()?.map_or_else(Vec::new, |file| file.members);
 
     let tx = conn.unchecked_transaction()?;
+    // A resolved GitHub id survives the reseed as long as the member's
+    // github_user is unchanged (GitHub usernames are case-insensitive):
+    // re-resolving by username on every start would lose a member who has
+    // since renamed their account, or credit them with whoever claimed the
+    // old name.
+    let previous_ids: std::collections::HashMap<String, (String, i64)> = tx
+        .prepare(
+            "SELECT discord_user_id, github_user, github_id FROM members
+             WHERE github_user IS NOT NULL AND github_id IS NOT NULL",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?))))?
+        .collect::<rusqlite::Result<_>>()?;
     tx.execute("DELETE FROM members", [])?;
     for member in &members {
         let is_lead = matches!(member.role.as_str(), "lead" | "viewer");
+        let github_id = member.github_user.as_ref().and_then(|user| {
+            previous_ids
+                .get(&member.discord_user_id)
+                .filter(|(previous, _)| previous.eq_ignore_ascii_case(user))
+                .map(|(_, id)| *id)
+        });
         tx.execute(
-            "INSERT INTO members (discord_user_id, name, role, is_lead, is_admin, github_user)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO members (discord_user_id, name, role, is_lead, is_admin, github_user,
+                 github_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 member.discord_user_id,
                 member.name,
                 member.role,
                 is_lead,
                 member.is_admin,
-                member.github_user
+                member.github_user,
+                github_id
             ],
         )
         .with_context(|| format!("failed to insert member {:?}", member.discord_user_id))?;
@@ -411,6 +432,50 @@ mod tests {
                 ("2".into(), None, None),
             ]
         );
+    }
+
+    #[test]
+    fn reseed_keeps_a_resolved_github_id_only_while_github_user_is_unchanged() {
+        let conn = open_test_db();
+        let roster = |budi: &str| {
+            format!(
+                r#"
+                [[members]]
+                discord_user_id = "1"
+                name = "Budi"
+                role = "senior"
+                github_user = "{budi}"
+
+                [[members]]
+                discord_user_id = "2"
+                name = "Sari"
+                role = "senior"
+                github_user = "sari"
+                "#
+            )
+        };
+        seed_from(&conn, &roster("budi-dev")).unwrap();
+        conn.execute_batch("UPDATE members SET github_id = 100 + discord_user_id")
+            .unwrap();
+        let id_of = |id: &str| -> Option<i64> {
+            conn.query_row(
+                "SELECT github_id FROM members WHERE discord_user_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        // Same usernames (different case): ids kept.
+        seed_from(&conn, &roster("Budi-Dev")).unwrap();
+        assert_eq!(id_of("1"), Some(101));
+        assert_eq!(id_of("2"), Some(102));
+
+        // Budi's username changed: his id is cleared for the sync to
+        // re-resolve; Sari's is untouched.
+        seed_from(&conn, &roster("budi-new")).unwrap();
+        assert_eq!(id_of("1"), None);
+        assert_eq!(id_of("2"), Some(102));
     }
 
     #[test]

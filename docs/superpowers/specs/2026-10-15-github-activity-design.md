@@ -486,7 +486,13 @@ by-id lookups riding along) and only after every write succeeded.
 `dispatchd github preview --days N` runs the same queries once and
 prints a summary without touching the DB, for checking the integration
 end to end. The four queries are validated against GitHub's published
-GraphQL schema.
+GraphQL schema. Hardening from review: node-level FORBIDDEN/NOT_FOUND
+errors (items outside the installation, deleted ids) are skipped rather
+than failing the run, which would otherwise refetch and fail on the same
+item forever; each run writes in one transaction; a resolved
+`github_id` survives reseeds while `github_user` is unchanged; sub-issue
+lists are only refetched for deliverables with genuinely new activity,
+and a complete list unlinks children that were removed from it.
 
 Per run, GraphQL with the installation token, incremental from a stored
 `updated_at` high-water mark (first run backfills 14 days, matching

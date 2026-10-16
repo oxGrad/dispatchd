@@ -9,10 +9,17 @@ use serde_json::Value;
 
 use crate::sow::{self, SowRef};
 
-/// Search results per page; GitHub's maximum.
-pub const PAGE_SIZE: u32 = 50;
-/// IDs per `nodes(ids:)` lookup; GitHub's maximum.
+/// Search results per page; GitHub's maximum for a connection.
+pub const PAGE_SIZE: u32 = 100;
+/// IDs per `issues_by_id_query` lookup; GitHub's maximum for `nodes(ids:)`.
 pub const NODES_BATCH: usize = 100;
+/// Parents per `sub_issues_query`. Each parent can expand to 100 children
+/// x (20 assignees + 30 labels), and GitHub refuses any query whose
+/// worst case passes 500,000 nodes - 100 parents would be ~510k, 20 is ~102k.
+pub const SUB_ISSUE_BATCH: usize = 20;
+/// Children per parent in `sub_issues_query`; a list that hits this is
+/// reported incomplete (`SubIssueList::complete`).
+pub const SUB_ISSUES_PER_PARENT: u32 = 100;
 
 /// GraphQL rejects a query that defines a fragment it doesn't use, so the
 /// PR search (no issue fields) gets `ACTOR_FRAGMENT` alone and the issue
@@ -53,6 +60,11 @@ pub fn pr_search_query() -> String {
     )
 }
 
+/// An issue plus its parent, plus the parent's own parent id - without
+/// that last bit, a parent riding along would be stored as top-level and
+/// overwrite its real link to the deliverable above it.
+const ISSUE_WITH_PARENT: &str = "...IssueFields parent { ...IssueFields parent { id } }";
+
 /// Issues in the org updated at or after the bound, oldest first, each
 /// with its parent (for sub-issues) so the parent's SOW ref is known.
 pub fn issue_search_query() -> String {
@@ -60,7 +72,7 @@ pub fn issue_search_query() -> String {
         r#"query($q: String!, $cursor: String) {{
   search(type: ISSUE, query: $q, first: {PAGE_SIZE}, after: $cursor) {{
     pageInfo {{ hasNextPage endCursor }}
-    nodes {{ ... on Issue {{ ...IssueFields parent {{ ...IssueFields }} }} }}
+    nodes {{ ... on Issue {{ {ISSUE_WITH_PARENT} }} }}
   }}
 }}
 {ACTOR_FRAGMENT}{ISSUE_FRAGMENT}"#
@@ -72,7 +84,7 @@ pub fn issue_search_query() -> String {
 pub fn issues_by_id_query() -> String {
     format!(
         r#"query($ids: [ID!]!) {{
-  nodes(ids: $ids) {{ ... on Issue {{ ...IssueFields parent {{ ...IssueFields }} }} }}
+  nodes(ids: $ids) {{ ... on Issue {{ {ISSUE_WITH_PARENT} }} }}
 }}
 {ACTOR_FRAGMENT}{ISSUE_FRAGMENT}"#
     )
@@ -83,7 +95,12 @@ pub fn issues_by_id_query() -> String {
 pub fn sub_issues_query() -> String {
     format!(
         r#"query($ids: [ID!]!) {{
-  nodes(ids: $ids) {{ ... on Issue {{ id subIssues(first: 100) {{ nodes {{ ...IssueFields }} }} }} }}
+  nodes(ids: $ids) {{
+    ... on Issue {{
+      id
+      subIssues(first: {SUB_ISSUES_PER_PARENT}) {{ pageInfo {{ hasNextPage }} nodes {{ ...IssueFields }} }}
+    }}
+  }}
 }}
 {ACTOR_FRAGMENT}{ISSUE_FRAGMENT}"#
     )
@@ -132,8 +149,23 @@ pub struct Issue {
     /// top-level issue - a sub-issue takes its parent's.
     pub sow_ref: Option<SowRef>,
     pub parent_node_id: Option<String>,
+    /// How this row was fetched - only a `SearchHit` was necessarily
+    /// updated inside the search window.
+    pub origin: Origin,
     /// Problems worth logging (an unparseable or ambiguous `sow:` label).
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// Returned by the issue search itself.
+    SearchHit,
+    /// The parent of another row, riding along with it.
+    Parent,
+    /// Fetched by id because a PR links to it.
+    ById,
+    /// Fetched as part of a deliverable's full sub-issue list.
+    SubIssue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +204,20 @@ pub struct Page<T> {
     /// parents riding along with them, which didn't come from the
     /// time-ordered search, so mustn't advance the sync's high-water mark.
     pub high_water: Option<String>,
+    /// The last search hit's `updatedAt`, i.e. how far through the
+    /// `sort:updated-asc` order this page got - the safe resume point when
+    /// paging stops early (see `sync::fetch_search`).
+    pub last_updated: Option<String>,
+}
+
+/// One parent's full sub-issue list from `sub_issues_query`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubIssueList {
+    pub parent_id: String,
+    pub children: Vec<Issue>,
+    /// `false` when the parent has more than `SUB_ISSUES_PER_PARENT`
+    /// children - then the list can't be used to unlink detached ones.
+    pub complete: bool,
 }
 
 #[derive(Deserialize)]
@@ -204,7 +250,14 @@ struct RawLabel {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawIssue {
+struct RawNodeId {
+    id: String,
+}
+
+/// `IssueFields`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawIssueCore {
     id: String,
     number: i64,
     title: String,
@@ -217,8 +270,25 @@ struct RawIssue {
     author: Option<RawActor>,
     assignees: Nodes<RawId>,
     labels: Nodes<RawLabel>,
+}
+
+/// A parent issue as selected by `ISSUE_WITH_PARENT`: its fields plus its
+/// own parent's id.
+#[derive(Deserialize)]
+struct RawParentIssue {
+    #[serde(flatten)]
+    core: RawIssueCore,
     #[serde(default)]
-    parent: Option<Box<RawIssue>>,
+    parent: Option<RawNodeId>,
+}
+
+/// A search hit / by-id issue: its fields plus its parent.
+#[derive(Deserialize)]
+struct RawIssue {
+    #[serde(flatten)]
+    core: RawIssueCore,
+    #[serde(default)]
+    parent: Option<RawParentIssue>,
 }
 
 #[derive(Deserialize)]
@@ -228,12 +298,6 @@ struct RawReview {
     state: String,
     submitted_at: Option<String>,
     author: Option<RawActor>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawNodeId {
-    id: String,
 }
 
 #[derive(Deserialize)]
@@ -281,17 +345,14 @@ fn lower(s: String) -> String {
     s.to_ascii_lowercase()
 }
 
-impl RawIssue {
-    /// The issue itself, plus its parent (when it has one) as a second
-    /// row - the parent must be stored too, since it's the deliverable.
-    fn into_issues(self) -> Vec<Issue> {
-        let (sow_ref, warnings) =
-            match sow::from_labels(self.labels.nodes.iter().map(|l| l.name.as_str())) {
-                (Some(sow_ref), warnings) => (Some(sow_ref), warnings),
-                (None, warnings) => (sow::from_title(&self.title), warnings),
-            };
-        let parent = self.parent.map(|p| p.into_issues());
-        let issue = Issue {
+impl RawIssueCore {
+    fn into_issue(self, parent_node_id: Option<String>, origin: Origin) -> Issue {
+        let labels = self.labels.nodes.iter().map(|l| l.name.as_str());
+        let (sow_ref, warnings) = match sow::from_labels(labels) {
+            (Some(sow_ref), warnings) => (Some(sow_ref), warnings),
+            (None, warnings) => (sow::from_title(&self.title), warnings),
+        };
+        Issue {
             node_id: self.id,
             repo: self.repository.name,
             number: self.number,
@@ -309,14 +370,23 @@ impl RawIssue {
                 .filter_map(|a| a.database_id)
                 .collect(),
             sow_ref,
-            parent_node_id: parent
-                .as_ref()
-                .and_then(|p| p.first())
-                .map(|p| p.node_id.clone()),
+            parent_node_id,
+            origin,
             warnings,
-        };
-        let mut out = vec![issue];
-        out.extend(parent.into_iter().flatten());
+        }
+    }
+}
+
+impl RawIssue {
+    /// The issue itself, plus its parent (when it has one) as a second
+    /// row - the parent must be stored too, since it's the deliverable.
+    fn into_issues(self, origin: Origin) -> Vec<Issue> {
+        let parent_id = self.parent.as_ref().map(|p| p.core.id.clone());
+        let mut out = vec![self.core.into_issue(parent_id, origin)];
+        if let Some(parent) = self.parent {
+            let grandparent = parent.parent.map(|g| g.id);
+            out.push(parent.core.into_issue(grandparent, Origin::Parent));
+        }
         out
     }
 }
@@ -362,7 +432,9 @@ impl From<RawPullRequest> for PullRequest {
 }
 
 /// Search results can mix node types; a node that isn't the type asked for
-/// comes back as `{}` from the inline fragment, and is skipped here.
+/// comes back as `{}` from the inline fragment, and a `nodes(ids:)` id that
+/// no longer resolves comes back as `null` (alongside a tolerated
+/// NOT_FOUND error, see `client::parse_graphql`). Both are skipped here.
 fn typed_nodes<T: serde::de::DeserializeOwned>(nodes: Vec<Value>) -> Result<Vec<T>> {
     nodes
         .into_iter()
@@ -376,18 +448,28 @@ fn search_page(data: Value) -> Result<RawSearch> {
         .context("unexpected search response shape")
 }
 
+fn page<T>(
+    items: Vec<T>,
+    info: RawPageInfo,
+    hit_updated: impl Iterator<Item = String> + Clone,
+) -> Page<T> {
+    Page {
+        items,
+        end_cursor: info.end_cursor,
+        has_next_page: info.has_next_page,
+        high_water: hit_updated.clone().max(),
+        last_updated: hit_updated.last(),
+    }
+}
+
 pub fn parse_pr_page(data: Value) -> Result<Page<PullRequest>> {
     let raw = search_page(data)?;
     let items: Vec<PullRequest> = typed_nodes::<RawPullRequest>(raw.nodes)?
         .into_iter()
         .map(PullRequest::from)
         .collect();
-    Ok(Page {
-        high_water: items.iter().map(|pr| pr.updated_at.clone()).max(),
-        items,
-        end_cursor: raw.page_info.end_cursor,
-        has_next_page: raw.page_info.has_next_page,
-    })
+    let updated: Vec<String> = items.iter().map(|pr| pr.updated_at.clone()).collect();
+    Ok(page(items, raw.page_info, updated.into_iter()))
 }
 
 /// Issues on one search page, each followed by its parent (if any), so a
@@ -395,19 +477,16 @@ pub fn parse_pr_page(data: Value) -> Result<Page<PullRequest>> {
 pub fn parse_issue_page(data: Value) -> Result<Page<Issue>> {
     let raw = search_page(data)?;
     let hits = typed_nodes::<RawIssue>(raw.nodes)?;
-    Ok(Page {
-        high_water: hits.iter().map(|i| i.updated_at.clone()).max(),
-        items: hits.into_iter().flat_map(RawIssue::into_issues).collect(),
-        end_cursor: raw.page_info.end_cursor,
-        has_next_page: raw.page_info.has_next_page,
-    })
+    let updated: Vec<String> = hits.iter().map(|i| i.core.updated_at.clone()).collect();
+    let items = hits
+        .into_iter()
+        .flat_map(|i| i.into_issues(Origin::SearchHit))
+        .collect();
+    Ok(page(items, raw.page_info, updated.into_iter()))
 }
 
 fn nodes_of(data: Value) -> Vec<Value> {
     match data.get("nodes") {
-        // `nodes(ids:)` returns `null` for an id that no longer resolves
-        // (deleted issue, or one the App can't see) - dropped by
-        // `typed_nodes`, since `null` has no "id".
         Some(Value::Array(nodes)) => nodes.clone(),
         _ => Vec::new(),
     }
@@ -416,29 +495,37 @@ fn nodes_of(data: Value) -> Vec<Value> {
 pub fn parse_issues_by_id(data: Value) -> Result<Vec<Issue>> {
     Ok(typed_nodes::<RawIssue>(nodes_of(data))?
         .into_iter()
-        .flat_map(RawIssue::into_issues)
+        .flat_map(|i| i.into_issues(Origin::ById))
         .collect())
 }
 
 /// Each parent's sub-issues, with `parent_node_id` filled in (the
 /// `subIssues` connection doesn't repeat the parent on each child).
-pub fn parse_sub_issues(data: Value) -> Result<Vec<Issue>> {
+pub fn parse_sub_issues(data: Value) -> Result<Vec<SubIssueList>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RawChildren {
+        page_info: RawPageInfo,
+        nodes: Vec<RawIssueCore>,
+    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct RawParent {
         id: String,
-        sub_issues: Nodes<RawIssue>,
+        sub_issues: RawChildren,
     }
     let parents: Vec<RawParent> = typed_nodes(nodes_of(data))?;
     Ok(parents
         .into_iter()
-        .flat_map(|parent| {
-            let parent_id = parent.id;
-            parent.sub_issues.nodes.into_iter().map(move |child| {
-                let mut issue = child.into_issues().remove(0);
-                issue.parent_node_id = Some(parent_id.clone());
-                issue
-            })
+        .map(|parent| SubIssueList {
+            complete: !parent.sub_issues.page_info.has_next_page,
+            children: parent
+                .sub_issues
+                .nodes
+                .into_iter()
+                .map(|child| child.into_issue(Some(parent.id.clone()), Origin::SubIssue))
+                .collect(),
+            parent_id: parent.id,
         })
         .collect())
 }
@@ -448,11 +535,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn actor(login: &str, id: u64) -> Value {
+    fn actor(login: &str, id: i64) -> Value {
         json!({ "login": login, "databaseId": id })
     }
 
-    fn raw_issue(id: &str, number: u64, title: &str, labels: &[&str]) -> Value {
+    fn raw_issue(id: &str, number: i64, title: &str, labels: &[&str]) -> Value {
         json!({
             "id": id, "number": number, "title": title,
             "state": "OPEN", "stateReason": null,
@@ -502,6 +589,13 @@ mod tests {
     }
 
     #[test]
+    fn sub_issue_batches_stay_under_githubs_node_limit() {
+        // Worst case per parent: every child with every assignee and label.
+        let per_parent = 1 + SUB_ISSUES_PER_PARENT as usize * (1 + 20 + 30);
+        assert!(SUB_ISSUE_BATCH * per_parent < 500_000);
+    }
+
+    #[test]
     fn parse_pr_page_reads_prs_links_and_submitted_reviews() {
         let pr = json!({
             "id": "PR_1", "number": 210, "title": "Stripe webhook handler",
@@ -524,6 +618,8 @@ mod tests {
 
         assert!(page.has_next_page);
         assert_eq!(page.end_cursor.as_deref(), Some("Y3Vyc29y"));
+        assert_eq!(page.high_water.as_deref(), Some("2026-10-15T08:00:00Z"));
+        assert_eq!(page.last_updated.as_deref(), Some("2026-10-15T08:00:00Z"));
         assert_eq!(page.items.len(), 1);
         let pr = &page.items[0];
         assert_eq!(pr.state, "merged");
@@ -591,26 +687,53 @@ mod tests {
         let page = parse_issue_page(search(vec![child], false)).unwrap();
 
         assert_eq!(page.items.len(), 2);
-        // The parent's own updatedAt doesn't count toward the high-water mark.
-        let mut parent_newer = raw_issue("I_100", 100, "Payment", &["sow:D.P.1.2"]);
-        parent_newer["updatedAt"] = json!("2026-10-16T00:00:00Z");
-        let mut hit = raw_issue("I_201", 201, "Stripe", &[]);
-        hit["parent"] = parent_newer;
-        let hw = parse_issue_page(search(vec![hit], false))
-            .unwrap()
-            .high_water;
-        assert_eq!(hw.as_deref(), Some("2026-10-15T09:00:00Z"));
-
         let (child, parent) = (&page.items[0], &page.items[1]);
         assert_eq!(child.node_id, "I_201");
+        assert_eq!(child.origin, Origin::SearchHit);
         assert_eq!(child.state, "closed");
         assert_eq!(child.state_reason.as_deref(), Some("completed"));
         assert_eq!(child.parent_node_id.as_deref(), Some("I_100"));
         assert_eq!(child.assignee_ids, vec![2]);
         assert_eq!(child.sow_ref, None);
         assert_eq!(parent.node_id, "I_100");
+        assert_eq!(parent.origin, Origin::Parent);
         assert_eq!(parent.parent_node_id, None);
         assert_eq!(parent.sow_ref.unwrap().to_string(), "D.P.1.2");
+    }
+
+    #[test]
+    fn a_riding_along_parent_keeps_its_own_parent_link() {
+        // deliverable D <- task T <- subtask S; only S was updated.
+        let mut task = raw_issue("I_T", 2, "D.P.1.2 Stripe webhook", &[]);
+        task["parent"] = json!({ "id": "I_D" });
+        let mut subtask = raw_issue("I_S", 3, "Retry logic", &[]);
+        subtask["parent"] = task;
+
+        let page = parse_issue_page(search(vec![subtask], false)).unwrap();
+
+        let task = page.items.iter().find(|i| i.node_id == "I_T").unwrap();
+        assert_eq!(task.parent_node_id.as_deref(), Some("I_D"));
+    }
+
+    #[test]
+    fn high_water_ignores_parents_riding_along() {
+        let mut parent = raw_issue("I_100", 100, "Payment", &["sow:D.P.1.2"]);
+        parent["updatedAt"] = json!("2026-10-16T00:00:00Z");
+        let mut hit = raw_issue("I_201", 201, "Stripe", &[]);
+        hit["parent"] = parent;
+        let page = parse_issue_page(search(vec![hit], false)).unwrap();
+        assert_eq!(page.high_water.as_deref(), Some("2026-10-15T09:00:00Z"));
+    }
+
+    #[test]
+    fn last_updated_is_the_last_hit_in_sort_order_not_the_max() {
+        let mut first = raw_issue("I_1", 1, "a", &[]);
+        first["updatedAt"] = json!("2026-10-15T10:00:00Z");
+        let mut second = raw_issue("I_2", 2, "b", &[]);
+        second["updatedAt"] = json!("2026-10-15T09:00:00Z");
+        let page = parse_issue_page(search(vec![first, second], true)).unwrap();
+        assert_eq!(page.high_water.as_deref(), Some("2026-10-15T10:00:00Z"));
+        assert_eq!(page.last_updated.as_deref(), Some("2026-10-15T09:00:00Z"));
     }
 
     #[test]
@@ -627,25 +750,35 @@ mod tests {
         let issues = parse_issues_by_id(data).unwrap();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].node_id, "I_1");
+        assert_eq!(issues[0].origin, Origin::ById);
     }
 
     #[test]
     fn parse_sub_issues_links_each_child_to_its_parent() {
         let data = json!({ "nodes": [
-            { "id": "I_100", "subIssues": { "nodes": [
-                raw_issue("I_201", 201, "Stripe webhook handler", &[]),
-                raw_issue("I_207", 207, "Invoice PDF", &[])
-            ]}},
-            { "id": "I_300", "subIssues": { "nodes": [] }}
+            { "id": "I_100", "subIssues": {
+                "pageInfo": { "hasNextPage": false },
+                "nodes": [
+                    raw_issue("I_201", 201, "Stripe webhook handler", &[]),
+                    raw_issue("I_207", 207, "Invoice PDF", &[])
+                ]}},
+            { "id": "I_300", "subIssues": {
+                "pageInfo": { "hasNextPage": true },
+                "nodes": [] }},
+            null
         ]});
-        let issues = parse_sub_issues(data).unwrap();
-        assert_eq!(issues.len(), 2);
+        let lists = parse_sub_issues(data).unwrap();
+        assert_eq!(lists.len(), 2);
+        assert_eq!(lists[0].parent_id, "I_100");
+        assert!(lists[0].complete);
+        assert_eq!(lists[0].children.len(), 2);
         assert!(
-            issues
+            lists[0]
+                .children
                 .iter()
                 .all(|i| i.parent_node_id.as_deref() == Some("I_100"))
         );
-        assert_eq!(issues[1].number, 207);
+        assert!(!lists[1].complete);
     }
 
     #[test]
