@@ -13,6 +13,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("migrations/0005_members_is_admin.sql")),
         M::up(include_str!("migrations/0006_missed_submissions.sql")),
         M::up(include_str!("migrations/0007_entries_indexes.sql")),
+        M::up(include_str!("migrations/0008_github.sql")),
     ])
 }
 
@@ -71,6 +72,12 @@ mod tests {
                 "daily_threads",
                 "entries",
                 "followups_sent",
+                "github_issue_assignees",
+                "github_issues",
+                "github_pr_issues",
+                "github_prs",
+                "github_reviews",
+                "github_sync_state",
                 "members",
                 "missed_submissions",
                 "reminders_sent"
@@ -128,6 +135,12 @@ mod tests {
                 "daily_threads",
                 "entries",
                 "followups_sent",
+                "github_issue_assignees",
+                "github_issues",
+                "github_pr_issues",
+                "github_prs",
+                "github_reviews",
+                "github_sync_state",
                 "members",
                 "missed_submissions",
                 "reminders_sent"

@@ -30,8 +30,8 @@ struct MemberSeed {
     /// The member's GitHub username, for the GitHub integration. Optional -
     /// a member without one (e.g. a designer) simply has no GitHub
     /// activity attributed to them. Validated (`is_valid_github_user`) and
-    /// checked for duplicates here; not stored in the DB until the sync
-    /// lands (design phase 2).
+    /// checked for duplicates here; seeded into `members.github_user`, which
+    /// the GitHub sync resolves to a numeric `github_id`.
     #[serde(default)]
     github_user: Option<String>,
 }
@@ -168,14 +168,15 @@ pub fn seed(conn: &Connection) -> Result<usize> {
     for member in &members {
         let is_lead = matches!(member.role.as_str(), "lead" | "viewer");
         tx.execute(
-            "INSERT INTO members (discord_user_id, name, role, is_lead, is_admin)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO members (discord_user_id, name, role, is_lead, is_admin, github_user)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 member.discord_user_id,
                 member.name,
                 member.role,
                 is_lead,
-                member.is_admin
+                member.is_admin,
+                member.github_user
             ],
         )
         .with_context(|| format!("failed to insert member {:?}", member.discord_user_id))?;
@@ -375,6 +376,41 @@ mod tests {
         assert!(!is_lead(&conn, "1").unwrap());
         assert!(!is_member(&conn, "1").unwrap());
         assert!(is_member(&conn, "2").unwrap());
+    }
+
+    #[test]
+    fn seed_stores_github_user_and_leaves_the_id_for_the_sync() {
+        let conn = open_test_db();
+        seed_from(
+            &conn,
+            r#"
+            [[members]]
+            discord_user_id = "1"
+            name = "Budi"
+            role = "senior"
+            github_user = "budi-dev"
+
+            [[members]]
+            discord_user_id = "2"
+            name = "Andi"
+            role = "designer"
+            "#,
+        )
+        .unwrap();
+        let rows: Vec<(String, Option<String>, Option<i64>)> = conn
+            .prepare("SELECT discord_user_id, github_user, github_id FROM members ORDER BY 1")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("1".into(), Some("budi-dev".into()), None),
+                ("2".into(), None, None),
+            ]
+        );
     }
 
     #[test]
