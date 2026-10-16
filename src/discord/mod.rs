@@ -21,7 +21,7 @@ use serenity::all::{
 };
 use serenity::async_trait;
 
-use crate::config::Config;
+use crate::config::{Config, GithubConfig};
 use crate::members;
 
 pub struct Handler {
@@ -31,6 +31,7 @@ pub struct Handler {
     carryover_lookback_days: u32,
     day_summary_time: NaiveTime,
     run_on_weekends: bool,
+    github: Option<GithubConfig>,
 }
 
 #[async_trait]
@@ -150,7 +151,9 @@ impl EventHandler for Handler {
                     _ => {}
                 },
                 "admin" => match admin::subcommand(&command.data.options) {
-                    Some(("status", _)) => admin::handle_status(&ctx, &command, &self.db).await,
+                    Some(("status", _)) => {
+                        admin::handle_status(&ctx, &command, &self.db, self.github.as_ref()).await
+                    }
                     Some(("upgrade", opts)) => {
                         admin::handle_upgrade(&ctx, &command, opts, &self.db).await
                     }
@@ -297,6 +300,7 @@ pub async fn run(
             carryover_lookback_days: config.carryover_lookback_days,
             day_summary_time: config.day_summary_time,
             run_on_weekends: config.run_on_weekends,
+            github: config.github.clone(),
         })
         .await
         .context("failed to build Discord client")?;

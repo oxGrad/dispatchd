@@ -354,6 +354,7 @@ name = "dispatchd"
 version = "0.11.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "chrono-tz",
  "clap",
@@ -361,6 +362,7 @@ dependencies = [
  "libc",
  "minisign-verify",
  "reqwest",
+ "ring",
  "rpassword",
  "rusqlite",
  "rusqlite_migration",

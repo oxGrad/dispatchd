@@ -4,6 +4,8 @@ mod discord;
 mod discord_login;
 mod entries;
 mod followups;
+mod github;
+mod github_login;
 mod init;
 mod lock;
 mod maintenance;
@@ -46,6 +48,11 @@ enum Command {
     Discord {
         #[command(subcommand)]
         action: DiscordCommand,
+    },
+    /// Manage the GitHub App private key (optional GitHub integration)
+    Github {
+        #[command(subcommand)]
+        action: GithubCommand,
     },
     /// Manage the systemd service (Linux only)
     Service {
@@ -102,6 +109,19 @@ enum DiscordCommand {
 }
 
 #[derive(Subcommand)]
+enum GithubCommand {
+    /// Validate the GitHub App private key against the [github] App and
+    /// org in config.toml, then encrypt it at rest via systemd-creds
+    Login {
+        /// The App's private key file, as downloaded from GitHub
+        #[arg(long, value_name = "FILE.pem")]
+        key: std::path::PathBuf,
+    },
+    /// Remove the encrypted GitHub App private key
+    Logout,
+}
+
+#[derive(Subcommand)]
 enum ServiceCommand {
     /// Install the systemd unit and enable it to start at boot
     Install,
@@ -152,6 +172,17 @@ fn discord_token() -> Option<String> {
 async fn run_status() -> anyhow::Result<()> {
     service::status()?;
     discord_login::ping().await;
+    // A broken config.toml shouldn't hide the systemd/Discord checks above,
+    // so it's reported here rather than bailing.
+    match Config::load_for_sudo().map(|(config, _)| config) {
+        Ok(config) => print!(
+            "{}",
+            github_login::format_github_ping(
+                &github_login::ping_report(config.github.as_ref()).await
+            )
+        ),
+        Err(e) => println!("github:\n  config:               error - {e:#}"),
+    }
     Ok(())
 }
 
@@ -163,20 +194,55 @@ fn run_validate() -> anyhow::Result<()> {
         Some(path) => println!("config.toml: ok ({})", path.display()),
         None => println!("config.toml: not configured (using defaults)"),
     }
-    Config::load()?;
+    let config = Config::load()?;
+    match &config.github {
+        Some(github) => println!(
+            "github: configured (app {} on {}, sync every {} min)",
+            github.app_id, github.org, github.sync_interval_minutes
+        ),
+        None => println!("github: not configured (optional)"),
+    }
 
-    match members::resolve_path() {
+    let roster = match members::resolve_path() {
         Some(path) => {
-            let count = members::validate()?;
+            let roster = members::validate()?;
             println!(
-                "members.toml: ok ({count} member{} - {})",
-                if count == 1 { "" } else { "s" },
+                "members.toml: ok ({} member{}, {} with github_user - {})",
+                roster.members,
+                if roster.members == 1 { "" } else { "s" },
+                roster.with_github,
                 path.display()
             );
+            roster
         }
-        None => println!("members.toml: not configured (no roster to seed)"),
+        None => {
+            println!("members.toml: not configured (no roster to seed)");
+            members::RosterSummary::default()
+        }
+    };
+    if let Some(warning) = github_mismatch_warning(config.github.is_some(), roster) {
+        println!("warning: {warning}");
     }
     Ok(())
+}
+
+/// Half-configured GitHub integration is valid (nothing breaks) but almost
+/// certainly not what was meant, so `validate` points it out.
+fn github_mismatch_warning(
+    github_configured: bool,
+    roster: members::RosterSummary,
+) -> Option<&'static str> {
+    match (github_configured, roster.with_github) {
+        (false, n) if n > 0 => Some(
+            "members.toml sets github_user but config.toml has no [github] app_id/org - \
+             GitHub activity won't be tracked",
+        ),
+        (true, 0) if roster.members > 0 => Some(
+            "[github] is configured but no member has github_user set - no GitHub activity \
+             will be attributed to anyone",
+        ),
+        _ => None,
+    }
 }
 
 fn run_maintenance() -> anyhow::Result<()> {
@@ -210,6 +276,12 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Discord {
             action: DiscordCommand::Logout,
         }) => return discord_login::logout(),
+        Some(Command::Github {
+            action: GithubCommand::Login { key },
+        }) => return github_login::run(&key).await,
+        Some(Command::Github {
+            action: GithubCommand::Logout,
+        }) => return github_login::logout(),
         Some(Command::Service {
             action: ServiceCommand::Install,
         }) => return service::install(),
@@ -299,6 +371,31 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
+
+    fn roster(members: usize, with_github: usize) -> members::RosterSummary {
+        members::RosterSummary {
+            members,
+            with_github,
+        }
+    }
+
+    #[test]
+    fn github_mismatch_warning_flags_half_configured_setups() {
+        assert!(
+            github_mismatch_warning(false, roster(6, 2))
+                .unwrap()
+                .contains("no [github]")
+        );
+        assert!(
+            github_mismatch_warning(true, roster(6, 0))
+                .unwrap()
+                .contains("no member has github_user")
+        );
+        assert_eq!(github_mismatch_warning(true, roster(6, 5)), None);
+        assert_eq!(github_mismatch_warning(false, roster(6, 0)), None);
+        // No roster at all is its own (already reported) state.
+        assert_eq!(github_mismatch_warning(true, roster(0, 0)), None);
+    }
 
     #[test]
     fn both_present_yields_credentials() {

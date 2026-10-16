@@ -27,6 +27,31 @@ struct MemberSeed {
     /// `/team`'s `is_lead` gate.
     #[serde(default)]
     is_admin: bool,
+    /// The member's GitHub username, for the GitHub integration. Optional -
+    /// a member without one (e.g. a designer) simply has no GitHub
+    /// activity attributed to them. Validated (`is_valid_github_user`) and
+    /// checked for duplicates here; not stored in the DB until the sync
+    /// lands (design phase 2).
+    #[serde(default)]
+    github_user: Option<String>,
+}
+
+/// What `dispatchd validate` reports about the roster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RosterSummary {
+    pub members: usize,
+    /// How many members have a `github_user` set.
+    pub with_github: usize,
+}
+
+/// GitHub's username rules: 1-39 characters, ASCII letters, digits and
+/// hyphens, not starting with a hyphen. (GitHub also forbids trailing and
+/// doubled hyphens for new accounts, but some older accounts have them, so
+/// those aren't rejected.)
+fn is_valid_github_user(name: &str) -> bool {
+    (1..=39).contains(&name.len())
+        && !name.starts_with('-')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// Resolves the roster file to read, without reading it. `None` means
@@ -70,6 +95,7 @@ fn load_and_validate() -> Result<Option<MembersFile>> {
     let file: MembersFile = toml::from_str(&contents)
         .with_context(|| format!("failed to parse members file {}", path.display()))?;
 
+    let mut github_users = std::collections::HashMap::new();
     for member in &file.members {
         if !VALID_ROLES.contains(&member.role.as_str()) {
             bail!(
@@ -80,16 +106,52 @@ fn load_and_validate() -> Result<Option<MembersFile>> {
                 VALID_ROLES
             );
         }
+        if let Some(user) = &member.github_user {
+            if !is_valid_github_user(user) {
+                let hint = if user.starts_with('@') {
+                    " - drop the leading @"
+                } else {
+                    ""
+                };
+                bail!(
+                    "invalid github_user {:?} for member {:?} ({}): expected a GitHub \
+                     username{hint}",
+                    user,
+                    member.name,
+                    member.discord_user_id
+                );
+            }
+            // GitHub usernames are case-insensitive, so `Budi` and `budi`
+            // are the same account.
+            if let Some(other) = github_users.insert(user.to_ascii_lowercase(), &member.name) {
+                bail!(
+                    "github_user {:?} is set on both {:?} and {:?} - each GitHub account \
+                     can belong to only one member",
+                    user,
+                    other,
+                    member.name
+                );
+            }
+        }
     }
 
     Ok(Some(file))
 }
 
 /// Parses and validates `members.toml` without touching the DB - the
-/// `dispatchd validate` check. Returns the number of members that would be
-/// seeded (0 if no file was found).
-pub fn validate() -> Result<usize> {
-    Ok(load_and_validate()?.map_or(0, |file| file.members.len()))
+/// `dispatchd validate` check. Returns how many members would be seeded
+/// and how many of them have a `github_user` (all 0 if no file was found).
+pub fn validate() -> Result<RosterSummary> {
+    Ok(
+        load_and_validate()?.map_or_else(RosterSummary::default, |file| RosterSummary {
+            members: file.members.len(),
+            with_github: file
+                .members
+                .iter()
+                .filter(|m| m.github_user.is_some())
+                .count(),
+        }),
+    )
 }
 
 /// Replaces the `members` table with `members.toml`'s roster, atomically.
@@ -243,7 +305,7 @@ mod tests {
         result
     }
 
-    fn validate_from(contents: &str) -> Result<usize> {
+    fn validate_from(contents: &str) -> Result<RosterSummary> {
         let _guard = ENV_LOCK.lock().unwrap();
         let (_dir, path) = write_members(contents);
         // SAFETY: held under ENV_LOCK; removed before returning.
@@ -444,7 +506,7 @@ mod tests {
 
     #[test]
     fn validate_counts_members_without_a_db_connection() {
-        let count = validate_from(
+        let summary = validate_from(
             r#"
             [[members]]
             discord_user_id = "1"
@@ -455,11 +517,63 @@ mod tests {
             discord_user_id = "2"
             name = "Budi"
             role = "viewer"
+            github_user = "budi-dev"
             "#,
         )
         .unwrap();
 
-        assert_eq!(count, 2);
+        assert_eq!(
+            summary,
+            RosterSummary {
+                members: 2,
+                with_github: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_invalid_github_user() {
+        let err = validate_from(
+            "[[members]]\ndiscord_user_id = \"1\"\nname = \"Budi\"\nrole = \"senior\"\ngithub_user = \"@budi\"\n",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("drop the leading @"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_a_github_user_shared_by_two_members() {
+        let err = validate_from(
+            r#"
+            [[members]]
+            discord_user_id = "1"
+            name = "Alice"
+            role = "lead"
+            github_user = "Budi-Dev"
+
+            [[members]]
+            discord_user_id = "2"
+            name = "Budi"
+            role = "senior"
+            github_user = "budi-dev"
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("only one member"), "{err}");
+    }
+
+    #[test]
+    fn is_valid_github_user_follows_githubs_rules() {
+        assert!(is_valid_github_user("budi"));
+        assert!(is_valid_github_user("budi-dev-2"));
+        assert!(is_valid_github_user(&"a".repeat(39)));
+        assert!(!is_valid_github_user(""));
+        assert!(!is_valid_github_user(&"a".repeat(40)));
+        assert!(!is_valid_github_user("-budi"));
+        assert!(!is_valid_github_user("budi_dev"));
+        assert!(!is_valid_github_user("budi dev"));
+        assert!(!is_valid_github_user("@budi"));
     }
 
     #[test]
@@ -480,11 +594,11 @@ mod tests {
             env::remove_var(MEMBERS_PATH_OVERRIDE_ENV);
             env::set_var("XDG_CONFIG_HOME", empty_xdg.path());
         }
-        let count = validate().unwrap();
+        let summary = validate().unwrap();
         unsafe {
             env::remove_var("XDG_CONFIG_HOME");
         }
-        assert_eq!(count, 0);
+        assert_eq!(summary, RosterSummary::default());
     }
 
     #[test]

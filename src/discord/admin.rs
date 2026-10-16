@@ -9,7 +9,9 @@ use serenity::all::{
     CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse, Permissions,
 };
 
+use crate::config::GithubConfig;
 use crate::discord_login::{self, DiscordPing};
+use crate::github_login::{self, GithubPing};
 use crate::service::{self, ServiceStatus};
 use crate::upgrade::{Request, StatusLine};
 use crate::{members, upgrade};
@@ -89,12 +91,18 @@ fn version_line(check: Result<upgrade::UpgradeCheck, String>) -> String {
     }
 }
 
-fn format_admin_status(svc: &ServiceStatus, ping: &DiscordPing, version_line: &str) -> String {
+fn format_admin_status(
+    svc: &ServiceStatus,
+    ping: &DiscordPing,
+    github: &GithubPing,
+    version_line: &str,
+) -> String {
     format!(
-        "```\n{}{}\n{}```",
+        "```\n{}{}\n{}{}```",
         service::format_status(svc),
         version_line,
         discord_login::format_ping(ping),
+        github_login::format_github_ping(github),
     )
 }
 
@@ -144,6 +152,7 @@ pub async fn handle_status(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
+    github: Option<&GithubConfig>,
 ) {
     let discord_user_id = command.user.id.to_string();
     let allowed = {
@@ -176,8 +185,9 @@ pub async fn handle_status(
 
     let svc = service::status_report();
     let ping = discord_login::ping_report().await;
+    let github = github_login::ping_report(github).await;
     let check = upgrade::check().await.map_err(|e| e.to_string());
-    let body = format_admin_status(&svc, &ping, &version_line(check));
+    let body = format_admin_status(&svc, &ping, &github, &version_line(check));
     edit(ctx, command, body).await;
 }
 
@@ -475,16 +485,28 @@ mod tests {
             unit_active: Some("active".into()),
             upgrade_helper_installed: true,
             cred_present: true,
+            github_cred_present: false,
         };
         let ping = DiscordPing {
             token_found: false,
             result: None,
         };
-        let out = format_admin_status(&svc, &ping, "  version:              0.6.0 (up to date)");
+        let github = GithubPing {
+            app: None,
+            key_found: false,
+            result: None,
+        };
+        let out = format_admin_status(
+            &svc,
+            &ping,
+            &github,
+            "  version:              0.6.0 (up to date)",
+        );
         assert!(out.starts_with("```\n"));
         assert!(out.ends_with("```"));
         assert!(out.contains("systemd:"));
         assert!(out.contains("version:              0.6.0 (up to date)"));
         assert!(out.contains("discord:"));
+        assert!(out.contains("github:"));
     }
 }

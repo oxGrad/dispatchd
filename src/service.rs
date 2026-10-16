@@ -16,6 +16,12 @@ const INSTALL_LOCK_PATH: &str = "/etc/dispatchd/service-install.lock";
 /// duration of the service's run - dispatchd itself never sees the
 /// plaintext token touch disk. See `main.rs::discord_token`.
 pub(crate) const CRED_PATH: &str = "/etc/dispatchd/discord_token.cred";
+/// Where `dispatchd github login` writes the systemd-creds-encrypted GitHub
+/// App private key. Unlike `CRED_PATH`, the unit only references it when
+/// it exists (`set_github_credential`) - the integration is optional, and
+/// systemd refuses to start a unit whose `LoadCredentialEncrypted=` file is
+/// missing.
+pub(crate) const GITHUB_CRED_PATH: &str = "/etc/dispatchd/github_app_key.cred";
 /// `LoadCredentialEncrypted=` (and `systemd-creds` itself) landed in this
 /// release - there's no plaintext fallback for older systemd, so both
 /// `install()` and `discord_login::run()` refuse to proceed rather than
@@ -37,8 +43,11 @@ pub(crate) const UPGRADE_PATH_PATH: &str = "/etc/systemd/system/dispatchd-upgrad
 /// not applied to the root upgrade helper, which has to write the binary
 /// under `/usr`. `ProtectSystem=full` (not `strict`) leaves `/var` and the
 /// user's home - where the DB lives by default - writable.
-fn render_unit(exe_path: &str, user: &str) -> String {
-    format!(
+///
+/// `github_cred` adds the GitHub App key credential line (see
+/// `set_github_credential`).
+fn render_unit(exe_path: &str, user: &str, github_cred: bool) -> String {
+    let unit = format!(
         "[Unit]\n\
          Description=dispatchd - Discord standup bot\n\
          After=network-online.target\n\
@@ -57,7 +66,76 @@ fn render_unit(exe_path: &str, user: &str) -> String {
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n"
+    );
+    set_github_credential(&unit, github_cred)
+}
+
+fn github_credential_line() -> String {
+    format!(
+        "LoadCredentialEncrypted={}:{GITHUB_CRED_PATH}",
+        crate::github::CRED_NAME
     )
+}
+
+/// Pure - returns `unit` with the GitHub App key's
+/// `LoadCredentialEncrypted=` line present (right after the Discord one) or
+/// absent. Idempotent either way. Used both when rendering a fresh unit and
+/// by `github login`/`logout` to patch an already-installed one in place,
+/// so a missing key file never leaves the unit unable to start.
+pub(crate) fn set_github_credential(unit: &str, present: bool) -> String {
+    let github_line = github_credential_line();
+    let discord_line = format!("LoadCredentialEncrypted=discord_token:{CRED_PATH}");
+    let mut out = String::with_capacity(unit.len() + github_line.len() + 1);
+    for line in unit.lines() {
+        if line == github_line {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+        if present && line == discord_line {
+            out.push_str(&github_line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// What `sync_github_credential` did to the installed unit.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UnitSync {
+    /// No `dispatchd.service` installed - nothing to patch; `service
+    /// install` will render the line itself later.
+    NotInstalled,
+    Unchanged,
+    Updated,
+}
+
+/// Adds or removes the GitHub credential line in the installed
+/// `dispatchd.service` and reloads systemd if that changed anything. Called
+/// by `dispatchd github login` (present) and `logout` (absent) so the
+/// operator doesn't have to re-run `service install` by hand.
+#[cfg(target_os = "linux")]
+pub fn sync_github_credential(present: bool) -> anyhow::Result<UnitSync> {
+    use anyhow::Context;
+
+    let current = match std::fs::read_to_string(UNIT_PATH) {
+        Ok(unit) => unit,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(UnitSync::NotInstalled),
+        Err(e) => return Err(e).with_context(|| format!("failed to read {UNIT_PATH}")),
+    };
+    let updated = set_github_credential(&current, present);
+    if updated == current {
+        return Ok(UnitSync::Unchanged);
+    }
+    std::fs::write(UNIT_PATH, updated)
+        .with_context(|| format!("failed to update {UNIT_PATH} (are you root?)"))?;
+    run_systemctl(&["daemon-reload"])?;
+    Ok(UnitSync::Updated)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn sync_github_credential(_present: bool) -> anyhow::Result<UnitSync> {
+    Ok(UnitSync::NotInstalled)
 }
 
 const HARDENING: &str = "NoNewPrivileges=yes\nPrivateTmp=yes\nProtectSystem=full\n";
@@ -225,7 +303,11 @@ pub fn install() -> anyhow::Result<()> {
         println!("once dispatchd.service is installed, to set it up.");
     }
 
-    let unit = render_unit(exe, &user);
+    let github_cred = std::path::Path::new(GITHUB_CRED_PATH).exists();
+    if github_cred {
+        println!("{GITHUB_CRED_PATH} found - the unit will load the GitHub App key");
+    }
+    let unit = render_unit(exe, &user, github_cred);
     std::fs::write(UNIT_PATH, unit).with_context(|| {
         format!("failed to write {UNIT_PATH} (are you root? try: sudo dispatchd service install)")
     })?;
@@ -307,6 +389,11 @@ pub fn uninstall() -> anyhow::Result<()> {
             "{CRED_PATH} left untouched - run `sudo dispatchd discord logout` to remove it too."
         );
     }
+    if std::path::Path::new(GITHUB_CRED_PATH).exists() {
+        println!(
+            "{GITHUB_CRED_PATH} left untouched - run `sudo dispatchd github logout` to remove it too."
+        );
+    }
     Ok(())
 }
 
@@ -379,6 +466,7 @@ pub struct ServiceStatus {
     pub unit_active: Option<String>,
     pub upgrade_helper_installed: bool,
     pub cred_present: bool,
+    pub github_cred_present: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -393,6 +481,7 @@ pub fn status_report() -> ServiceStatus {
         unit_active: unit_installed.then(|| systemctl_query(&["is-active", "dispatchd.service"])),
         upgrade_helper_installed: std::path::Path::new(UPGRADE_PATH_PATH).exists(),
         cred_present: std::path::Path::new(CRED_PATH).exists(),
+        github_cred_present: std::path::Path::new(GITHUB_CRED_PATH).exists(),
     }
 }
 
@@ -407,6 +496,7 @@ pub fn status_report() -> ServiceStatus {
         unit_active: None,
         upgrade_helper_installed: false,
         cred_present: false,
+        github_cred_present: false,
     }
 }
 
@@ -451,6 +541,14 @@ pub fn format_status(r: &ServiceStatus) -> String {
     } else {
         out.push_str("  discord token:        not set - run: sudo dispatchd discord login\n");
     }
+    // Optional, so "not set" is informational rather than a to-do.
+    if r.github_cred_present {
+        out.push_str(&format!(
+            "  github app key:       encrypted credential present ({GITHUB_CRED_PATH})\n"
+        ));
+    } else {
+        out.push_str("  github app key:       not set (optional - see docs/github-setup.md)\n");
+    }
     out
 }
 
@@ -472,7 +570,7 @@ mod tests {
 
     #[test]
     fn render_unit_interpolates_exe_path_and_user() {
-        let unit = render_unit("/usr/local/bin/dispatchd", "pi");
+        let unit = render_unit("/usr/local/bin/dispatchd", "pi", false);
         assert!(unit.contains("ExecStart=/usr/local/bin/dispatchd"));
         assert!(unit.contains("User=pi"));
         assert!(
@@ -482,6 +580,38 @@ mod tests {
         );
         assert!(unit.contains("WantedBy=multi-user.target"));
         assert!(unit.contains("Restart=on-failure"));
+    }
+
+    #[test]
+    fn render_unit_adds_the_github_credential_only_when_asked() {
+        let without = render_unit("/usr/local/bin/dispatchd", "pi", false);
+        assert!(!without.contains("github_app_key"), "{without}");
+
+        let with = render_unit("/usr/local/bin/dispatchd", "pi", true);
+        assert!(
+            with.contains(
+                "LoadCredentialEncrypted=discord_token:/etc/dispatchd/discord_token.cred\n\
+                 LoadCredentialEncrypted=github_app_key:/etc/dispatchd/github_app_key.cred\n"
+            ),
+            "{with}"
+        );
+    }
+
+    #[test]
+    fn set_github_credential_round_trips_and_is_idempotent() {
+        let base = render_unit("/usr/local/bin/dispatchd", "pi", false);
+        let added = set_github_credential(&base, true);
+        assert_eq!(set_github_credential(&added, true), added);
+        assert_eq!(set_github_credential(&added, false), base);
+        assert_eq!(set_github_credential(&base, false), base);
+    }
+
+    #[test]
+    fn format_status_reports_the_github_key_as_optional() {
+        let mut r = base_status();
+        assert!(format_status(&r).contains("github app key:       not set (optional"));
+        r.github_cred_present = true;
+        assert!(format_status(&r).contains("github app key:       encrypted credential present"));
     }
 
     #[test]
@@ -527,7 +657,7 @@ mod tests {
     #[test]
     fn bot_and_maintenance_units_are_hardened() {
         for unit in [
-            render_unit("/usr/local/bin/dispatchd", "pi"),
+            render_unit("/usr/local/bin/dispatchd", "pi", false),
             render_maintenance_service("/usr/local/bin/dispatchd", "pi"),
         ] {
             assert!(unit.contains("\nNoNewPrivileges=yes\n"), "{unit}");
@@ -547,7 +677,7 @@ mod tests {
 
     #[test]
     fn render_unit_declares_a_preserved_runtime_directory() {
-        let unit = render_unit("/usr/local/bin/dispatchd", "pi");
+        let unit = render_unit("/usr/local/bin/dispatchd", "pi", false);
         assert!(unit.contains("RuntimeDirectory=dispatchd"));
         assert!(unit.contains("RuntimeDirectoryPreserve=yes"));
     }
@@ -582,6 +712,7 @@ mod tests {
             unit_active: Some("active".into()),
             upgrade_helper_installed: true,
             cred_present: true,
+            github_cred_present: false,
         }
     }
 
