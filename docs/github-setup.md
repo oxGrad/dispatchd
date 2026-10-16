@@ -176,5 +176,6 @@ per-GitHub-user breakdown, without writing anything.
 | `the installation token can't list repositories (403)` | The App is missing **Metadata: Read-only**. Fix the permissions, then accept the updated permissions in the org's installation settings. |
 | `key: not found` | Run `sudo dispatchd github login --key <file.pem>` (needs root, because the credential is root-only). |
 | `0 repos visible` | The installation has no repositories selected (step 2). |
-| `GitHub sync disabled - ... no App key was found` (bot log) | The bot started without the key: run `github login`, then restart dispatchd. |
+| `GitHub sync disabled - ... no App key was found` (bot log), or `sync error: sync not running` in `/admin status` | The bot started without the key: run `github login`, then restart dispatchd. |
+| `skipped N inaccessible item(s)` (preview) / `skipped an inaccessible item` (bot log) | A PR or sub-issue points at an issue in a repo the App isn't installed on (or a deleted one). Harmless - everything else syncs; install the App on that repo if you want it tracked. |
 | `github_user "x" ... doesn't exist on GitHub` (bot log) | That member renamed their GitHub account; update `github_user` in `members.toml`. |

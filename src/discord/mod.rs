@@ -329,14 +329,17 @@ fn spawn_github_sync(config: &Config, db: &Arc<Mutex<Connection>>) {
     let Some(github) = config.github.clone() else {
         return;
     };
-    let Some(pem) = crate::github::app_key_pem() else {
-        println!(
-            "GitHub sync disabled - [github] is configured but no App key was found; run \
-             `sudo dispatchd github login --key <file.pem>` (see docs/github-setup.md)"
-        );
-        return;
-    };
-    match crate::github::auth::AppKey::from_pem(&pem) {
+    let key = crate::github::app_key_pem()
+        .ok_or_else(|| {
+            "no App key was found - run `sudo dispatchd github login --key <file.pem>` \
+             (see docs/github-setup.md), then restart dispatchd"
+                .to_string()
+        })
+        .and_then(|pem| {
+            crate::github::auth::AppKey::from_pem(&pem)
+                .map_err(|e| format!("the App key is unusable: {e:#}"))
+        });
+    match key {
         Ok(key) => {
             println!(
                 "GitHub sync enabled for {} (every {} min)",
@@ -344,7 +347,18 @@ fn spawn_github_sync(config: &Config, db: &Arc<Mutex<Connection>>) {
             );
             tokio::spawn(crate::github::sync::run_loop(db.clone(), github, key));
         }
-        Err(e) => eprintln!("GitHub sync disabled - the App key is unusable: {e:#}"),
+        Err(reason) => {
+            eprintln!("GitHub sync disabled - {reason}");
+            // Recorded so /admin status says the sync isn't running, rather
+            // than showing a stale "last ok" from an earlier process.
+            let conn = db.lock().expect("db mutex poisoned");
+            if let Err(e) = crate::github::store::record_sync_error(
+                &conn,
+                &format!("sync not running - {reason}"),
+            ) {
+                eprintln!("failed to record the github sync status: {e}");
+            }
+        }
     }
 }
 

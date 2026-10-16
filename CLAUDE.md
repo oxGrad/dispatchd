@@ -286,8 +286,10 @@ src/
   members.rs     roster seeding (seed replaces the whole table in one
                  transaction - members.toml is the source of truth;
                  optional github_user is validated - GitHub's username
-                 rules, unique case-insensitively - but not stored until
-                 the GitHub sync lands) +
+                 rules, unique case-insensitively - and seeded into
+                 members.github_user; a resolved members.github_id is
+                 carried across the reseed while github_user is unchanged,
+                 so a GitHub rename can't orphan or misattribute history) +
                  is_member (gates /todo + /progress in discord/mod.rs) +
                  is_lead/is_active_lead checks +
                  all_member_ids + roster/name_of (used by /team remind's
@@ -374,24 +376,46 @@ src/
                  advisory) + InstallationToken::needs_refresh. client.rs -
                  the REST calls (GET /app, /orgs/{org}/installation, POST
                  .../access_tokens, /installation/repositories,
-                 /users/{login}) and graphql() (any `errors` entry fails
-                 the call - a partial page must never advance the
-                 high-water mark), pure parse_* / describe_status, check().
-                 graphql.rs - the four queries (PR search, issue search,
-                 issues by id, sub-issues; each defines only the fragments
-                 it uses, since GitHub rejects unused ones) + pure parsers
-                 into Issue/PullRequest/Review rows; Page::high_water comes
-                 from search hits only. store.rs - upserts, the
+                 /users/{login}), all through one `request` helper, and
+                 graphql() -> GraphqlResponse (parse_graphql tolerates
+                 node-level FORBIDDEN/NOT_FOUND errors - an item outside
+                 the installation, a deleted id - and reports them as
+                 `skipped`; anything else fails the call, error text capped
+                 at 3 quoted messages), pure parse_* / describe_status,
+                 check(). graphql.rs - the four queries (PR search, issue
+                 search, issues by id, sub-issues; each defines only the
+                 fragments it uses, since GitHub rejects unused ones; a
+                 parent is selected with its own `parent { id }` so a
+                 riding-along parent never overwrites its link upward) +
+                 pure parsers into Issue/PullRequest/Review rows, each
+                 Issue tagged with its Origin (SearchHit / Parent / ById /
+                 SubIssue); Page::high_water comes from search hits only,
+                 Page::last_updated is the resume point when paging is cut
+                 short; SubIssueList::complete says whether a deliverable's
+                 child list can prove a child was removed; SUB_ISSUE_BATCH
+                 = 20 keeps that query under GitHub's 500k-node limit.
+                 store.rs - write_batch (one transaction per run: deduped
+                 upserts, unlinking children a complete sub-issue list no
+                 longer has, then the high-water marks), the
                  github_sync_state bookkeeping (raise_high_water never
-                 lowers), members_needing_github_id, sync_summary.
-                 sync.rs - TokenSource (cached installation token),
-                 sync_once (search since high-water minus a 10-min
-                 overlap, then PR-linked issues by id, then every
-                 sub-issue of each SOW-tagged parent, then member id
-                 resolution; DB lock never held across a request),
-                 run_loop (spawned by discord::spawn_github_sync, next to
-                 but independent of the ticker), preview/format_preview
-                 (`github preview`). mod.rs - app_key_pem(), resolved like
+                 lowers; record_sync_error caps the stored error at 300
+                 chars for /admin status), members_needing_github_id,
+                 sync_summary. sync.rs - TokenSource (cached installation
+                 token, checked before every request; owns the one HTTP
+                 client), collect (the whole fetch pipeline, no DB: one
+                 generic fetch_search for both searches, logging and
+                 resuming from last_updated if GitHub's 1,000-result cap
+                 cuts it short; PR-linked issues by id; sub-issues only for
+                 deliverables behind *fresh* rows - parents_to_expand -
+                 so the 10-min overlap doesn't re-expand forever),
+                 sync_once (collect + write_batch + member id resolution,
+                 where one member's failed lookup is logged and skipped;
+                 DB lock never held across a request), run_loop (spawned
+                 by discord::spawn_github_sync, next to but independent of
+                 the ticker; a missing/broken key records "sync not
+                 running" for /admin status), preview/format_preview
+                 (`github preview` - the same `collect`, counting only
+                 deduplicated search hits). mod.rs - app_key_pem(), resolved like
                  discord_token. testdata/ holds throwaway test-only keys
   github_login.rs `dispatchd github login/logout` + the GitHub section of
                  `dispatchd status` and `/admin status` (ping_report ->

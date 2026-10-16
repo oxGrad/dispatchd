@@ -6,7 +6,9 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::graphql::{Issue, PullRequest};
+use std::collections::BTreeMap;
+
+use super::graphql::{Issue, PullRequest, SubIssueList};
 
 pub const PR_HIGH_WATER: &str = "pr_high_water";
 pub const ISSUE_HIGH_WATER: &str = "issue_high_water";
@@ -32,6 +34,31 @@ pub fn set_state(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// How much of a sync error `record_sync_error` keeps - it ends up inside
+/// `/admin status`'s single Discord message (2000 characters in all).
+pub const MAX_SYNC_ERROR_CHARS: usize = 300;
+
+/// Stores a failed run's error for `/admin status`, truncated to
+/// `MAX_SYNC_ERROR_CHARS`.
+pub fn record_sync_error(conn: &Connection, error: &str) -> Result<()> {
+    set_state(
+        conn,
+        LAST_SYNC_ERROR,
+        &truncate(error, MAX_SYNC_ERROR_CHARS),
+    )
+}
+
+/// `s` cut to at most `max` characters (not bytes), with a trailing `...`
+/// when anything was dropped.
+pub fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
+}
+
 pub fn clear_state(conn: &Connection, key: &str) -> Result<()> {
     conn.execute("DELETE FROM github_sync_state WHERE key = ?1", [key])?;
     Ok(())
@@ -50,16 +77,83 @@ pub fn raise_high_water(conn: &Connection, key: &str, value: &str) -> Result<()>
     Ok(())
 }
 
+/// Everything one sync run writes, applied by `write_batch` in a single
+/// transaction.
+#[derive(Default)]
+pub struct Batch<'a> {
+    pub issues: &'a [Issue],
+    pub prs: &'a [PullRequest],
+    /// Full sub-issue lists fetched this run, for unlinking children a
+    /// deliverable no longer lists.
+    pub sub_issue_lists: &'a [SubIssueList],
+    pub pr_high_water: Option<&'a str>,
+    pub issue_high_water: Option<&'a str>,
+}
+
+/// Applies one sync run's writes in a single transaction: one commit (one
+/// fsync) for the whole run rather than one per row, so a big backfill
+/// doesn't hold the bot's shared DB lock for long, and the high-water marks
+/// only move if every row landed.
+pub fn write_batch(conn: &Connection, batch: &Batch) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    // The same issue can arrive several times in one run (a parent riding
+    // along with each of its updated children, a sub-issue that was also a
+    // search hit); every copy carries the same data, so write each once.
+    let issues: BTreeMap<&str, &Issue> = batch
+        .issues
+        .iter()
+        .map(|i| (i.node_id.as_str(), i))
+        .collect();
+    for issue in issues.values() {
+        upsert_issue(&tx, issue)?;
+    }
+    for list in batch.sub_issue_lists.iter().filter(|l| l.complete) {
+        unlink_detached_children(&tx, list)?;
+    }
+    for pr in batch.prs {
+        upsert_pr(&tx, pr)?;
+    }
+    if let Some(hw) = batch.pr_high_water {
+        raise_high_water(&tx, PR_HIGH_WATER, hw)?;
+    }
+    if let Some(hw) = batch.issue_high_water {
+        raise_high_water(&tx, ISSUE_HIGH_WATER, hw)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// A sub-issue removed from a deliverable doesn't necessarily change its
+/// own `updatedAt`, so it would never be refetched; when the parent's full
+/// list comes back without it, clear its stored link here instead. Only
+/// called for a complete list - a truncated one can't prove absence.
+fn unlink_detached_children(conn: &Connection, list: &SubIssueList) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT node_id FROM github_issues WHERE parent_node_id = ?1")?;
+    let stored: Vec<String> = stmt
+        .query_map([&list.parent_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for node_id in stored {
+        if !list.children.iter().any(|c| c.node_id == node_id) {
+            conn.execute(
+                "UPDATE github_issues SET parent_node_id = NULL WHERE node_id = ?1",
+                [&node_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Inserts or updates one issue and replaces its assignee set. A sub-issue
 /// never stores a SOW ref of its own (it takes its parent's), so `sow_ref`
-/// is only written for a top-level issue.
-pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
+/// is only written for a top-level issue. Runs inside `write_batch`'s
+/// transaction.
+fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
     let sow_ref = match issue.parent_node_id {
         None => issue.sow_ref.map(|s| s.to_string()),
         Some(_) => None,
     };
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO github_issues (node_id, repo, number, title, state, state_reason,
              author_id, author_login, created_at, closed_at, parent_node_id, sow_ref, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
@@ -86,27 +180,25 @@ pub fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
             issue.updated_at,
         ],
     )?;
-    tx.execute(
+    conn.execute(
         "DELETE FROM github_issue_assignees WHERE issue_node_id = ?1",
         [&issue.node_id],
     )?;
     for github_id in &issue.assignee_ids {
-        tx.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO github_issue_assignees (issue_node_id, github_id)
              VALUES (?1, ?2)",
             params![issue.node_id, github_id],
         )?;
     }
-    tx.commit()?;
     Ok(())
 }
 
 /// Inserts or updates one PR, replaces its linked-issue set, and upserts
 /// its reviews (reviews are never deleted: a dismissed review comes back
-/// with state `dismissed`).
-pub fn upsert_pr(conn: &Connection, pr: &PullRequest) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
+/// with state `dismissed`). Runs inside `write_batch`'s transaction.
+fn upsert_pr(conn: &Connection, pr: &PullRequest) -> Result<()> {
+    conn.execute(
         "INSERT INTO github_prs (node_id, repo, number, title, state, is_draft, author_id,
              author_login, created_at, merged_at, closed_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
@@ -131,18 +223,18 @@ pub fn upsert_pr(conn: &Connection, pr: &PullRequest) -> Result<()> {
             pr.updated_at,
         ],
     )?;
-    tx.execute(
+    conn.execute(
         "DELETE FROM github_pr_issues WHERE pr_node_id = ?1",
         [&pr.node_id],
     )?;
     for issue_id in &pr.closing_issue_ids {
-        tx.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO github_pr_issues (pr_node_id, issue_node_id) VALUES (?1, ?2)",
             params![pr.node_id, issue_id],
         )?;
     }
     for review in &pr.reviews {
-        tx.execute(
+        conn.execute(
             "INSERT INTO github_reviews (node_id, pr_node_id, author_id, author_login, state,
                  submitted_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -159,7 +251,6 @@ pub fn upsert_pr(conn: &Connection, pr: &PullRequest) -> Result<()> {
             ],
         )?;
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -266,6 +357,7 @@ mod tests {
                 deliverable: Some(2),
             }),
             parent_node_id: parent.map(Into::into),
+            origin: crate::github::graphql::Origin::SearchHit,
             warnings: vec![],
         }
     }
@@ -399,6 +491,117 @@ mod tests {
         );
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM github_pr_issues"), 2);
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM github_reviews"), 2);
+    }
+
+    #[test]
+    fn write_batch_writes_everything_once_and_raises_both_marks() {
+        let conn = open_test_db();
+        let parent = issue("I_100", None);
+        let child = issue("I_201", Some("I_100"));
+        // The parent arrives twice, as it would riding along with two children.
+        let issues = vec![parent.clone(), child, parent];
+        let prs = vec![pr()];
+        write_batch(
+            &conn,
+            &Batch {
+                issues: &issues,
+                prs: &prs,
+                pr_high_water: Some("2026-10-14T02:00:00Z"),
+                issue_high_water: Some("2026-10-15T09:00:00Z"),
+                ..Batch::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM github_issues"), 2);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM github_prs"), 1);
+        assert_eq!(
+            get_state(&conn, PR_HIGH_WATER).unwrap().as_deref(),
+            Some("2026-10-14T02:00:00Z")
+        );
+        assert_eq!(
+            get_state(&conn, ISSUE_HIGH_WATER).unwrap().as_deref(),
+            Some("2026-10-15T09:00:00Z")
+        );
+    }
+
+    fn parent_of(conn: &Connection, node_id: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT parent_node_id FROM github_issues WHERE node_id = ?1",
+            [node_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_complete_sub_issue_list_unlinks_children_no_longer_in_it() {
+        let conn = open_test_db();
+        let stored = vec![issue("I_201", Some("I_100")), issue("I_202", Some("I_100"))];
+        write_batch(
+            &conn,
+            &Batch {
+                issues: &stored,
+                ..Batch::default()
+            },
+        )
+        .unwrap();
+
+        // I_202 was removed from the deliverable; its own row didn't change.
+        let lists = vec![SubIssueList {
+            parent_id: "I_100".into(),
+            children: vec![issue("I_201", Some("I_100"))],
+            complete: true,
+        }];
+        write_batch(
+            &conn,
+            &Batch {
+                sub_issue_lists: &lists,
+                ..Batch::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(parent_of(&conn, "I_201").as_deref(), Some("I_100"));
+        assert_eq!(parent_of(&conn, "I_202"), None);
+    }
+
+    #[test]
+    fn an_incomplete_sub_issue_list_unlinks_nothing() {
+        let conn = open_test_db();
+        let stored = vec![issue("I_202", Some("I_100"))];
+        write_batch(
+            &conn,
+            &Batch {
+                issues: &stored,
+                ..Batch::default()
+            },
+        )
+        .unwrap();
+        let lists = vec![SubIssueList {
+            parent_id: "I_100".into(),
+            children: vec![],
+            complete: false,
+        }];
+        write_batch(
+            &conn,
+            &Batch {
+                sub_issue_lists: &lists,
+                ..Batch::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(parent_of(&conn, "I_202").as_deref(), Some("I_100"));
+    }
+
+    #[test]
+    fn record_sync_error_caps_the_stored_length() {
+        let conn = open_test_db();
+        record_sync_error(&conn, &"x".repeat(5_000)).unwrap();
+        let stored = get_state(&conn, LAST_SYNC_ERROR).unwrap().unwrap();
+        assert_eq!(stored.chars().count(), MAX_SYNC_ERROR_CHARS);
+        assert!(stored.ends_with("..."));
+        assert_eq!(truncate("short", 10), "short");
     }
 
     #[test]

@@ -227,7 +227,12 @@ pub fn format_sync_summary(s: &crate::github::store::SyncSummary) -> String {
         None => "  sync:                 no successful sync yet\n".to_string(),
     };
     if let Some(error) = &s.last_error {
-        out.push_str(&format!("  sync error:           {error}\n"));
+        // Already capped when stored (`store::record_sync_error`); capped
+        // again here in case an older build stored a longer one.
+        out.push_str(&format!(
+            "  sync error:           {}\n",
+            crate::github::store::truncate(error, crate::github::store::MAX_SYNC_ERROR_CHARS)
+        ));
     }
     out
 }
