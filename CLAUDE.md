@@ -362,14 +362,20 @@ src/
                  day's rows as a column-aligned GFM table via
                  status::render_aligned_table, for a `.md` attachment)
                  + format_recap_file (joins one table per day for
-                 `/recap`, `None` for an empty range)
+                 `/recap`, `None` for an empty range). RecapRow also
+                 carries sow_ref/github_issue_id/github_pr_id; day_recap
+                 (one day's DayRecap) + format_standup_table (the
+                 GitHub-mode table: adds SOW + GitHub columns) feed
+                 github/report.rs - the classic formatters are untouched
   init.rs        `dispatchd init` subcommand
   sow.rs         SowRef + parse (D.P.a.b and legacy M<a>D<b>, both
                  displayed D.P.a.b), from_labels (`sow:` labels only, most
                  specific wins) and from_title (D.P. form only - "M2" in a
-                 title must not match)
-  github/        GitHub App integration (design phases 1-2: auth + sync;
-                 nothing reads the synced data for reports yet).
+                 title must not match); normalize (display form of a
+                 stored sow_ref, free text kept as typed) and
+                 strip_from_title
+  github/        GitHub App integration (design phases 1-3: auth, sync,
+                 reports; todo/progress linking is phase 4).
                  auth.rs - AppKey (PKCS#1/PKCS#8 PEM -> ring RsaKeyPair) +
                  app_jwt (RS256, signed with ring directly: JWT crates' RSA
                  backends mean aws-lc-rs or the `rsa` crate's open RustSec
@@ -415,7 +421,21 @@ src/
                  the ticker; a missing/broken key records "sync not
                  running" for /admin status), preview/format_preview
                  (`github preview` - the same `collect`, counting only
-                 deduplicated search hits). mod.rs - app_key_pem(), resolved like
+                 deduplicated search hits). report.rs - everything that
+                 reads the synced data, pure DB + formatting (tests in
+                 report/tests.rs, built on the design doc's example team):
+                 window (local days in config.timezone -> a UTC [lo, hi)
+                 compared as RFC3339 text); team_activity/team_github
+                 (`/team github`, credit to the PR author, a sub-issue to
+                 its merged PRs' authors else its assignees, roster-only:
+                 viewers/bots/outsiders never count; items listed for one
+                 day, counts for a range) + headline (the day summary's
+                 names-free team line); day_github (the "GitHub work not on
+                 a todo" + "Code reviews" sections) + github_cells (the
+                 standup table's GitHub column) + day_summary (headline +
+                 file for the ticker); deliverables/recap_file (the
+                 person-free per-SOW `/recap` report, include_member_detail
+                 appends per-day tables). mod.rs - app_key_pem(), resolved like
                  discord_token. testdata/ holds throwaway test-only keys
   github_login.rs `dispatchd github login/logout` + the GitHub section of
                  `dispatchd status` and `/admin status` (ping_report ->
@@ -480,7 +500,8 @@ src/
                  whose LoadCredentialEncrypted= file is missing
   discord/       serenity Handler, one file per slash command
     mod.rs         EventHandler impl, interaction dispatch, shared helpers
-                    (modal_value, get_option_string, is_unknown_channel_error
+                    (modal_value, get_option_string, get_option_bool,
+                    is_unknown_channel_error
                     - the last moved here from ticker.rs, now shared by
                     ticker + team), spawns the ticker alongside the client;
                     calls admin::post_upgrade_confirmation on `ready`.
@@ -546,7 +567,10 @@ src/
                     bot-side members::is_lead check. `send_reminder` and
                     `skip-meeting` share `post_to_standup_thread`, and the
                     module shares is_unknown_channel_error with ticker.rs
-                    (via mod.rs)
+                    (via mod.rs). `github` (handle_github) - per-member
+                    GitHub activity via github::report::team_github, same
+                    dates as /recap, is_lead-gated, ephemeral + chunked;
+                    replies "not configured" when [github] is off
     ticker.rs      creates today's thread early (thread_creation_time,
                     default 08:30) ahead of the todo/progress reminders
                     and the pre-meeting ping (fires at meeting_time minus
@@ -575,6 +599,10 @@ src/
                     cap and the columns actually line up
                     (day_summary_content builds the (header, Some(file))
                     pair, or (header, None) when there's no activity yet).
+                    With [github] configured, github::report::day_summary
+                    builds it instead (github_day_summary_content): the
+                    header gains the team headline, the file the SOW/GitHub
+                    columns and the two GitHub sections.
                     Fires on the clock like every other entry here, not
                     once everyone's
                     actually submitted - a still-open todo just shows "no
@@ -607,7 +635,11 @@ src/
                     for a single day - attachment_name, shared with /missed)
                     (recap::format_recap_file - one column-aligned day
                     table per day, recap::recap_range) - no chunking, an
-                    attachment isn't bound by Discord's 2000-char cap
+                    attachment isn't bound by Discord's 2000-char cap.
+                    With [github] configured (Shape::Github) the file is
+                    github::report::recap_file instead - per-deliverable,
+                    no names - and both commands' include_member_detail
+                    bool appends the per-day tables
     missed.rs      /missed start:<date> end:<date> - tech-lead-only,
                     reads missed_submissions (the ticker's daily snapshot
                     above, not a live query) via followups::missed_detail
