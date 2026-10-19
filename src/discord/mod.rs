@@ -148,6 +148,17 @@ impl EventHandler for Handler {
                     Some(("skip-meeting", _)) => {
                         team::handle_skip_meeting(&ctx, &command, &self.db, &self.timezone).await
                     }
+                    Some(("github", opts)) => {
+                        team::handle_github(
+                            &ctx,
+                            &command,
+                            opts,
+                            &self.db,
+                            &self.timezone,
+                            self.github.is_some(),
+                        )
+                        .await
+                    }
                     _ => {}
                 },
                 "admin" => match admin::subcommand(&command.data.options) {
@@ -160,9 +171,25 @@ impl EventHandler for Handler {
                     Some(("help", _)) => admin::handle_help(&ctx, &command, &self.db).await,
                     _ => {}
                 },
-                "recap" => recap::handle(&ctx, &command, &self.db, &self.timezone).await,
+                "recap" => {
+                    recap::handle(
+                        &ctx,
+                        &command,
+                        &self.db,
+                        &self.timezone,
+                        self.github.is_some(),
+                    )
+                    .await
+                }
                 "recap-biweekly" => {
-                    recap::handle_biweekly(&ctx, &command, &self.db, &self.timezone).await
+                    recap::handle_biweekly(
+                        &ctx,
+                        &command,
+                        &self.db,
+                        &self.timezone,
+                        self.github.is_some(),
+                    )
+                    .await
                 }
                 "missed" => {
                     missed::handle(
@@ -268,6 +295,15 @@ pub(crate) fn modal_value(modal: &ModalInteraction, custom_id: &str) -> Option<S
 /// Reads a resolved string-valued command option by name, unwrapping an
 /// in-progress autocomplete value too. Shared by `progress.rs` (the `task`
 /// option) and `todo.rs` (the `id` option on `edit`/`delete`).
+/// A boolean option's value; `false` when it was left out (Discord omits
+/// unset optional options entirely).
+pub(crate) fn get_option_bool(options: &[CommandDataOption], name: &str) -> bool {
+    options
+        .iter()
+        .find(|o| o.name == name)
+        .is_some_and(|o| matches!(o.value, CommandDataOptionValue::Boolean(true)))
+}
+
 pub(crate) fn get_option_string(options: &[CommandDataOption], name: &str) -> Option<String> {
     options
         .iter()
