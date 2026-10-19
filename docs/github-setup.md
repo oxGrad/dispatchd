@@ -10,8 +10,10 @@ Without it, everything works exactly as before.
 > **Status:** dispatchd connects (`dispatchd github login`) and, while
 > the bot runs, syncs the org's PRs, issues and reviews into its database
 > every `sync_interval_minutes` (`/admin status` shows the last sync).
-> Showing that activity in the daily summary and `/recap` comes in the
-> next release.
+> That activity shows up in the daily summary, `/recap` /
+> `/recap-biweekly` (per SOW deliverable) and `/team github` - see
+> [the user guide](user-guide.md). Picking an issue or PR straight from
+> `/todo add` / `/progress add` comes in a later release.
 
 dispatchd authenticates as a **GitHub App** that you create in your
 organization. An App isn't tied to any one person's account, can be

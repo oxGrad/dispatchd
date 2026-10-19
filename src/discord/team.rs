@@ -16,7 +16,7 @@ use super::get_option_string;
 
 pub fn command() -> CreateCommand {
     CreateCommand::new("team")
-        .description("Tech-lead tools: status summary, full report, manual reminders")
+        .description("Tech-lead tools: status, full report, reminders, GitHub activity")
         .default_member_permissions(Permissions::MANAGE_GUILD)
         .add_option(CreateCommandOption::new(
             CommandOptionType::SubCommand,
@@ -55,6 +55,29 @@ pub fn command() -> CreateCommand {
             "skip-meeting",
             "Cancel today's meeting and tell the team you're all caught up",
         ))
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "github",
+                "Per-person GitHub activity: PRs, closed sub-issues, reviews",
+            )
+            .add_sub_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "start",
+                    "Start date YYYY-MM-DD (alone: just that day; default: today)",
+                )
+                .required(false),
+            )
+            .add_sub_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "end",
+                    "End date YYYY-MM-DD (alone: just that day; default: today)",
+                )
+                .required(false),
+            ),
+        )
 }
 
 /// The fixed announcement `/team skip-meeting` posts into the standup
@@ -275,6 +298,82 @@ pub async fn handle_report(
             .await
         {
             eprintln!("failed to send /team report follow-up: {e}");
+        }
+    }
+}
+
+/// `/team github [start] [end]`: per-person GitHub activity
+/// (`github::report::team_github`) for a day or range, same date rule as
+/// `/recap`. Same lead/viewer gate as `/team status`/`report`; ephemeral.
+pub async fn handle_github(
+    ctx: &SerenityContext,
+    command: &CommandInteraction,
+    options: &[CommandDataOption],
+    db: &Arc<Mutex<Connection>>,
+    timezone: &Tz,
+    github_configured: bool,
+) {
+    let discord_user_id = command.user.id.to_string();
+    let today = entries::today_in(timezone);
+    let start = get_option_string(options, "start");
+    let end = get_option_string(options, "end");
+
+    let body = {
+        let conn = db.lock().expect("db mutex poisoned");
+        match members::is_lead(&conn, &discord_user_id) {
+            Ok(false) => Err("⛔ This command is restricted to the tech lead.".to_string()),
+            Ok(true) if !github_configured => Err(
+                "GitHub isn't configured - see docs/github-setup.md to set up the GitHub App."
+                    .to_string(),
+            ),
+            Ok(true) => {
+                match crate::recap::resolve_day_or_range(start.as_deref(), end.as_deref(), &today) {
+                    Err(msg) => Err(msg),
+                    Ok((start, end)) => {
+                        match crate::github::report::team_github(&conn, &start, &end, timezone) {
+                            Ok(text) => Ok(status::split_into_messages(&text, 1900)),
+                            Err(e) => {
+                                eprintln!("failed to build /team github: {e:#}");
+                                Err("⚠️ Something went wrong building the GitHub summary."
+                                    .to_string())
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("failed to check is_lead: {e}");
+                Err("⚠️ Something went wrong checking permissions.".to_string())
+            }
+        }
+    };
+
+    let mut chunks = match body {
+        Ok(chunks) => chunks.into_iter(),
+        Err(message) => vec![message].into_iter(),
+    };
+    let first = chunks.next().unwrap_or_default();
+    let reply = CreateInteractionResponseMessage::new()
+        .content(first)
+        .ephemeral(true);
+    if let Err(e) = command
+        .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+        .await
+    {
+        eprintln!("failed to respond to /team github: {e}");
+        return;
+    }
+    for chunk in chunks {
+        if let Err(e) = command
+            .create_followup(
+                &ctx.http,
+                CreateInteractionResponseFollowup::new()
+                    .content(chunk)
+                    .ephemeral(true),
+            )
+            .await
+        {
+            eprintln!("failed to send /team github follow-up: {e}");
         }
     }
 }
