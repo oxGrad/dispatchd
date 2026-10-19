@@ -112,6 +112,38 @@ pub fn from_title(title: &str) -> Option<SowRef> {
         .find_map(parse)
 }
 
+/// How a free-text `entries.sow_ref` groups in reports: its normalised
+/// `D.P.` form when it parses, the trimmed text as typed otherwise.
+pub fn normalize(raw: &str) -> String {
+    parse(raw).map_or_else(|| raw.trim().to_string(), |sow| sow.to_string())
+}
+
+/// `title` with its SOW ref token removed, for showing a deliverable's name
+/// ("D.P.1.2 Payment gateway integration" -> "Payment gateway
+/// integration"). Strips the first `D.P.` token plus any brackets, dashes
+/// or colons left dangling around it; returns the title unchanged (trimmed)
+/// when it has no such token.
+pub fn strip_from_title(title: &str) -> String {
+    let lower = title.to_ascii_lowercase();
+    let Some(start) = lower.find("d.p.") else {
+        return title.trim().to_string();
+    };
+    let end = title[start..]
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
+        .map_or(title.len(), |offset| start + offset);
+    if parse(title[start..end].trim_end_matches('.')).is_none() {
+        return title.trim().to_string();
+    }
+    let junk = |c: char| c.is_whitespace() || "[]()-:\u{2013}\u{2014}".contains(c);
+    let before = title[..start].trim_end_matches(junk);
+    let after = title[end..].trim_start_matches(junk);
+    match (before.is_empty(), after.is_empty()) {
+        (true, _) => after.trim_end().to_string(),
+        (false, true) => before.trim_start().to_string(),
+        (false, false) => format!("{} {}", before.trim_start(), after.trim_end()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +264,38 @@ mod tests {
         assert_eq!(from_title("M1D2 payment"), None);
         assert_eq!(from_title("Read the D.P. docs"), None);
         assert_eq!(from_title("No ref here"), None);
+    }
+
+    #[test]
+    fn normalize_groups_both_forms_and_keeps_free_text() {
+        assert_eq!(normalize("M1D2"), "D.P.1.2");
+        assert_eq!(normalize("D.P.1.2"), "D.P.1.2");
+        assert_eq!(normalize("  Payment stuff "), "Payment stuff");
+    }
+
+    #[test]
+    fn strip_from_title_removes_the_ref_and_its_punctuation() {
+        assert_eq!(
+            strip_from_title("D.P.1.2 Payment gateway integration"),
+            "Payment gateway integration"
+        );
+        assert_eq!(
+            strip_from_title("[D.P.1.2] Payment gateway"),
+            "Payment gateway"
+        );
+        assert_eq!(
+            strip_from_title("D.P.1.2 - Payment gateway"),
+            "Payment gateway"
+        );
+        assert_eq!(
+            strip_from_title("Payment gateway (D.P.1.2)"),
+            "Payment gateway"
+        );
+        assert_eq!(
+            strip_from_title("Admin D.P.1.3: dashboard"),
+            "Admin dashboard"
+        );
+        assert_eq!(strip_from_title("No ref here"), "No ref here");
+        assert_eq!(strip_from_title("Read the D.P. docs"), "Read the D.P. docs");
     }
 }

@@ -3,12 +3,14 @@
 //! (key parsing, JWT, token refresh rule), `client` (the REST/GraphQL
 //! calls + response parsing), `graphql` (the sync's queries and pure
 //! parsers), `store` (the `github_*` tables), `sync` (the background sync
-//! loop and `github preview`), and the key resolution below. Nothing reads
-//! the synced data for reports yet (design phase 3).
+//! loop and `github preview`), `report` (the day summary's GitHub
+//! sections, `/team github`, `/recap`'s deliverables), and the key
+//! resolution below.
 
 pub mod auth;
 pub mod client;
 pub mod graphql;
+pub mod report;
 pub mod store;
 pub mod sync;
 

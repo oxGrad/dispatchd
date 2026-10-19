@@ -5,7 +5,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub const DEFAULT_RECAP_DAYS: i64 = 14;
 pub const MAX_RECAP_DAYS: i64 = 60;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecapRow {
     pub member: String,
     pub task: String,
@@ -15,6 +15,32 @@ pub struct RecapRow {
     pub status: Option<String>,
     pub progress: Option<String>,
     pub blocker: Option<String>,
+    /// The todo's free-text SOW ref as typed (`None` for an unplanned row,
+    /// which has none). Only shown in the GitHub-era day table.
+    pub sow_ref: Option<String>,
+    /// The issue the todo was created from (`/todo add issue:`, phase 4).
+    pub github_issue_id: Option<String>,
+    /// The PR an unplanned report was filed from (phase 4).
+    pub github_pr_id: Option<String>,
+}
+
+/// One todo's identity, as `rows_for_todos` needs it.
+struct TodoRef {
+    id: i64,
+    task: String,
+    member: String,
+    sow_ref: Option<String>,
+    github_issue_id: Option<String>,
+}
+
+fn todo_ref(row: &rusqlite::Row) -> rusqlite::Result<TodoRef> {
+    Ok(TodoRef {
+        id: row.get(0)?,
+        task: row.get(1)?,
+        member: row.get(2)?,
+        sow_ref: row.get(3)?,
+        github_issue_id: row.get(4)?,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,15 +139,15 @@ pub fn recap_range(conn: &Connection, start: &str, end: &str) -> Result<Vec<DayR
 /// Builds a `RecapRow` for each `(todo_id, task, member)`, filling in the
 /// status/progress/blocker from that todo's latest linked update (`None`
 /// for all three if it's never been reported on).
-fn rows_for_todos(conn: &Connection, todos: Vec<(i64, String, String)>) -> Result<Vec<RecapRow>> {
+fn rows_for_todos(conn: &Connection, todos: Vec<TodoRef>) -> Result<Vec<RecapRow>> {
     let mut rows = Vec::with_capacity(todos.len());
-    for (todo_id, task, member) in todos {
+    for todo in todos {
         let latest: Option<(String, String, Option<String>)> = conn
             .query_row(
                 "SELECT status, progress, blocker FROM entries
                  WHERE type = 'update' AND todo_id = ?1
                  ORDER BY id DESC LIMIT 1",
-                params![todo_id],
+                params![todo.id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
@@ -130,11 +156,14 @@ fn rows_for_todos(conn: &Connection, todos: Vec<(i64, String, String)>) -> Resul
             None => (None, None, None),
         };
         rows.push(RecapRow {
-            member,
-            task,
+            member: todo.member,
+            task: todo.task,
             status,
             progress,
             blocker,
+            sow_ref: todo.sow_ref,
+            github_issue_id: todo.github_issue_id,
+            github_pr_id: None,
         });
     }
     Ok(rows)
@@ -156,25 +185,21 @@ fn sort_rows(rows: &mut [RecapRow]) {
 /// then task.
 fn day_rows(conn: &Connection, date: &str) -> Result<Vec<RecapRow>> {
     let mut todo_stmt = conn.prepare(
-        "SELECT e.id, e.task, COALESCE(m.name, e.discord_user_id) FROM entries e
+        "SELECT e.id, e.task, COALESCE(m.name, e.discord_user_id), e.sow_ref, e.github_issue_id
+         FROM entries e
          LEFT JOIN members m ON m.discord_user_id = e.discord_user_id
          WHERE e.type = 'todo' AND e.date = ?1
          ORDER BY e.id",
     )?;
     let todos = todo_stmt
-        .query_map(params![date], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
+        .query_map(params![date], todo_ref)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut rows = rows_for_todos(conn, todos)?;
 
     let mut adhoc_stmt = conn.prepare(
-        "SELECT e.task, e.status, e.progress, e.blocker, COALESCE(m.name, e.discord_user_id)
+        "SELECT e.task, e.status, e.progress, e.blocker, COALESCE(m.name, e.discord_user_id),
+                e.github_pr_id
          FROM entries e
          LEFT JOIN members m ON m.discord_user_id = e.discord_user_id
          WHERE e.type = 'update' AND e.date = ?1 AND e.todo_id IS NULL
@@ -188,21 +213,36 @@ fn day_rows(conn: &Connection, date: &str) -> Result<Vec<RecapRow>> {
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (task, status, progress, blocker, member) in adhoc {
+    for (task, status, progress, blocker, member, github_pr_id) in adhoc {
         rows.push(RecapRow {
             member,
             task: format!("{task} (unplanned)"),
             status: Some(status),
             progress: Some(progress),
             blocker,
+            sow_ref: None,
+            github_issue_id: None,
+            github_pr_id,
         });
     }
 
     sort_rows(&mut rows);
     Ok(rows)
+}
+
+/// One day as `/recap` keys it (todos by origin day, plus that day's
+/// unplanned reports) - `None` for a day with nothing. The per-day building
+/// block `recap_range` uses, exposed for the GitHub report's member detail.
+pub fn day_recap(conn: &Connection, date: &str) -> Result<Option<DayRecap>> {
+    let rows = day_rows(conn, date)?;
+    Ok((!rows.is_empty()).then(|| DayRecap {
+        date: date.to_string(),
+        rows,
+    }))
 }
 
 /// Todos from *before* `date` that got a progress report filed on `date` -
@@ -218,7 +258,9 @@ fn day_rows(conn: &Connection, date: &str) -> Result<Vec<RecapRow>> {
 /// today's carried-over activity to show up on today specifically.
 fn carried_over_rows(conn: &Connection, date: &str) -> Result<Vec<RecapRow>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT e.id, e.task, COALESCE(m.name, e.discord_user_id) FROM entries e
+        "SELECT DISTINCT e.id, e.task, COALESCE(m.name, e.discord_user_id), e.sow_ref,
+                e.github_issue_id
+         FROM entries e
          LEFT JOIN members m ON m.discord_user_id = e.discord_user_id
          WHERE e.type = 'todo' AND e.date < ?1
            AND EXISTS (
@@ -228,13 +270,7 @@ fn carried_over_rows(conn: &Connection, date: &str) -> Result<Vec<RecapRow>> {
          ORDER BY e.id",
     )?;
     let todos = stmt
-        .query_map(params![date], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
+        .query_map(params![date], todo_ref)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     rows_for_todos(conn, todos)
 }
@@ -272,7 +308,7 @@ fn bucket_rank(status: Option<&str>) -> u8 {
     }
 }
 
-fn sanitize_cell(s: &str) -> String {
+pub(crate) fn sanitize_cell(s: &str) -> String {
     s.replace('\n', " ").replace('|', "/")
 }
 
@@ -281,28 +317,30 @@ fn sanitize_cell(s: &str) -> String {
 /// rather than squeezed into Discord's 2000-char message cap - alignment
 /// only reads right in a fixed-width viewer (a raw/opened .md file), not
 /// chat text.
+fn status_cell(row: &RecapRow) -> String {
+    let (glyph, label) = match &row.status {
+        Some(status) => crate::status::status_glyph_label(status),
+        None => ("❌", "no report yet".to_string()),
+    };
+    format!("{glyph} {label}")
+}
+
+fn text_cell(value: Option<&str>) -> String {
+    value.map(sanitize_cell).unwrap_or_else(|| "—".to_string())
+}
+
 pub fn format_day_table_file(day: &DayRecap) -> String {
     let headers = ["Member", "Task", "Status", "Progress", "Blocker"];
     let rows: Vec<Vec<String>> = day
         .rows
         .iter()
         .map(|row| {
-            let (glyph, label) = match &row.status {
-                Some(status) => crate::status::status_glyph_label(status),
-                None => ("❌", "no report yet".to_string()),
-            };
             vec![
                 sanitize_cell(&row.member),
                 sanitize_cell(&row.task),
-                format!("{glyph} {label}"),
-                row.progress
-                    .as_deref()
-                    .map(sanitize_cell)
-                    .unwrap_or_else(|| "—".to_string()),
-                row.blocker
-                    .as_deref()
-                    .map(sanitize_cell)
-                    .unwrap_or_else(|| "—".to_string()),
+                status_cell(row),
+                text_cell(row.progress.as_deref()),
+                text_cell(row.blocker.as_deref()),
             ]
         })
         .collect();
@@ -312,6 +350,33 @@ pub fn format_day_table_file(day: &DayRecap) -> String {
         day.date,
         crate::status::render_aligned_table(&headers, &rows)
     )
+}
+
+/// The GitHub-era standup table: `format_day_table_file`'s columns plus
+/// `SOW` (normalised, `sow::normalize`) and `GitHub` (`github_cells`, one
+/// per row, rendered by `github::report::github_cells`), without a heading:
+/// the caller places it under its own `Standup` heading. Only used when
+/// `[github]` is configured, so a non-GitHub install's output never changes.
+pub fn format_standup_table(rows: &[RecapRow], github_cells: &[String]) -> String {
+    let headers = [
+        "Member", "Task", "SOW", "Status", "Progress", "Blocker", "GitHub",
+    ];
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .zip(github_cells)
+        .map(|(row, github)| {
+            vec![
+                sanitize_cell(&row.member),
+                sanitize_cell(&row.task),
+                text_cell(row.sow_ref.as_deref().map(crate::sow::normalize).as_deref()),
+                status_cell(row),
+                text_cell(row.progress.as_deref()),
+                text_cell(row.blocker.as_deref()),
+                sanitize_cell(github),
+            ]
+        })
+        .collect();
+    crate::status::render_aligned_table(&headers, &rows)
 }
 
 /// Renders the full `/recap` report as `.md` file content: one
@@ -463,6 +528,7 @@ mod tests {
                 status: None,
                 progress: None,
                 blocker: None,
+                ..Default::default()
             }]
         );
     }
@@ -525,6 +591,7 @@ mod tests {
                 status: Some("done".to_string()),
                 progress: Some("added an index".to_string()),
                 blocker: Some("was waiting on DBA".to_string()),
+                ..Default::default()
             }]
         );
     }
@@ -658,6 +725,7 @@ mod tests {
                 status: Some("in_progress".to_string()),
                 progress: Some("still digging".to_string()),
                 blocker: None,
+                ..Default::default()
             }]
         );
     }
@@ -703,6 +771,7 @@ mod tests {
                     status: Some("blocked".to_string()),
                     progress: Some("stuck on the parser".to_string()),
                     blocker: Some("needs review".to_string()),
+                    ..Default::default()
                 },
                 RecapRow {
                     member: "Budi".to_string(),
@@ -710,6 +779,7 @@ mod tests {
                     status: None,
                     progress: None,
                     blocker: None,
+                    ..Default::default()
                 },
             ],
         };
@@ -744,6 +814,7 @@ mod tests {
                 status: Some("done".to_string()),
                 progress: Some("line one\nline two".to_string()),
                 blocker: None,
+                ..Default::default()
             }],
         };
 
@@ -769,6 +840,7 @@ mod tests {
                     status: Some("done".to_string()),
                     progress: Some("shipped".to_string()),
                     blocker: None,
+                    ..Default::default()
                 }],
             },
             DayRecap {
@@ -779,6 +851,7 @@ mod tests {
                     status: None,
                     progress: None,
                     blocker: None,
+                    ..Default::default()
                 }],
             },
         ];
