@@ -393,6 +393,19 @@ Line rules:
   than the sum of member lines when two members co-own one sub-issue.
   The day-summary headline is exactly this line for that day.
 
+*As built (phase 3):* all three reports live in `src/github/report.rs`
+and read only the synced tables. A few details the sections above leave
+open: "GitHub work not on a todo" lists an issue under its **author**, so
+a sub-issue Sari filed and Budi's PR closed shows as Sari's issue
+`closed` there while `/team github` credits the close to Budi. The "on a
+todo" check looks back 14 days of todos (their linked issues and those
+issues' closing PRs) plus that day's reports, which until phase 4 links
+nothing, so everything shows up in that section for now. Sub-issues
+closed as `not planned` *or* `duplicate` are left out of the
+deliverable counts and breakdown. A deliverable row needs activity
+inside the range (a todo, a sub-issue updated or closed, or a linked PR
+updated or merged); one that sat untouched the whole time isn't listed.
+
 ---
 
 ## Configuration

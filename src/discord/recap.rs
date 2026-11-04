@@ -10,11 +10,25 @@ use serenity::all::{
 
 use crate::{entries, members, recap};
 
-use super::get_option_string;
+use super::{get_option_bool, get_option_string};
+
+const MEMBER_DETAIL_OPTION: &str = "include_member_detail";
+
+/// The opt-in for the per-member tables. Its description carries the
+/// "not for stakeholders" reminder right where it's chosen; it only changes
+/// anything with [github] configured (see `respond`).
+fn member_detail_option() -> CreateCommandOption {
+    CreateCommandOption::new(
+        CommandOptionType::Boolean,
+        MEMBER_DETAIL_OPTION,
+        "Add per-day tables with each member's tasks, PRs and reviews. Leave off for stakeholders.",
+    )
+    .required(false)
+}
 
 pub fn command() -> CreateCommand {
     CreateCommand::new("recap")
-        .description("Recap for a day or date range: one table per day, tech-lead/admin only")
+        .description("Recap for a day or date range, tech-lead/admin only")
         .default_member_permissions(Permissions::MANAGE_GUILD)
         .add_option(
             CreateCommandOption::new(
@@ -32,12 +46,14 @@ pub fn command() -> CreateCommand {
             )
             .required(false),
         )
+        .add_option(member_detail_option())
 }
 
 pub fn biweekly_command() -> CreateCommand {
     CreateCommand::new("recap-biweekly")
         .description("Recap of the 14 days ending yesterday, tech-lead/admin only")
         .default_member_permissions(Permissions::MANAGE_GUILD)
+        .add_option(member_detail_option())
 }
 
 /// `/recap`: `start`/`end` resolved via `recap::resolve_day_or_range` -
@@ -47,12 +63,14 @@ pub async fn handle(
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
     timezone: &Tz,
+    github: bool,
 ) {
     let today = entries::today_in(timezone);
     let start = get_option_string(&command.data.options, "start");
     let end = get_option_string(&command.data.options, "end");
     let range = recap::resolve_day_or_range(start.as_deref(), end.as_deref(), &today);
-    respond(ctx, command, db, range, "/recap").await;
+    let shape = shape(command, github);
+    respond(ctx, command, db, range, timezone, shape, "/recap").await;
 }
 
 /// `/recap-biweekly`: no options, always `recap::biweekly_range` - the
@@ -62,10 +80,33 @@ pub async fn handle_biweekly(
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
     timezone: &Tz,
+    github: bool,
 ) {
     let today = entries::today_in(timezone);
     let range = recap::biweekly_range(&today);
-    respond(ctx, command, db, range, "/recap-biweekly").await;
+    let shape = shape(command, github);
+    respond(ctx, command, db, range, timezone, shape, "/recap-biweekly").await;
+}
+
+/// Which recap to build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// No [github]: the per-day tables, as before GitHub existed -
+    /// `include_member_detail` has nothing to add or remove there.
+    Classic,
+    /// [github] configured: the person-free deliverables report, plus the
+    /// per-day member tables only when asked for.
+    Github { include_member_detail: bool },
+}
+
+fn shape(command: &CommandInteraction, github: bool) -> Shape {
+    if github {
+        Shape::Github {
+            include_member_detail: get_option_bool(&command.data.options, MEMBER_DETAIL_OPTION),
+        }
+    } else {
+        Shape::Classic
+    }
 }
 
 /// Shared by both commands once the range is resolved: the `is_lead` gate,
@@ -75,6 +116,8 @@ async fn respond(
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
     range: Result<(String, String), String>,
+    timezone: &Tz,
+    shape: Shape,
     command_name: &str,
 ) {
     let discord_user_id = command.user.id.to_string();
@@ -85,13 +128,28 @@ async fn respond(
             Ok(false) => Err("⛔ This command is restricted to the tech lead.".to_string()),
             Ok(true) => match range {
                 Err(msg) => Err(msg),
-                Ok((start, end)) => match recap::recap_range(&conn, &start, &end) {
-                    Ok(days) => Ok((start, end, days)),
-                    Err(e) => {
-                        eprintln!("failed to build {command_name}: {e}");
-                        Err("⚠️ Something went wrong building the recap.".to_string())
+                Ok((start, end)) => {
+                    let file = match shape {
+                        Shape::Classic => recap::recap_range(&conn, &start, &end)
+                            .map(|days| recap::format_recap_file(&days)),
+                        Shape::Github {
+                            include_member_detail,
+                        } => crate::github::report::recap_file(
+                            &conn,
+                            &start,
+                            &end,
+                            timezone,
+                            include_member_detail,
+                        ),
+                    };
+                    match file {
+                        Ok(file) => Ok((start, end, file)),
+                        Err(e) => {
+                            eprintln!("failed to build {command_name}: {e:#}");
+                            Err("⚠️ Something went wrong building the recap.".to_string())
+                        }
                     }
-                },
+                }
             },
             Err(e) => {
                 eprintln!("failed to check is_lead: {e}");
@@ -103,7 +161,7 @@ async fn respond(
     // A file, not chunked messages: an attachment isn't bound by Discord's
     // 2000-char cap, and lets the table's columns actually line up.
     let (content, file) = match body {
-        Ok((start, end, days)) => match recap::format_recap_file(&days) {
+        Ok((start, end, file)) => match file {
             Some(file) => (
                 format!(
                     "📅 **Recap ({})** - see attached.",

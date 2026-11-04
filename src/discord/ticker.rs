@@ -88,7 +88,7 @@ async fn tick(
         maybe_fire_meeting_reminder(http, db, &date, config.meeting_reminder_lead_minutes).await;
     }
     if is_due(now_time, config.day_summary_time) {
-        maybe_fire_day_summary(http, db, &date).await;
+        maybe_fire_day_summary(http, db, &date, config).await;
         maybe_fire_missing_submissions(http, db, &date).await;
         maybe_record_missed(db, &date).await;
     }
@@ -246,7 +246,12 @@ async fn maybe_fire_meeting_reminder(
 /// `config.day_summary_time` like every other entry in `tick()`, not on
 /// whether everyone has actually submitted yet - a still-open todo just
 /// shows up as "no report yet" (see `recap::format_day_table_file`).
-async fn maybe_fire_day_summary(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, date: &str) {
+async fn maybe_fire_day_summary(
+    http: &Arc<Http>,
+    db: &Arc<Mutex<Connection>>,
+    date: &str,
+    config: &Config,
+) {
     match already_sent(db, date, "day_summary") {
         Ok(true) => return,
         Ok(false) => {}
@@ -277,18 +282,36 @@ async fn maybe_fire_day_summary(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, d
     };
     let channel_id = ChannelId::new(raw_id);
 
-    let day = {
+    // With [github] configured the summary gains the GitHub headline and
+    // sections (github::report::day_summary); without it, it's exactly the
+    // pre-GitHub table.
+    // A failing GitHub report falls back to that plain table rather than
+    // costing the team the whole summary (and failing again every tick).
+    let built = {
         let conn = db.lock().expect("db mutex poisoned");
-        recap::today_recap(&conn, date)
+        recap::today_recap(&conn, date).map(|day| {
+            let github = config.github.as_ref().map(|_| {
+                crate::github::report::day_summary(&conn, date, &config.timezone, day.as_ref())
+            });
+            match github {
+                Some(Ok((headline, file))) => github_day_summary_content(date, headline, file),
+                Some(Err(e)) => {
+                    eprintln!(
+                        "failed to build the GitHub day_summary for {date}, posting the plain one: {e:#}"
+                    );
+                    day_summary_content(date, day.as_ref())
+                }
+                None => day_summary_content(date, day.as_ref()),
+            }
+        })
     };
-    let day = match day {
-        Ok(day) => day,
+    let (content, file) = match built {
+        Ok(built) => built,
         Err(e) => {
-            eprintln!("failed to build day_summary for {date}: {e}");
+            eprintln!("failed to build day_summary for {date}: {e:#}");
             return;
         }
     };
-    let (content, file) = day_summary_content(date, day.as_ref());
     let mut msg = CreateMessage::new().content(content);
     if let Some(table) = file {
         msg = msg.add_file(CreateAttachment::bytes(
@@ -398,6 +421,34 @@ fn day_summary_content(date: &str, day: Option<&recap::DayRecap>) -> (String, Op
             None,
         ),
     }
+}
+
+/// Pure - `day_summary_content` for the GitHub-era summary: the same header,
+/// plus the team's GitHub headline line when there is one, plus the
+/// attachment `github::report::day_summary` built (standup table with SOW
+/// and GitHub columns, then the GitHub sections) when there's anything to
+/// show.
+fn github_day_summary_content(
+    date: &str,
+    headline: Option<String>,
+    file: Option<String>,
+) -> (String, Option<String>) {
+    let mut content = format!("📊 **Day progress — {date}**");
+    // GitHub work the headline counts but no section lists (a sub-issue
+    // credited to its assignee) isn't "no activity".
+    let no_file_note = if headline.is_some() {
+        "\nNo `/todo` or `/progress` submissions today."
+    } else {
+        "\nNo activity today."
+    };
+    if let Some(headline) = headline {
+        content.push('\n');
+        content.push_str(&headline);
+    }
+    if file.is_none() {
+        content.push_str(no_file_note);
+    }
+    (content, file)
 }
 
 /// Pure - builds the "no submissions today" message @mentioning every
@@ -787,6 +838,44 @@ mod tests {
     }
 
     #[test]
+    fn github_day_summary_content_adds_the_headline_line() {
+        let (content, file) = github_day_summary_content(
+            "2026-10-15",
+            Some("GitHub: 3 PRs merged · 4 reviews".into()),
+            Some("# 2026-10-15".into()),
+        );
+        assert_eq!(
+            content,
+            "📊 **Day progress — 2026-10-15**\nGitHub: 3 PRs merged · 4 reviews"
+        );
+        assert_eq!(file.as_deref(), Some("# 2026-10-15"));
+    }
+
+    #[test]
+    fn github_day_summary_content_with_a_headline_but_no_file_isnt_no_activity() {
+        let (content, file) = github_day_summary_content(
+            "2026-10-15",
+            Some("GitHub: 1 sub-issue closed".into()),
+            None,
+        );
+        assert_eq!(
+            content,
+            "📊 **Day progress — 2026-10-15**\nGitHub: 1 sub-issue closed\nNo `/todo` or `/progress` submissions today."
+        );
+        assert_eq!(file, None);
+    }
+
+    #[test]
+    fn github_day_summary_content_with_no_activity_at_all() {
+        let (content, file) = github_day_summary_content("2026-10-15", None, None);
+        assert_eq!(
+            content,
+            "📊 **Day progress — 2026-10-15**\nNo activity today."
+        );
+        assert_eq!(file, None);
+    }
+
+    #[test]
     fn day_summary_content_attaches_the_aligned_day_table_when_theres_activity() {
         let day = recap::DayRecap {
             date: "2026-09-19".to_string(),
@@ -796,6 +885,7 @@ mod tests {
                 status: Some("done".to_string()),
                 progress: Some("shipped".to_string()),
                 blocker: None,
+                ..Default::default()
             }],
         };
         let (content, file) = day_summary_content("2026-09-19", Some(&day));
