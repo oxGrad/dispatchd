@@ -120,20 +120,27 @@ pub fn normalize(raw: &str) -> String {
 
 /// `title` with its SOW ref token removed, for showing a deliverable's name
 /// ("D.P.1.2 Payment gateway integration" -> "Payment gateway
-/// integration"). Strips the first `D.P.` token plus any brackets, dashes
-/// or colons left dangling around it; returns the title unchanged (trimmed)
-/// when it has no such token.
+/// integration"). Strips the token `from_title` reads - the first whole
+/// `D.P.` token that parses - plus any brackets, dashes or colons left
+/// dangling around it; returns the title unchanged (trimmed) when it has
+/// no such token.
 pub fn strip_from_title(title: &str) -> String {
-    let lower = title.to_ascii_lowercase();
-    let Some(start) = lower.find("d.p.") else {
+    let in_token = |c: char| c.is_ascii_alphanumeric() || c == '.';
+    let found = title
+        .to_ascii_lowercase()
+        .match_indices("d.p.")
+        .find_map(|(start, _)| {
+            if title[..start].ends_with(in_token) {
+                return None;
+            }
+            let end = title[start..]
+                .find(|c: char| !in_token(c))
+                .map_or(title.len(), |offset| start + offset);
+            parse(title[start..end].trim_end_matches('.')).map(|_| (start, end))
+        });
+    let Some((start, end)) = found else {
         return title.trim().to_string();
     };
-    let end = title[start..]
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
-        .map_or(title.len(), |offset| start + offset);
-    if parse(title[start..end].trim_end_matches('.')).is_none() {
-        return title.trim().to_string();
-    }
     let junk = |c: char| c.is_whitespace() || "[]()-:\u{2013}\u{2014}".contains(c);
     let before = title[..start].trim_end_matches(junk);
     let after = title[end..].trim_start_matches(junk);
@@ -297,5 +304,11 @@ mod tests {
         );
         assert_eq!(strip_from_title("No ref here"), "No ref here");
         assert_eq!(strip_from_title("Read the D.P. docs"), "Read the D.P. docs");
+        // Same token from_title reads: past a non-ref "D.P.", never mid-word.
+        assert_eq!(
+            strip_from_title("Read the D.P. docs for D.P.1.2"),
+            "Read the D.P. docs for"
+        );
+        assert_eq!(strip_from_title("Fixd.p.1.2 now"), "Fixd.p.1.2 now");
     }
 }

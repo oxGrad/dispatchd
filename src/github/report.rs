@@ -375,7 +375,8 @@ pub fn team_activity(conn: &Connection, w: &Window) -> Result<TeamActivity> {
 }
 
 /// Per roster member (index), each PR they reviewed in `w` with their
-/// latest review state on it.
+/// latest review state on it. A PR author's own "reviews" (GitHub files a
+/// `commented` one each time they reply to a review thread) aren't reviews.
 fn reviews_by_member(
     conn: &Connection,
     w: &Window,
@@ -385,6 +386,7 @@ fn reviews_by_member(
         "SELECT p.repo, p.number, r.author_id, r.state FROM github_reviews r
          JOIN github_prs p ON p.node_id = r.pr_node_id
          WHERE r.author_id IS NOT NULL AND r.submitted_at >= ?1 AND r.submitted_at < ?2
+           AND r.author_id IS NOT p.author_id
          ORDER BY r.submitted_at",
     )?;
     let rows = stmt
@@ -678,8 +680,13 @@ pub fn day_github(conn: &Connection, date: &str, w: &Window) -> Result<DayGithub
         });
     }
 
+    // `closed` only for a close as completed, like every other report here:
+    // a not-planned / duplicate close isn't work done.
     let mut stmt = conn.prepare(
-        "SELECT node_id, repo, number, title, author_id, created_at, closed_at FROM github_issues
+        "SELECT node_id, repo, number, title, author_id, created_at,
+                CASE WHEN state = 'closed' AND COALESCE(state_reason, 'completed') = 'completed'
+                     THEN closed_at END
+         FROM github_issues
          WHERE author_id IS NOT NULL
            AND ((created_at >= ?1 AND created_at < ?2) OR (closed_at >= ?1 AND closed_at < ?2))",
     )?;
@@ -960,6 +967,7 @@ struct Child {
     title: String,
     state: String,
     state_reason: Option<String>,
+    created_at: String,
     closed_at: Option<String>,
     updated_at: String,
 }
@@ -968,8 +976,71 @@ struct LinkedPr {
     item: ItemRef,
     state: String,
     is_draft: bool,
+    created_at: String,
     merged_at: Option<String>,
+    closed_at: Option<String>,
     updated_at: String,
+}
+
+/// Whether an issue/PR may have been worked on in `w`. Only its latest
+/// `updated_at` is stored, so one touched after the range too can't be
+/// told apart from one idle during it: anything that existed before the
+/// range ended, wasn't finished before it began and has been updated since
+/// it began counts (a merge or close inside the range always does).
+fn touched_in(w: &Window, created: &str, updated: &str, finished: Option<&str>) -> bool {
+    created < w.hi.as_str()
+        && updated >= w.lo.as_str()
+        && finished.is_none_or(|t| t >= w.lo.as_str())
+}
+
+fn linked_prs(stmt: &mut rusqlite::Statement, issue: &str) -> Result<Vec<LinkedPr>> {
+    Ok(stmt
+        .query_map([issue], |row| {
+            Ok(LinkedPr {
+                item: ItemRef {
+                    repo: row.get(0)?,
+                    number: row.get(1)?,
+                },
+                state: row.get(2)?,
+                is_draft: row.get(3)?,
+                created_at: row.get(4)?,
+                merged_at: row.get(5)?,
+                closed_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Books PRs linked to deliverable `key` (to its parent issue or to any of
+/// its sub-issues, dropped ones included): they're never `—`-row work,
+/// those merged in `w` count toward its `PRs merged`, and any activity in
+/// `w` lists it.
+fn note_prs(
+    prs: &[LinkedPr],
+    key: &DeliverableKey,
+    w: &Window,
+    sow_prs: &mut BTreeSet<ItemRef>,
+    merged_by_key: &mut BTreeMap<DeliverableKey, BTreeSet<ItemRef>>,
+    active: &mut BTreeSet<DeliverableKey>,
+) {
+    for pr in prs {
+        sow_prs.insert(pr.item.clone());
+        if w.contains_opt(&pr.merged_at) {
+            merged_by_key
+                .entry(key.clone())
+                .or_default()
+                .insert(pr.item.clone());
+        }
+        let finished = pr
+            .merged_at
+            .as_deref()
+            .or(pr.closed_at.as_deref())
+            .filter(|_| pr.state != "open");
+        if touched_in(w, &pr.created_at, &pr.updated_at, finished) {
+            active.insert(key.clone());
+        }
+    }
 }
 
 struct TodoStatus {
@@ -1051,11 +1122,13 @@ pub fn deliverables(
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut children_stmt = conn.prepare(
-        "SELECT node_id, repo, number, title, state, state_reason, closed_at, updated_at
+        "SELECT node_id, repo, number, title, state, state_reason, created_at, closed_at,
+                updated_at
          FROM github_issues WHERE parent_node_id = ?1 ORDER BY repo, number",
     )?;
     let mut prs_stmt = conn.prepare(
-        "SELECT p.repo, p.number, p.state, p.is_draft, p.merged_at, p.updated_at
+        "SELECT p.repo, p.number, p.state, p.is_draft, p.created_at, p.merged_at, p.closed_at,
+                p.updated_at
          FROM github_pr_issues pi JOIN github_prs p ON p.node_id = pi.pr_node_id
          WHERE pi.issue_node_id = ?1 ORDER BY p.repo, p.number",
     )?;
@@ -1065,10 +1138,26 @@ pub fn deliverables(
 
     for (parent_id, parent_title, sow_raw) in parents {
         let key = key_of(&sow_raw);
-        let entry = out
-            .entry(key.clone())
-            .or_insert_with(|| blank(key.clone(), sow::strip_from_title(&parent_title)));
+        let entry = out.entry(key.clone()).or_insert_with(|| {
+            // A title that's only the ref strips to nothing: name it by the ref.
+            let title = sow::strip_from_title(&parent_title);
+            let title = if title.is_empty() {
+                key_label(&key)
+            } else {
+                title
+            };
+            blank(key.clone(), title)
+        });
         let counts = entry.sub_issues.get_or_insert((0, 0, 0));
+        // A PR linked straight to the parent is the deliverable's work too.
+        note_prs(
+            &linked_prs(&mut prs_stmt, &parent_id)?,
+            &key,
+            w,
+            &mut sow_prs,
+            &mut merged_by_key,
+            &mut active,
+        );
 
         let children: Vec<Child> = children_stmt
             .query_map([&parent_id], |row| {
@@ -1081,76 +1170,51 @@ pub fn deliverables(
                     title: row.get(3)?,
                     state: row.get(4)?,
                     state_reason: row.get(5)?,
-                    closed_at: row.get(6)?,
-                    updated_at: row.get(7)?,
+                    created_at: row.get(6)?,
+                    closed_at: row.get(7)?,
+                    updated_at: row.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
         for child in children {
+            let prs = linked_prs(&mut prs_stmt, &child.node_id)?;
+            note_prs(&prs, &key, w, &mut sow_prs, &mut merged_by_key, &mut active);
             let dropped = child.state == "closed"
                 && matches!(
                     child.state_reason.as_deref(),
                     Some("not_planned" | "duplicate")
                 );
-            if dropped {
+            // Dropped, or not a sub-issue yet as of `end`: neither counts.
+            if dropped || child.created_at.as_str() >= w.hi.as_str() {
                 continue;
             }
-            let prs: Vec<LinkedPr> = prs_stmt
-                .query_map([&child.node_id], |row| {
-                    Ok(LinkedPr {
-                        item: ItemRef {
-                            repo: row.get(0)?,
-                            number: row.get(1)?,
-                        },
-                        state: row.get(2)?,
-                        is_draft: row.get(3)?,
-                        merged_at: row.get(4)?,
-                        updated_at: row.get(5)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            for pr in &prs {
-                sow_prs.insert(pr.item.clone());
-                if w.contains_opt(&pr.merged_at) {
-                    merged_by_key
-                        .entry(key.clone())
-                        .or_default()
-                        .insert(pr.item.clone());
-                }
-                if w.contains(&pr.updated_at) || w.contains_opt(&pr.merged_at) {
-                    active.insert(key.clone());
-                }
-            }
-            if w.contains(&child.updated_at) || w.contains_opt(&child.closed_at) {
+            let closed_at = child
+                .closed_at
+                .as_deref()
+                .filter(|_| child.state == "closed");
+            if touched_in(w, &child.created_at, &child.updated_at, closed_at) {
                 active.insert(key.clone());
             }
 
             counts.1 += 1;
-            let closed_by_end = child.state == "closed"
-                && child
-                    .closed_at
-                    .as_deref()
-                    .is_some_and(|t| t < w.hi.as_str());
+            let closed_by_end = closed_at.is_some_and(|t| t < w.hi.as_str());
             if closed_by_end {
                 counts.0 += 1;
             }
-            if w.contains_opt(&child.closed_at) && child.state == "closed" {
+            if closed_at.is_some_and(|t| w.contains(t)) {
                 counts.2 += 1;
             }
-            if closed_by_end
-                && child
-                    .closed_at
-                    .as_deref()
-                    .is_some_and(|t| t < w.lo.as_str())
-            {
+            if closed_at.is_some_and(|t| t < w.lo.as_str()) {
                 entry.closed_before.push(child.item.clone());
                 continue;
             }
 
             let todo = linked_todo_status(conn, &child.node_id, end)?;
+            // Every PR that existed by the range end - not filtered on
+            // `updated_at`, which a later push or comment moves past it.
             let prs_shown: Vec<&LinkedPr> = prs
                 .iter()
-                .filter(|pr| pr.updated_at.as_str() < w.hi.as_str())
+                .filter(|pr| pr.created_at.as_str() < w.hi.as_str())
                 .collect();
             let (state, last_activity) = if closed_by_end {
                 (
