@@ -129,7 +129,6 @@ impl Step {
     }
 }
 
-#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
 }

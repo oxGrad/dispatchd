@@ -36,7 +36,7 @@ pub fn set_state(conn: &Connection, key: &str, value: &str) -> Result<()> {
 
 /// How much of a sync error `record_sync_error` keeps - it ends up inside
 /// `/admin status`'s single Discord message (2000 characters in all).
-pub const MAX_SYNC_ERROR_CHARS: usize = 300;
+const MAX_SYNC_ERROR_CHARS: usize = 300;
 
 /// Stores a failed run's error for `/admin status`, truncated to
 /// `MAX_SYNC_ERROR_CHARS`.
@@ -50,7 +50,7 @@ pub fn record_sync_error(conn: &Connection, error: &str) -> Result<()> {
 
 /// `s` cut to at most `max` characters (not bytes), with a trailing `...`
 /// when anything was dropped.
-pub fn truncate(s: &str, max: usize) -> String {
+fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -147,13 +147,13 @@ fn unlink_detached_children(conn: &Connection, list: &SubIssueList) -> Result<()
 /// Inserts or updates one issue and replaces its assignee set. A sub-issue
 /// never stores a SOW ref of its own (it takes its parent's), so `sow_ref`
 /// is only written for a top-level issue. Runs inside `write_batch`'s
-/// transaction.
+/// transaction, once per row, so its statements are `prepare_cached`.
 fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
     let sow_ref = match issue.parent_node_id {
         None => issue.sow_ref.map(|s| s.to_string()),
         Some(_) => None,
     };
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO github_issues (node_id, repo, number, title, state, state_reason,
              author_id, author_login, created_at, closed_at, parent_node_id, sow_ref, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
@@ -164,41 +164,40 @@ fn upsert_issue(conn: &Connection, issue: &Issue) -> Result<()> {
              created_at = excluded.created_at, closed_at = excluded.closed_at,
              parent_node_id = excluded.parent_node_id, sow_ref = excluded.sow_ref,
              updated_at = excluded.updated_at",
-        params![
-            issue.node_id,
-            issue.repo,
-            issue.number,
-            issue.title,
-            issue.state,
-            issue.state_reason,
-            issue.author.id,
-            issue.author.login,
-            issue.created_at,
-            issue.closed_at,
-            issue.parent_node_id,
-            sow_ref,
-            issue.updated_at,
-        ],
-    )?;
-    conn.execute(
-        "DELETE FROM github_issue_assignees WHERE issue_node_id = ?1",
-        [&issue.node_id],
+    )?
+    .execute(params![
+        issue.node_id,
+        issue.repo,
+        issue.number,
+        issue.title,
+        issue.state,
+        issue.state_reason,
+        issue.author.id,
+        issue.author.login,
+        issue.created_at,
+        issue.closed_at,
+        issue.parent_node_id,
+        sow_ref,
+        issue.updated_at,
+    ])?;
+    conn.prepare_cached("DELETE FROM github_issue_assignees WHERE issue_node_id = ?1")?
+        .execute([&issue.node_id])?;
+    let mut insert = conn.prepare_cached(
+        "INSERT OR IGNORE INTO github_issue_assignees (issue_node_id, github_id)
+         VALUES (?1, ?2)",
     )?;
     for github_id in &issue.assignee_ids {
-        conn.execute(
-            "INSERT OR IGNORE INTO github_issue_assignees (issue_node_id, github_id)
-             VALUES (?1, ?2)",
-            params![issue.node_id, github_id],
-        )?;
+        insert.execute(params![issue.node_id, github_id])?;
     }
     Ok(())
 }
 
 /// Inserts or updates one PR, replaces its linked-issue set, and upserts
 /// its reviews (reviews are never deleted: a dismissed review comes back
-/// with state `dismissed`). Runs inside `write_batch`'s transaction.
+/// with state `dismissed`). Runs inside `write_batch`'s transaction, once
+/// per row, so its statements are `prepare_cached`.
 fn upsert_pr(conn: &Connection, pr: &PullRequest) -> Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO github_prs (node_id, repo, number, title, state, is_draft, author_id,
              author_login, created_at, merged_at, closed_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
@@ -208,48 +207,46 @@ fn upsert_pr(conn: &Connection, pr: &PullRequest) -> Result<()> {
              author_id = excluded.author_id, author_login = excluded.author_login,
              created_at = excluded.created_at, merged_at = excluded.merged_at,
              closed_at = excluded.closed_at, updated_at = excluded.updated_at",
-        params![
-            pr.node_id,
-            pr.repo,
-            pr.number,
-            pr.title,
-            pr.state,
-            pr.is_draft,
-            pr.author.id,
-            pr.author.login,
-            pr.created_at,
-            pr.merged_at,
-            pr.closed_at,
-            pr.updated_at,
-        ],
-    )?;
-    conn.execute(
-        "DELETE FROM github_pr_issues WHERE pr_node_id = ?1",
-        [&pr.node_id],
+    )?
+    .execute(params![
+        pr.node_id,
+        pr.repo,
+        pr.number,
+        pr.title,
+        pr.state,
+        pr.is_draft,
+        pr.author.id,
+        pr.author.login,
+        pr.created_at,
+        pr.merged_at,
+        pr.closed_at,
+        pr.updated_at,
+    ])?;
+    conn.prepare_cached("DELETE FROM github_pr_issues WHERE pr_node_id = ?1")?
+        .execute([&pr.node_id])?;
+    let mut link = conn.prepare_cached(
+        "INSERT OR IGNORE INTO github_pr_issues (pr_node_id, issue_node_id) VALUES (?1, ?2)",
     )?;
     for issue_id in &pr.closing_issue_ids {
-        conn.execute(
-            "INSERT OR IGNORE INTO github_pr_issues (pr_node_id, issue_node_id) VALUES (?1, ?2)",
-            params![pr.node_id, issue_id],
-        )?;
+        link.execute(params![pr.node_id, issue_id])?;
     }
+    let mut review_upsert = conn.prepare_cached(
+        "INSERT INTO github_reviews (node_id, pr_node_id, author_id, author_login, state,
+             submitted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(node_id) DO UPDATE SET
+             author_id = excluded.author_id, author_login = excluded.author_login,
+             state = excluded.state, submitted_at = excluded.submitted_at",
+    )?;
     for review in &pr.reviews {
-        conn.execute(
-            "INSERT INTO github_reviews (node_id, pr_node_id, author_id, author_login, state,
-                 submitted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(node_id) DO UPDATE SET
-                 author_id = excluded.author_id, author_login = excluded.author_login,
-                 state = excluded.state, submitted_at = excluded.submitted_at",
-            params![
-                review.node_id,
-                pr.node_id,
-                review.author.id,
-                review.author.login,
-                review.state,
-                review.submitted_at,
-            ],
-        )?;
+        review_upsert.execute(params![
+            review.node_id,
+            pr.node_id,
+            review.author.id,
+            review.author.login,
+            review.state,
+            review.submitted_at,
+        ])?;
     }
     Ok(())
 }
@@ -267,8 +264,9 @@ pub fn missing_issue_ids(conn: &Connection, ids: &[String]) -> Result<Vec<String
     Ok(missing)
 }
 
-/// Members with a `github_user` whose numeric id isn't resolved yet (every
-/// reseed clears it), as `(discord_user_id, github_user)`.
+/// Members with a `github_user` whose numeric id isn't resolved yet (new,
+/// or `github_user` changed since the last reseed - `members::seed` keeps
+/// it otherwise), as `(discord_user_id, github_user)`.
 pub fn members_needing_github_id(conn: &Connection) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT discord_user_id, github_user FROM members

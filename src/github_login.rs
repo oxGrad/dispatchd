@@ -128,18 +128,23 @@ pub async fn preview(days: u32) -> Result<()> {
         "no GitHub App configured - set app_id and org under [github] in config.toml \
          (see docs/github-setup.md)",
     )?;
-    let pem = crate::github::app_key_pem()
-        .or_else(|| crate::discord_login::decrypt_cred_file(GITHUB_CRED_PATH))
-        .context(
-            "no GitHub App key found - run `sudo dispatchd github login --key <file.pem>` \
+    let pem = key_pem().context(
+        "no GitHub App key found - run `sudo dispatchd github login --key <file.pem>` \
              first (or set DISPATCHD_GITHUB_APP_KEY_PATH)",
-        )?;
+    )?;
     let key = AppKey::from_pem(&pem).context("the stored GitHub App key is unusable")?;
     print!(
         "{}",
         crate::github::sync::preview(&github, key, days).await?
     );
     Ok(())
+}
+
+/// The App key the way the bot resolves it (`github::app_key_pem`), or by
+/// decrypting the credential file directly for a one-off root invocation.
+fn key_pem() -> Option<String> {
+    crate::github::app_key_pem()
+        .or_else(|| crate::discord_login::decrypt_cred_file(GITHUB_CRED_PATH))
 }
 
 pub struct GithubPing {
@@ -163,9 +168,7 @@ pub async fn ping_report(github: Option<&GithubConfig>) -> GithubPing {
         };
     };
     let app = Some((github.app_id, github.org.clone()));
-    let Some(pem) = crate::github::app_key_pem()
-        .or_else(|| crate::discord_login::decrypt_cred_file(GITHUB_CRED_PATH))
-    else {
+    let Some(pem) = key_pem() else {
         return GithubPing {
             app,
             key_found: false,
@@ -227,12 +230,8 @@ pub fn format_sync_summary(s: &crate::github::store::SyncSummary) -> String {
         None => "  sync:                 no successful sync yet\n".to_string(),
     };
     if let Some(error) = &s.last_error {
-        // Already capped when stored (`store::record_sync_error`); capped
-        // again here in case an older build stored a longer one.
-        out.push_str(&format!(
-            "  sync error:           {}\n",
-            crate::github::store::truncate(error, crate::github::store::MAX_SYNC_ERROR_CHARS)
-        ));
+        // Already capped when stored (`store::record_sync_error`).
+        out.push_str(&format!("  sync error:           {error}\n"));
     }
     out
 }

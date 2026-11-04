@@ -507,9 +507,9 @@ Per run, GraphQL with the installation token, incremental from a stored
 3. For every **parent** seen in 1–2 that carries a SOW ref: its full
    `subIssues` list with states, so the recap can show untouched
    sub-issues.
-4. Resolve any new `github_user` → user id (`GET /users/{login}`). Every
-   reseed clears `members.github_id`, so this re-runs once per restart -
-   one request per member.
+4. Resolve any new `github_user` → user id (`GET /users/{login}`). A
+   resolved `members.github_id` survives reseeds while `github_user` is
+   unchanged, so this only runs for a new or changed `github_user`.
 
 Only activity by roster members is attributed to anyone. Everything else
 (external contributors, bots like dependabot) is stored for linking

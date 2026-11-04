@@ -6,8 +6,9 @@
 
 -- The member's GitHub username from members.toml, and the numeric user id
 -- the sync resolves it to (activity rows are matched on the id, so a
--- username rename doesn't orphan history). Both are rewritten by every
--- reseed; the id is re-resolved by the next sync.
+-- username rename doesn't orphan history). Every reseed rewrites
+-- github_user and keeps github_id while github_user is unchanged
+-- (members::seed); a new or changed one is resolved by the next sync.
 ALTER TABLE members ADD COLUMN github_user TEXT;
 ALTER TABLE members ADD COLUMN github_id INTEGER;
 

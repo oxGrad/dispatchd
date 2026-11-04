@@ -39,7 +39,9 @@ fragment IssueFields on Issue {
 
 /// PRs in the org updated at or after `$q`'s `updated:>=` bound, oldest
 /// first, with the issues each closes (the sidebar "Development" link) and
-/// its reviews.
+/// its reviews - the *last* 100: every reply in a review thread is its own
+/// COMMENTED review, so a busy PR passes 100, and `first` would keep the
+/// oldest and drop the new ones the sync is fetching it for.
 pub fn pr_search_query() -> String {
     format!(
         r#"query($q: String!, $cursor: String) {{
@@ -51,7 +53,7 @@ pub fn pr_search_query() -> String {
         repository {{ name }}
         author {{ ...ActorFields }}
         closingIssuesReferences(first: 20) {{ nodes {{ id }} }}
-        reviews(first: 100) {{ nodes {{ id state submittedAt author {{ ...ActorFields }} }} }}
+        reviews(last: 100) {{ nodes {{ id state submittedAt author {{ ...ActorFields }} }} }}
       }}
     }}
   }}
@@ -216,13 +218,24 @@ pub struct SubIssueList {
     pub parent_id: String,
     pub children: Vec<Issue>,
     /// `false` when the parent has more than `SUB_ISSUES_PER_PARENT`
-    /// children - then the list can't be used to unlink detached ones.
+    /// children, or a child is hidden from the installation - then the list
+    /// can't be used to unlink detached ones.
     pub complete: bool,
 }
 
+/// A connection's `nodes`. An entry the installation can't see (an issue in
+/// a repo the App isn't installed on) comes back `null`, next to a FORBIDDEN
+/// error `client::parse_graphql` tolerates - so it's skipped here rather
+/// than failing the page, which would refetch and fail it on every run.
 #[derive(Deserialize)]
 struct Nodes<T> {
-    nodes: Vec<T>,
+    nodes: Vec<Option<T>>,
+}
+
+impl<T> Nodes<T> {
+    fn present(self) -> impl Iterator<Item = T> {
+        self.nodes.into_iter().flatten()
+    }
 }
 
 #[derive(Deserialize)]
@@ -347,7 +360,7 @@ fn lower(s: String) -> String {
 
 impl RawIssueCore {
     fn into_issue(self, parent_node_id: Option<String>, origin: Origin) -> Issue {
-        let labels = self.labels.nodes.iter().map(|l| l.name.as_str());
+        let labels = self.labels.nodes.iter().flatten().map(|l| l.name.as_str());
         let (sow_ref, warnings) = match sow::from_labels(labels) {
             (Some(sow_ref), warnings) => (Some(sow_ref), warnings),
             (None, warnings) => (sow::from_title(&self.title), warnings),
@@ -365,8 +378,7 @@ impl RawIssueCore {
             closed_at: self.closed_at,
             assignee_ids: self
                 .assignees
-                .nodes
-                .into_iter()
+                .present()
                 .filter_map(|a| a.database_id)
                 .collect(),
             sow_ref,
@@ -407,16 +419,14 @@ impl From<RawPullRequest> for PullRequest {
             closed_at: raw.closed_at,
             closing_issue_ids: raw
                 .closing_issues_references
-                .nodes
-                .into_iter()
+                .present()
                 .map(|n| n.id)
                 .collect(),
             // A review still being written (PENDING) has no submittedAt and
             // isn't visible to anyone else yet - skip it.
             reviews: raw
                 .reviews
-                .nodes
-                .into_iter()
+                .present()
                 .filter_map(|r| {
                     Some(Review {
                         node_id: r.id,
@@ -443,8 +453,8 @@ fn typed_nodes<T: serde::de::DeserializeOwned>(nodes: Vec<Value>) -> Result<Vec<
         .collect()
 }
 
-fn search_page(data: Value) -> Result<RawSearch> {
-    serde_json::from_value(data.get("search").cloned().unwrap_or(Value::Null))
+fn search_page(mut data: Value) -> Result<RawSearch> {
+    serde_json::from_value(data.get_mut("search").map(Value::take).unwrap_or_default())
         .context("unexpected search response shape")
 }
 
@@ -485,9 +495,9 @@ pub fn parse_issue_page(data: Value) -> Result<Page<Issue>> {
     Ok(page(items, raw.page_info, updated.into_iter()))
 }
 
-fn nodes_of(data: Value) -> Vec<Value> {
-    match data.get("nodes") {
-        Some(Value::Array(nodes)) => nodes.clone(),
+fn nodes_of(mut data: Value) -> Vec<Value> {
+    match data.get_mut("nodes").map(Value::take) {
+        Some(Value::Array(nodes)) => nodes,
         _ => Vec::new(),
     }
 }
@@ -506,7 +516,8 @@ pub fn parse_sub_issues(data: Value) -> Result<Vec<SubIssueList>> {
     #[serde(rename_all = "camelCase")]
     struct RawChildren {
         page_info: RawPageInfo,
-        nodes: Vec<RawIssueCore>,
+        /// `null` for a child the installation can't see (see `Nodes`).
+        nodes: Vec<Option<RawIssueCore>>,
     }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -518,11 +529,15 @@ pub fn parse_sub_issues(data: Value) -> Result<Vec<SubIssueList>> {
     Ok(parents
         .into_iter()
         .map(|parent| SubIssueList {
-            complete: !parent.sub_issues.page_info.has_next_page,
+            // A hidden child can't prove absence any more than a cut-off
+            // list can.
+            complete: !parent.sub_issues.page_info.has_next_page
+                && parent.sub_issues.nodes.iter().all(Option::is_some),
             children: parent
                 .sub_issues
                 .nodes
                 .into_iter()
+                .flatten()
                 .map(|child| child.into_issue(Some(parent.id.clone()), Origin::SubIssue))
                 .collect(),
             parent_id: parent.id,
@@ -779,6 +794,30 @@ mod tests {
                 .all(|i| i.parent_node_id.as_deref() == Some("I_100"))
         );
         assert!(!lists[1].complete);
+    }
+
+    #[test]
+    fn null_entries_in_nested_connections_are_skipped_not_fatal() {
+        // An issue in a repo the App isn't installed on comes back null,
+        // next to a FORBIDDEN error parse_graphql tolerates.
+        let pr = json!({
+            "id": "PR_3", "number": 3, "title": "x", "state": "OPEN", "isDraft": false,
+            "createdAt": "t", "updatedAt": "t", "mergedAt": null, "closedAt": null,
+            "repository": { "name": "api" }, "author": actor("budi-dev", 1),
+            "closingIssuesReferences": { "nodes": [null, { "id": "I_1" }] },
+            "reviews": { "nodes": [null] }
+        });
+        let page = parse_pr_page(search(vec![pr], false)).unwrap();
+        assert_eq!(page.items[0].closing_issue_ids, vec!["I_1"]);
+        assert!(page.items[0].reviews.is_empty());
+
+        let data = json!({ "nodes": [{ "id": "I_100", "subIssues": {
+            "pageInfo": { "hasNextPage": false },
+            "nodes": [raw_issue("I_201", 201, "x", &[]), null] }}]});
+        let lists = parse_sub_issues(data).unwrap();
+        assert_eq!(lists[0].children.len(), 1);
+        // A hidden child: the list can't prove a stored child was removed.
+        assert!(!lists[0].complete);
     }
 
     #[test]

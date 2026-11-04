@@ -40,7 +40,7 @@ const MAX_PAGES: usize = 10;
 const MAX_LOGGED_SKIPS: usize = 5;
 
 /// Mints and caches installation tokens for one App + org, and owns the
-/// one HTTP client every request of a run shares.
+/// one HTTP client every request of a run goes through.
 pub struct TokenSource {
     client: Client,
     app_id: u64,
@@ -60,10 +60,6 @@ impl TokenSource {
             installation_id: None,
             token: None,
         }
-    }
-
-    pub fn client(&self) -> Client {
-        self.client.clone()
     }
 
     /// A valid installation token, minting a new one when there's none
@@ -111,6 +107,11 @@ impl TokenSource {
         let response = self.client.graphql(&token, query, variables).await?;
         skipped.extend(response.skipped);
         Ok(response.data)
+    }
+
+    async fn user_id(&mut self, login: &str) -> Result<Option<i64>> {
+        let token = self.token().await?;
+        self.client.user_id(&token, login).await
     }
 }
 
@@ -386,14 +387,9 @@ pub async fn sync_once(
         let conn = db.lock().expect("db mutex poisoned");
         store::members_needing_github_id(&conn)?
     };
-    let client = tokens.client();
     let mut members_resolved = 0;
     for (discord_user_id, login) in unresolved {
-        let lookup = match tokens.token().await {
-            Ok(token) => client.user_id(&token, &login).await,
-            Err(e) => Err(e),
-        };
-        match lookup {
+        match tokens.user_id(&login).await {
             Ok(Some(github_id)) => {
                 let conn = db.lock().expect("db mutex poisoned");
                 store::set_member_github_id(&conn, &discord_user_id, github_id)?;
@@ -442,6 +438,9 @@ pub async fn run_loop(db: Arc<Mutex<Connection>>, github: GithubConfig, key: App
     let mut interval = tokio::time::interval(Duration::from_secs(
         u64::from(github.sync_interval_minutes) * 60,
     ));
+    // A run that overruns the interval (the first 14-day backfill) is
+    // followed by one on the normal schedule, not a burst of catch-up runs.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
         let now = Utc::now();
