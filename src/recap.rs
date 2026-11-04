@@ -126,11 +126,7 @@ pub fn recap_range(conn: &Connection, start: &str, end: &str) -> Result<Vec<DayR
     let mut out = Vec::new();
     let mut date = start_date;
     while date <= end_date {
-        let day = date.format("%Y-%m-%d").to_string();
-        let rows = day_rows(conn, &day)?;
-        if !rows.is_empty() {
-            out.push(DayRecap { date: day, rows });
-        }
+        out.extend(day_recap(conn, &date.format("%Y-%m-%d").to_string())?);
         date = date.succ_opt().expect("date overflow");
     }
     Ok(out)
@@ -312,11 +308,6 @@ pub(crate) fn sanitize_cell(s: &str) -> String {
     s.replace('\n', " ").replace('|', "/")
 }
 
-/// Renders one day's table as a column-aligned GFM table
-/// (`status::render_aligned_table`), meant for a `.md` file attachment
-/// rather than squeezed into Discord's 2000-char message cap - alignment
-/// only reads right in a fixed-width viewer (a raw/opened .md file), not
-/// chat text.
 fn status_cell(row: &RecapRow) -> String {
     let (glyph, label) = match &row.status {
         Some(status) => crate::status::status_glyph_label(status),
@@ -329,6 +320,11 @@ fn text_cell(value: Option<&str>) -> String {
     value.map(sanitize_cell).unwrap_or_else(|| "—".to_string())
 }
 
+/// Renders one day's table as a column-aligned GFM table
+/// (`status::render_aligned_table`), meant for a `.md` file attachment
+/// rather than squeezed into Discord's 2000-char message cap - alignment
+/// only reads right in a fixed-width viewer (a raw/opened .md file), not
+/// chat text.
 pub fn format_day_table_file(day: &DayRecap) -> String {
     let headers = ["Member", "Task", "Status", "Progress", "Blocker"];
     let rows: Vec<Vec<String>> = day

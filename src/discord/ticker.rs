@@ -285,14 +285,24 @@ async fn maybe_fire_day_summary(
     // With [github] configured the summary gains the GitHub headline and
     // sections (github::report::day_summary); without it, it's exactly the
     // pre-GitHub table.
+    // A failing GitHub report falls back to that plain table rather than
+    // costing the team the whole summary (and failing again every tick).
     let built = {
         let conn = db.lock().expect("db mutex poisoned");
-        recap::today_recap(&conn, date).and_then(|day| match &config.github {
-            Some(_) => {
+        recap::today_recap(&conn, date).map(|day| {
+            let github = config.github.as_ref().map(|_| {
                 crate::github::report::day_summary(&conn, date, &config.timezone, day.as_ref())
-                    .map(|(headline, file)| github_day_summary_content(date, headline, file))
+            });
+            match github {
+                Some(Ok((headline, file))) => github_day_summary_content(date, headline, file),
+                Some(Err(e)) => {
+                    eprintln!(
+                        "failed to build the GitHub day_summary for {date}, posting the plain one: {e:#}"
+                    );
+                    day_summary_content(date, day.as_ref())
+                }
+                None => day_summary_content(date, day.as_ref()),
             }
-            None => Ok(day_summary_content(date, day.as_ref())),
         })
     };
     let (content, file) = match built {
@@ -424,12 +434,19 @@ fn github_day_summary_content(
     file: Option<String>,
 ) -> (String, Option<String>) {
     let mut content = format!("📊 **Day progress — {date}**");
+    // GitHub work the headline counts but no section lists (a sub-issue
+    // credited to its assignee) isn't "no activity".
+    let no_file_note = if headline.is_some() {
+        "\nNo `/todo` or `/progress` submissions today."
+    } else {
+        "\nNo activity today."
+    };
     if let Some(headline) = headline {
         content.push('\n');
         content.push_str(&headline);
     }
     if file.is_none() {
-        content.push_str("\nNo activity today.");
+        content.push_str(no_file_note);
     }
     (content, file)
 }
@@ -832,6 +849,20 @@ mod tests {
             "📊 **Day progress — 2026-10-15**\nGitHub: 3 PRs merged · 4 reviews"
         );
         assert_eq!(file.as_deref(), Some("# 2026-10-15"));
+    }
+
+    #[test]
+    fn github_day_summary_content_with_a_headline_but_no_file_isnt_no_activity() {
+        let (content, file) = github_day_summary_content(
+            "2026-10-15",
+            Some("GitHub: 1 sub-issue closed".into()),
+            None,
+        );
+        assert_eq!(
+            content,
+            "📊 **Day progress — 2026-10-15**\nGitHub: 1 sub-issue closed\nNo `/todo` or `/progress` submissions today."
+        );
+        assert_eq!(file, None);
     }
 
     #[test]

@@ -304,6 +304,25 @@ fn team_github_matches_the_design_example_for_one_day() {
 }
 
 #[test]
+fn a_pr_authors_replies_on_their_own_pr_are_not_reviews() {
+    let conn = open_test_db();
+    example_team(&conn);
+    // Sari replying to Budi's review threads on her own api#219.
+    review(
+        &conn,
+        "R_self",
+        "PR_219",
+        2,
+        "commented",
+        "2026-10-15T11:00:00Z",
+    );
+    let activity = team_activity(&conn, &day_window()).unwrap();
+    assert_eq!(activity.totals.reviews, 4);
+    let sari = activity.members.iter().find(|m| m.name == "Sari").unwrap();
+    assert_eq!(sari.reviewed.len(), 1);
+}
+
+#[test]
 fn team_github_over_a_range_counts_without_listing() {
     let conn = open_test_db();
     example_team(&conn);
@@ -893,6 +912,101 @@ fn deliverable_breakdown_orders_by_state_and_collapses_earlier_closes() {
             .collect::<Vec<_>>(),
         vec!["api#198"]
     );
+}
+
+#[test]
+fn a_past_range_keeps_work_touched_again_after_it() {
+    let conn = open_test_db();
+    example_deliverable(&conn);
+    // A sub-issue filed after the range isn't part of it yet.
+    issue(
+        &conn,
+        "I_240",
+        240,
+        "Later work",
+        None,
+        Some("I_100"),
+        None,
+        "2026-10-18T00:00:00Z",
+        None,
+    );
+    // A PR linked straight to the deliverable's parent is its work.
+    pr(
+        &conn,
+        "PR_230",
+        "api",
+        230,
+        "Gateway docs",
+        Some(1),
+        "merged",
+        "2026-10-09T00:00:00Z",
+        Some("2026-10-09T01:00:00Z"),
+    );
+    link(&conn, "PR_230", "I_100");
+    // A deliverable with no todos whose only PR was worked on in the range
+    // and pushed to again after it.
+    issue(
+        &conn,
+        "I_400",
+        400,
+        "D.P.2.1 Mobile auth",
+        None,
+        None,
+        Some("D.P.2.1"),
+        "2026-09-01T00:00:00Z",
+        None,
+    );
+    issue(
+        &conn,
+        "I_401",
+        401,
+        "Login screen",
+        None,
+        Some("I_400"),
+        None,
+        "2026-09-01T00:00:00Z",
+        None,
+    );
+    pr(
+        &conn,
+        "PR_402",
+        "web",
+        402,
+        "Login screen",
+        Some(1),
+        "open",
+        "2026-10-03T00:00:00Z",
+        None,
+    );
+    link(&conn, "PR_402", "I_401");
+    conn.execute(
+        "UPDATE github_prs SET updated_at = '2026-10-20T00:00:00Z'
+         WHERE node_id IN ('PR_221', 'PR_402')",
+        [],
+    )
+    .unwrap();
+
+    let ds = range_deliverables(&conn);
+    let payment = &ds[0];
+    assert_eq!(payment.sub_issues, Some((3, 6, 2)));
+    assert_eq!(payment.prs_merged, Some(2));
+    let retries = payment
+        .breakdown
+        .iter()
+        .find(|r| r.item.number == 206)
+        .unwrap();
+    assert_eq!(retries.state, SubIssueState::InProgress);
+    assert_eq!(retries.prs, vec!["api#221 draft".to_string()]);
+
+    let mobile = ds
+        .iter()
+        .find(|d| key_label(&d.key) == "D.P.2.1")
+        .expect("an actively worked deliverable must not drop out");
+    assert_eq!(mobile.breakdown[0].state, SubIssueState::InProgress);
+
+    let unlinked = ds.last().unwrap();
+    assert_eq!(unlinked.key, DeliverableKey::Unlinked);
+    assert_eq!(unlinked.prs_merged, Some(1), "only api#224 is unlinked");
 }
 
 #[test]

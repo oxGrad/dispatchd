@@ -292,9 +292,6 @@ pub(crate) fn modal_value(modal: &ModalInteraction, custom_id: &str) -> Option<S
     })
 }
 
-/// Reads a resolved string-valued command option by name, unwrapping an
-/// in-progress autocomplete value too. Shared by `progress.rs` (the `task`
-/// option) and `todo.rs` (the `id` option on `edit`/`delete`).
 /// A boolean option's value; `false` when it was left out (Discord omits
 /// unset optional options entirely).
 pub(crate) fn get_option_bool(options: &[CommandDataOption], name: &str) -> bool {
@@ -304,6 +301,9 @@ pub(crate) fn get_option_bool(options: &[CommandDataOption], name: &str) -> bool
         .is_some_and(|o| matches!(o.value, CommandDataOptionValue::Boolean(true)))
 }
 
+/// Reads a resolved string-valued command option by name, unwrapping an
+/// in-progress autocomplete value too. Shared by `progress.rs` (the `task`
+/// option) and `todo.rs` (the `id` option on `edit`/`delete`).
 pub(crate) fn get_option_string(options: &[CommandDataOption], name: &str) -> Option<String> {
     options
         .iter()
