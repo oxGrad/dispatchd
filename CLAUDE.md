@@ -84,11 +84,13 @@ release workflow's container).
 - `.github/dependabot.yml`: weekly `cargo` + `github-actions` bumps.
 - `.markdownlint.json`: line-length rule (MD013) off for `docs/`.
 - `.cargo/audit.toml`: `cargo audit` (the CI `rust-audit` job) ignore
-  list. Currently holds four `rustls-webpki 0.102.8` advisories pulled in
-  transitively via `serenity` -> `tokio-tungstenite 0.21` -> `rustls
-  0.22`; unbumpable until serenity ships a release on `rustls 0.23+`.
+  list. Currently holds the `rustls-webpki 0.102.8` and `rustls 0.22.4`
+  advisories pulled in transitively via `serenity` -> `tokio-tungstenite
+  0.21` -> `rustls 0.22`; unbumpable until serenity ships a release on
+  `rustls 0.23+`, and `RUSTSEC-2026-0459` (`libsqlite3-sys 0.37`), blocked
+  on `rusqlite_migration` supporting `rusqlite 0.41`.
   The file documents why each is safe to ignore - revisit when serenity
-  updates.
+  or `rusqlite_migration` updates.
 
 ## Running it
 
@@ -384,9 +386,10 @@ src/
                  at 3 quoted messages), pure parse_* / describe_status,
                  check(). graphql.rs - the four queries (PR search, issue
                  search, issues by id, sub-issues; each defines only the
-                 fragments it uses, since GitHub rejects unused ones; a
-                 parent is selected with its own `parent { id }` so a
-                 riding-along parent never overwrites its link upward) +
+                 fragments it uses, since GitHub rejects unused ones; an
+                 issue is selected with two levels of ancestors, the top
+                 one with its own `parent { id }` so a riding-along
+                 ancestor never overwrites its link upward) +
                  pure parsers into Issue/PullRequest/Review rows, each
                  Issue tagged with its Origin (SearchHit / Parent / ById /
                  SubIssue); Page::high_water comes from search hits only,

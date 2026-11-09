@@ -38,6 +38,11 @@ const OVERLAP_MINUTES: i64 = 10;
 const MAX_PAGES: usize = 10;
 /// How many node-level GraphQL errors a run logs individually.
 const MAX_LOGGED_SKIPS: usize = 5;
+/// GitHub's limit on sub-issue nesting. Also bounds the walk up a parent
+/// chain: rows fetched either side of a mid-run re-parenting can form a cycle.
+const MAX_ISSUE_DEPTH: usize = 8;
+/// Levels of sub-issues fetched under a deliverable (task, then sub-task).
+const EXPANDED_LEVELS: usize = 2;
 
 /// Mints and caches installation tokens for one App + org, and owns the
 /// one HTTP client every request of a run goes through.
@@ -136,11 +141,24 @@ struct SearchResult<T> {
     high_water: Option<String>,
 }
 
-/// Pages through one org search. Normally the high-water mark is the
-/// newest hit seen. If GitHub's 1,000-result cap cuts the search short, it
-/// is instead the last hit's position in the `sort:updated-asc` order, so
-/// the next run resumes from where this one stopped rather than jumping
-/// past results it never fetched.
+/// The high-water mark after one more page. Normally the newest hit seen;
+/// on the last page GitHub will serve, it's the last hit's position in the
+/// `sort:updated-asc` order instead, so the next run resumes from where
+/// this one stopped rather than jumping past results it never fetched.
+/// GitHub reports `hasNextPage: false` at its 1,000-result cap, so the page
+/// number is the only signal.
+// ponytail: 1,000+ items inside one OVERLAP_MINUTES window can't advance the
+// mark and that search stalls; persist a "capped" flag that skips the
+// overlap if a bulk edit ever hits it.
+fn next_high_water<T>(seen: Option<String>, page: &Page<T>, page_number: usize) -> Option<String> {
+    if page_number == MAX_PAGES {
+        page.last_updated.clone().or(seen)
+    } else {
+        seen.max(page.high_water.clone())
+    }
+}
+
+/// Pages through one org search, oldest first (see `next_high_water`).
 async fn fetch_search<T>(
     tokens: &mut TokenSource,
     query: &str,
@@ -162,18 +180,16 @@ async fn fetch_search<T>(
             .await
             .with_context(|| format!("{what} search failed"))?;
         let page = parse(data)?;
+        high_water = next_high_water(high_water, &page, page_number);
         items.extend(page.items);
-        high_water = high_water.max(page.high_water);
-        if !page.has_next_page {
-            break;
-        }
         if page_number == MAX_PAGES {
             eprintln!(
-                "github sync: {what} search hit GitHub's 1,000-result cap; the rest is \
-                 picked up from {} on the next run",
-                page.last_updated.as_deref().unwrap_or("the same point")
+                "github sync: {what} search reached page {MAX_PAGES}, the last GitHub serves; \
+                 anything past it is picked up from {} on the next run",
+                high_water.as_deref().unwrap_or("the same point")
             );
-            high_water = page.last_updated;
+        }
+        if !page.has_next_page {
             break;
         }
         cursor = page.end_cursor;
@@ -194,7 +210,8 @@ pub struct Collected {
 }
 
 /// Which deliverables to refetch every sub-issue of: the top-level,
-/// SOW-tagged issue behind each *fresh* row - a search hit updated after
+/// SOW-tagged issue at the top of each *fresh* row's parent chain (a chain
+/// whose top wasn't fetched is skipped) - a search hit updated after
 /// `previous_high_water` (not one re-read only because of the overlap
 /// window), or an issue fetched by id because a PR links to it. A parent
 /// riding along with a row isn't fresh by itself. Without the freshness check, the
@@ -211,9 +228,12 @@ pub fn parents_to_expand(issues: &[Issue], previous_high_water: Option<&str>) ->
     issues
         .iter()
         .filter(|i| is_fresh(i))
-        .filter_map(|i| match &i.parent_node_id {
-            None => Some(i),
-            Some(parent) => by_id.get(parent.as_str()).copied(),
+        .filter_map(|i| {
+            std::iter::successors(Some(i), |c| {
+                by_id.get(c.parent_node_id.as_deref()?).copied()
+            })
+            .take(MAX_ISSUE_DEPTH)
+            .last()
         })
         .filter(|i| is_deliverable(i))
         .map(|i| i.node_id.clone())
@@ -226,7 +246,8 @@ pub fn parents_to_expand(issues: &[Issue], previous_high_water: Option<&str>) ->
 /// 1. PRs and issues updated since each `since` (searches);
 /// 2. issues a PR links to that `missing` says aren't stored yet (by id);
 /// 3. every sub-issue of each deliverable with fresh activity
-///    (`parents_to_expand`), so untouched sub-issues are known too.
+///    (`parents_to_expand`), and every sub-issue of those, so untouched
+///    tasks and sub-tasks are known too.
 pub async fn collect(
     tokens: &mut TokenSource,
     org: &str,
@@ -278,14 +299,23 @@ pub async fn collect(
 
     let mut sub_issue_lists = Vec::new();
     let query = graphql::sub_issues_query();
-    for batch in
-        parents_to_expand(&all_issues, previous_issue_high_water).chunks(graphql::SUB_ISSUE_BATCH)
-    {
-        let data = tokens
-            .graphql(&query, serde_json::json!({ "ids": batch }), &mut skipped)
-            .await
-            .context("fetching sub-issues failed")?;
-        sub_issue_lists.extend(graphql::parse_sub_issues(data)?);
+    let mut to_expand = parents_to_expand(&all_issues, previous_issue_high_water);
+    for _ in 0..EXPANDED_LEVELS {
+        let mut children = Vec::new();
+        for batch in to_expand.chunks(graphql::SUB_ISSUE_BATCH) {
+            let data = tokens
+                .graphql(&query, serde_json::json!({ "ids": batch }), &mut skipped)
+                .await
+                .context("fetching sub-issues failed")?;
+            let lists = graphql::parse_sub_issues(data)?;
+            children.extend(
+                lists
+                    .iter()
+                    .flat_map(|l| l.children.iter().map(|c| c.node_id.clone())),
+            );
+            sub_issue_lists.extend(lists);
+        }
+        to_expand = children;
     }
     for list in &sub_issue_lists {
         all_issues.extend(list.children.iter().cloned());
@@ -446,7 +476,7 @@ pub async fn run_loop(db: Arc<Mutex<Connection>>, github: GithubConfig, key: App
         let now = Utc::now();
         match sync_once(&db, &mut tokens, &github.org, now).await {
             Ok(report) => println!(
-                "github sync: {} PRs, {} issues ({} deliverables' sub-issues), {} member ids \
+                "github sync: {} PRs, {} issues ({} sub-issue lists), {} member ids \
                  resolved, {} inaccessible items skipped",
                 report.prs,
                 report.issues,
@@ -596,6 +626,27 @@ mod tests {
     #[test]
     fn since_for_ignores_a_garbled_high_water_mark() {
         assert_eq!(since_for(Some("yesterday"), now()), "2026-10-02T02:00:00Z");
+    }
+
+    #[test]
+    fn next_high_water_resumes_from_the_last_hit_on_the_final_page() {
+        let page = Page::<()> {
+            items: vec![],
+            end_cursor: None,
+            // GitHub's answer at the 1,000-result cap, with 60k more results.
+            has_next_page: false,
+            high_water: Some("2026-10-15T12:00:00Z".into()),
+            last_updated: Some("2026-10-15T09:00:00Z".into()),
+        };
+        let seen = || Some("2026-10-15T08:00:00Z".to_string());
+        assert_eq!(
+            next_high_water(seen(), &page, MAX_PAGES - 1).as_deref(),
+            Some("2026-10-15T12:00:00Z")
+        );
+        assert_eq!(
+            next_high_water(seen(), &page, MAX_PAGES).as_deref(),
+            Some("2026-10-15T09:00:00Z")
+        );
     }
 
     fn actor(login: &str) -> Actor {
@@ -751,6 +802,40 @@ mod tests {
             parents_to_expand(&issues, Some("2026-10-15T09:00:00Z")),
             vec!["I_100"]
         );
+    }
+
+    const HW: &str = "2026-10-15T08:00:00Z";
+    const FRESH: &str = "2026-10-15T09:00:00Z";
+    const OLD: &str = "2026-10-01T00:00:00Z";
+
+    #[test]
+    fn parents_to_expand_walks_a_fresh_row_up_to_its_deliverable() {
+        // deliverable D <- task T <- subtask S; only S was updated.
+        let issues = vec![
+            issue("I_S", Some("I_T"), None, FRESH, Origin::SearchHit),
+            issue("I_T", Some("I_D"), None, OLD, Origin::Parent),
+            issue("I_D", None, Some((1, 2)), OLD, Origin::Parent),
+        ];
+        assert_eq!(parents_to_expand(&issues, Some(HW)), vec!["I_D"]);
+    }
+
+    #[test]
+    fn parents_to_expand_skips_a_chain_whose_top_is_unknown() {
+        let issues = vec![
+            issue("I_S", Some("I_T"), None, FRESH, Origin::SearchHit),
+            issue("I_T", Some("I_D"), Some((1, 2)), OLD, Origin::Parent),
+        ];
+        assert!(parents_to_expand(&issues, Some(HW)).is_empty());
+    }
+
+    #[test]
+    fn parents_to_expand_terminates_on_a_parent_cycle() {
+        // Rows fetched either side of a mid-run re-parenting can disagree.
+        let issues = vec![
+            issue("I_A", Some("I_B"), None, FRESH, Origin::SearchHit),
+            issue("I_B", Some("I_A"), None, FRESH, Origin::SearchHit),
+        ];
+        assert!(parents_to_expand(&issues, Some(HW)).is_empty());
     }
 
     fn collected(prs: Vec<PullRequest>, issues: Vec<Issue>) -> Collected {

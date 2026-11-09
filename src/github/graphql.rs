@@ -29,7 +29,7 @@ fragment ActorFields on Actor { login ... on User { databaseId } }
 "#;
 const ISSUE_FRAGMENT: &str = r#"
 fragment IssueFields on Issue {
-  id number title state stateReason createdAt updatedAt closedAt
+  id number title state stateReason(enableDuplicate: true) createdAt updatedAt closedAt
   repository { name }
   author { ...ActorFields }
   assignees(first: 20) { nodes { databaseId } }
@@ -62,13 +62,17 @@ pub fn pr_search_query() -> String {
     )
 }
 
-/// An issue plus its parent, plus the parent's own parent id - without
-/// that last bit, a parent riding along would be stored as top-level and
-/// overwrite its real link to the deliverable above it.
-const ISSUE_WITH_PARENT: &str = "...IssueFields parent { ...IssueFields parent { id } }";
+/// An issue plus its two levels of ancestors (deliverable <- task <-
+/// sub-task), plus the topmost one's own parent id - without that last bit,
+/// an ancestor riding along would be stored as top-level and overwrite its
+/// real link to the issue above it.
+// ponytail: three levels; GitHub nests up to eight. A deeper chain's top isn't
+// fetched or expanded - walk up with issues_by_id_query if that ever happens.
+const ISSUE_WITH_PARENT: &str =
+    "...IssueFields parent { ...IssueFields parent { ...IssueFields parent { id } } }";
 
 /// Issues in the org updated at or after the bound, oldest first, each
-/// with its parent (for sub-issues) so the parent's SOW ref is known.
+/// with its ancestors (for sub-issues) so the deliverable's SOW ref is known.
 pub fn issue_search_query() -> String {
     format!(
         r#"query($q: String!, $cursor: String) {{
@@ -208,7 +212,7 @@ pub struct Page<T> {
     pub high_water: Option<String>,
     /// The last search hit's `updatedAt`, i.e. how far through the
     /// `sort:updated-asc` order this page got - the safe resume point when
-    /// paging stops early (see `sync::fetch_search`).
+    /// paging stops early (see `sync::next_high_water`).
     pub last_updated: Option<String>,
 }
 
@@ -282,17 +286,29 @@ struct RawIssueCore {
     repository: RawRepo,
     author: Option<RawActor>,
     assignees: Nodes<RawId>,
-    labels: Nodes<RawLabel>,
+    /// Nullable in GitHub's schema, as are `RawPullRequest`'s two below: a
+    /// tolerated node-level error nulls the whole connection, and that must
+    /// not fail the page (see `Nodes`).
+    labels: Option<Nodes<RawLabel>>,
 }
 
-/// A parent issue as selected by `ISSUE_WITH_PARENT`: its fields plus its
+/// The topmost ancestor `ISSUE_WITH_PARENT` selects: its fields plus its
 /// own parent's id.
+#[derive(Deserialize)]
+struct RawGrandparentIssue {
+    #[serde(flatten)]
+    core: RawIssueCore,
+    #[serde(default)]
+    parent: Option<RawNodeId>,
+}
+
+/// A parent issue as selected by `ISSUE_WITH_PARENT`.
 #[derive(Deserialize)]
 struct RawParentIssue {
     #[serde(flatten)]
     core: RawIssueCore,
     #[serde(default)]
-    parent: Option<RawNodeId>,
+    parent: Option<RawGrandparentIssue>,
 }
 
 /// A search hit / by-id issue: its fields plus its parent.
@@ -327,8 +343,8 @@ struct RawPullRequest {
     closed_at: Option<String>,
     repository: RawRepo,
     author: Option<RawActor>,
-    closing_issues_references: Nodes<RawNodeId>,
-    reviews: Nodes<RawReview>,
+    closing_issues_references: Option<Nodes<RawNodeId>>,
+    reviews: Option<Nodes<RawReview>>,
 }
 
 #[derive(Deserialize)]
@@ -360,7 +376,11 @@ fn lower(s: String) -> String {
 
 impl RawIssueCore {
     fn into_issue(self, parent_node_id: Option<String>, origin: Origin) -> Issue {
-        let labels = self.labels.nodes.iter().flatten().map(|l| l.name.as_str());
+        let labels = self
+            .labels
+            .iter()
+            .flat_map(|l| l.nodes.iter().flatten())
+            .map(|l| l.name.as_str());
         let (sow_ref, warnings) = match sow::from_labels(labels) {
             (Some(sow_ref), warnings) => (Some(sow_ref), warnings),
             (None, warnings) => (sow::from_title(&self.title), warnings),
@@ -390,14 +410,18 @@ impl RawIssueCore {
 }
 
 impl RawIssue {
-    /// The issue itself, plus its parent (when it has one) as a second
-    /// row - the parent must be stored too, since it's the deliverable.
+    /// The issue itself, plus each ancestor (when it has any) as its own
+    /// row - they must be stored too, since the top one is the deliverable.
     fn into_issues(self, origin: Origin) -> Vec<Issue> {
         let parent_id = self.parent.as_ref().map(|p| p.core.id.clone());
         let mut out = vec![self.core.into_issue(parent_id, origin)];
         if let Some(parent) = self.parent {
-            let grandparent = parent.parent.map(|g| g.id);
-            out.push(parent.core.into_issue(grandparent, Origin::Parent));
+            let grandparent_id = parent.parent.as_ref().map(|g| g.core.id.clone());
+            out.push(parent.core.into_issue(grandparent_id, Origin::Parent));
+            if let Some(grandparent) = parent.parent {
+                let above = grandparent.parent.map(|g| g.id);
+                out.push(grandparent.core.into_issue(above, Origin::Parent));
+            }
         }
         out
     }
@@ -419,14 +443,16 @@ impl From<RawPullRequest> for PullRequest {
             closed_at: raw.closed_at,
             closing_issue_ids: raw
                 .closing_issues_references
-                .present()
+                .into_iter()
+                .flat_map(Nodes::present)
                 .map(|n| n.id)
                 .collect(),
             // A review still being written (PENDING) has no submittedAt and
             // isn't visible to anyone else yet - skip it.
             reviews: raw
                 .reviews
-                .present()
+                .into_iter()
+                .flat_map(Nodes::present)
                 .filter_map(|r| {
                     Some(Review {
                         node_id: r.id,
@@ -458,17 +484,13 @@ fn search_page(mut data: Value) -> Result<RawSearch> {
         .context("unexpected search response shape")
 }
 
-fn page<T>(
-    items: Vec<T>,
-    info: RawPageInfo,
-    hit_updated: impl Iterator<Item = String> + Clone,
-) -> Page<T> {
+fn page<T>(items: Vec<T>, info: RawPageInfo, hit_updated: Vec<String>) -> Page<T> {
     Page {
         items,
         end_cursor: info.end_cursor,
         has_next_page: info.has_next_page,
-        high_water: hit_updated.clone().max(),
-        last_updated: hit_updated.last(),
+        high_water: hit_updated.iter().max().cloned(),
+        last_updated: hit_updated.last().cloned(),
     }
 }
 
@@ -479,11 +501,11 @@ pub fn parse_pr_page(data: Value) -> Result<Page<PullRequest>> {
         .map(PullRequest::from)
         .collect();
     let updated: Vec<String> = items.iter().map(|pr| pr.updated_at.clone()).collect();
-    Ok(page(items, raw.page_info, updated.into_iter()))
+    Ok(page(items, raw.page_info, updated))
 }
 
-/// Issues on one search page, each followed by its parent (if any), so a
-/// parent can appear more than once - the store upserts, so that's fine.
+/// Issues on one search page, each followed by its ancestors (if any), so
+/// an ancestor can appear more than once - the store upserts, so that's fine.
 pub fn parse_issue_page(data: Value) -> Result<Page<Issue>> {
     let raw = search_page(data)?;
     let hits = typed_nodes::<RawIssue>(raw.nodes)?;
@@ -492,18 +514,16 @@ pub fn parse_issue_page(data: Value) -> Result<Page<Issue>> {
         .into_iter()
         .flat_map(|i| i.into_issues(Origin::SearchHit))
         .collect();
-    Ok(page(items, raw.page_info, updated.into_iter()))
+    Ok(page(items, raw.page_info, updated))
 }
 
-fn nodes_of(mut data: Value) -> Vec<Value> {
-    match data.get_mut("nodes").map(Value::take) {
-        Some(Value::Array(nodes)) => nodes,
-        _ => Vec::new(),
-    }
+fn nodes_of(mut data: Value) -> Result<Vec<Value>> {
+    serde_json::from_value(data.get_mut("nodes").map(Value::take).unwrap_or_default())
+        .context("unexpected nodes response shape")
 }
 
 pub fn parse_issues_by_id(data: Value) -> Result<Vec<Issue>> {
-    Ok(typed_nodes::<RawIssue>(nodes_of(data))?
+    Ok(typed_nodes::<RawIssue>(nodes_of(data)?)?
         .into_iter()
         .flat_map(|i| i.into_issues(Origin::ById))
         .collect())
@@ -525,7 +545,7 @@ pub fn parse_sub_issues(data: Value) -> Result<Vec<SubIssueList>> {
         id: String,
         sub_issues: RawChildren,
     }
-    let parents: Vec<RawParent> = typed_nodes(nodes_of(data))?;
+    let parents: Vec<RawParent> = typed_nodes(nodes_of(data)?)?;
     Ok(parents
         .into_iter()
         .map(|parent| SubIssueList {
@@ -717,17 +737,37 @@ mod tests {
     }
 
     #[test]
-    fn a_riding_along_parent_keeps_its_own_parent_link() {
+    fn a_three_level_chain_emits_every_ancestor_with_its_own_link() {
         // deliverable D <- task T <- subtask S; only S was updated.
-        let mut task = raw_issue("I_T", 2, "D.P.1.2 Stripe webhook", &[]);
-        task["parent"] = json!({ "id": "I_D" });
+        let mut task = raw_issue("I_T", 2, "Stripe webhook", &[]);
+        task["parent"] = raw_issue("I_D", 1, "Payment gateway", &["sow:D.P.1.2"]);
         let mut subtask = raw_issue("I_S", 3, "Retry logic", &[]);
         subtask["parent"] = task;
 
         let page = parse_issue_page(search(vec![subtask], false)).unwrap();
 
-        let task = page.items.iter().find(|i| i.node_id == "I_T").unwrap();
-        assert_eq!(task.parent_node_id.as_deref(), Some("I_D"));
+        let find = |id: &str| page.items.iter().find(|i| i.node_id == id).unwrap();
+        assert_eq!(find("I_S").parent_node_id.as_deref(), Some("I_T"));
+        assert_eq!(find("I_T").parent_node_id.as_deref(), Some("I_D"));
+        assert_eq!(find("I_T").origin, Origin::Parent);
+        assert_eq!(find("I_D").parent_node_id, None);
+        assert_eq!(find("I_D").origin, Origin::Parent);
+        assert_eq!(find("I_D").sow_ref.unwrap().to_string(), "D.P.1.2");
+    }
+
+    #[test]
+    fn the_topmost_ancestor_fetched_keeps_its_own_parent_link() {
+        let mut top = raw_issue("I_D", 1, "Payment gateway", &[]);
+        top["parent"] = json!({ "id": "I_X" });
+        let mut task = raw_issue("I_T", 2, "Stripe webhook", &[]);
+        task["parent"] = top;
+        let mut subtask = raw_issue("I_S", 3, "Retry logic", &[]);
+        subtask["parent"] = task;
+
+        let page = parse_issue_page(search(vec![subtask], false)).unwrap();
+
+        let top = page.items.iter().find(|i| i.node_id == "I_D").unwrap();
+        assert_eq!(top.parent_node_id.as_deref(), Some("I_X"));
     }
 
     #[test]
@@ -821,7 +861,27 @@ mod tests {
     }
 
     #[test]
+    fn a_connection_nulled_by_a_tolerated_error_is_empty_not_fatal() {
+        let pr = json!({
+            "id": "PR_4", "number": 4, "title": "x", "state": "OPEN", "isDraft": false,
+            "createdAt": "t", "updatedAt": "t", "mergedAt": null, "closedAt": null,
+            "repository": { "name": "api" }, "author": actor("budi-dev", 1),
+            "closingIssuesReferences": null, "reviews": null
+        });
+        let page = parse_pr_page(search(vec![pr], false)).unwrap();
+        assert!(page.items[0].closing_issue_ids.is_empty());
+        assert!(page.items[0].reviews.is_empty());
+
+        let mut issue = raw_issue("I_1", 1, "D.P.1.3 Admin dashboard", &[]);
+        issue["labels"] = Value::Null;
+        let page = parse_issue_page(search(vec![issue], false)).unwrap();
+        assert_eq!(page.items[0].sow_ref.unwrap().to_string(), "D.P.1.3");
+    }
+
+    #[test]
     fn a_missing_search_object_is_an_error_not_an_empty_page() {
         assert!(parse_pr_page(json!({})).is_err());
+        assert!(parse_issues_by_id(json!({})).is_err());
+        assert!(parse_sub_issues(json!({})).is_err());
     }
 }

@@ -550,7 +550,8 @@ Where it's read from:
   never rewritten (no data migration); normalisation happens at read
   time.
 
-A sub-issue's SOW ref is its parent's. A sub-issue's own label/title is
+A sub-issue's SOW ref is its parent's - in a deliverable -> task ->
+sub-task chain, the top-level issue's. A sub-issue's own label/title is
 not consulted, so one source of truth per deliverable.
 
 ## Data model

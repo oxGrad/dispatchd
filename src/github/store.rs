@@ -251,13 +251,14 @@ fn upsert_pr(conn: &Connection, pr: &PullRequest) -> Result<()> {
     Ok(())
 }
 
-/// Of `ids`, the issues not stored yet - ones a PR links to that the
-/// issue search didn't return, which the sync then fetches by id.
+/// Of `ids` (already deduplicated by the caller), the issues not stored
+/// yet - ones a PR links to that the issue search didn't return, which the
+/// sync then fetches by id.
 pub fn missing_issue_ids(conn: &Connection, ids: &[String]) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT 1 FROM github_issues WHERE node_id = ?1")?;
     let mut missing = Vec::new();
     for id in ids {
-        if !stmt.exists([id])? && !missing.contains(id) {
+        if !stmt.exists([id])? {
             missing.push(id.clone());
         }
     }
@@ -603,10 +604,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_issue_ids_returns_unknown_ids_once() {
+    fn missing_issue_ids_returns_only_unknown_ids() {
         let conn = open_test_db();
         upsert_issue(&conn, &issue("I_100", None)).unwrap();
-        let ids = vec!["I_100".into(), "I_201".into(), "I_201".into()];
+        let ids = vec!["I_100".into(), "I_201".into()];
         assert_eq!(missing_issue_ids(&conn, &ids).unwrap(), vec!["I_201"]);
     }
 
