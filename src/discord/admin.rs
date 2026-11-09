@@ -11,6 +11,7 @@ use serenity::all::{
 
 use crate::config::GithubConfig;
 use crate::discord_login::{self, DiscordPing};
+use crate::github::store::SyncSummary;
 use crate::github_login::{self, GithubPing};
 use crate::service::{self, ServiceStatus};
 use crate::upgrade::{Request, StatusLine};
@@ -95,14 +96,17 @@ fn format_admin_status(
     svc: &ServiceStatus,
     ping: &DiscordPing,
     github: &GithubPing,
+    sync: Option<&SyncSummary>,
     version_line: &str,
 ) -> String {
     format!(
-        "```\n{}{}\n{}{}```",
+        "```\n{}{}\n{}{}{}```",
         service::format_status(svc),
         version_line,
         discord_login::format_ping(ping),
         github_login::format_github_ping(github),
+        sync.map(github_login::format_sync_summary)
+            .unwrap_or_default(),
     )
 }
 
@@ -185,9 +189,18 @@ pub async fn handle_status(
 
     let svc = service::status_report();
     let ping = discord_login::ping_report().await;
+    let sync = match github {
+        Some(_) => {
+            let conn = db.lock().expect("db mutex poisoned");
+            crate::github::store::sync_summary(&conn)
+                .map_err(|e| eprintln!("failed to read the github sync summary: {e}"))
+                .ok()
+        }
+        None => None,
+    };
     let github = github_login::ping_report(github).await;
     let check = upgrade::check().await.map_err(|e| e.to_string());
-    let body = format_admin_status(&svc, &ping, &github, &version_line(check));
+    let body = format_admin_status(&svc, &ping, &github, sync.as_ref(), &version_line(check));
     edit(ctx, command, body).await;
 }
 
@@ -496,10 +509,18 @@ mod tests {
             key_found: false,
             result: None,
         };
+        let sync = SyncSummary {
+            last_sync_at: Some("2026-10-16T02:00:00Z".into()),
+            last_error: None,
+            prs: 1,
+            issues: 2,
+            reviews: 3,
+        };
         let out = format_admin_status(
             &svc,
             &ping,
             &github,
+            Some(&sync),
             "  version:              0.6.0 (up to date)",
         );
         assert!(out.starts_with("```\n"));
@@ -508,5 +529,6 @@ mod tests {
         assert!(out.contains("version:              0.6.0 (up to date)"));
         assert!(out.contains("discord:"));
         assert!(out.contains("github:"));
+        assert!(out.contains("sync:                 last ok 2026-10-16T02:00:00Z"));
     }
 }

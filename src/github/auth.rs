@@ -17,6 +17,9 @@ const JWT_LIFETIME_SECS: i64 = 9 * 60;
 /// Backdates `iat`, as GitHub's docs recommend, so a host clock running
 /// slightly ahead of GitHub's doesn't produce a "not yet valid" token.
 const JWT_IAT_SKEW_SECS: i64 = 60;
+/// Refresh an installation token this long before it actually expires, so
+/// a request started just before expiry never goes out with a dead token.
+const TOKEN_REFRESH_MARGIN_SECS: i64 = 5 * 60;
 
 /// A parsed App private key, ready to sign JWTs.
 pub struct AppKey(RsaKeyPair);
@@ -96,12 +99,19 @@ fn decode_pem(pem: &str) -> Result<(String, Vec<u8>)> {
 }
 
 /// An installation access token. GitHub issues them for one hour; the
-/// sync (design phase 2) caches and refreshes them ahead of `expires_at`.
+/// sync caches one and refreshes it ahead of `expires_at`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallationToken {
     pub token: String,
     /// Unix seconds.
     pub expires_at: i64,
+}
+
+impl InstallationToken {
+    /// `true` once we're inside `TOKEN_REFRESH_MARGIN_SECS` of expiry.
+    pub fn needs_refresh(&self, now: i64) -> bool {
+        now >= self.expires_at - TOKEN_REFRESH_MARGIN_SECS
+    }
 }
 
 #[cfg(test)]
@@ -190,5 +200,16 @@ mod tests {
             .join("\n");
         let err = AppKey::from_pem(&truncated).err().unwrap();
         assert!(err.to_string().contains("truncated"), "{err}");
+    }
+
+    #[test]
+    fn installation_token_refreshes_five_minutes_before_expiry() {
+        let token = InstallationToken {
+            token: "ghs_x".into(),
+            expires_at: 10_000,
+        };
+        assert!(!token.needs_refresh(10_000 - 301));
+        assert!(token.needs_refresh(10_000 - 300));
+        assert!(token.needs_refresh(10_001));
     }
 }
