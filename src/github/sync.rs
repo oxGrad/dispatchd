@@ -34,7 +34,7 @@ pub const BACKFILL_DAYS: i64 = 14;
 /// updated just before the last run may only have become searchable after
 /// it. Re-reading is harmless - every write is an upsert.
 const OVERLAP_MINUTES: i64 = 10;
-/// GitHub stops serving search results past 1,000 (10 pages of 100).
+/// GitHub stops serving one search's results past 1,000 (10 pages of 100).
 const MAX_PAGES: usize = 10;
 /// How many node-level GraphQL errors a run logs individually.
 const MAX_LOGGED_SKIPS: usize = 5;
@@ -137,64 +137,99 @@ pub fn since_for(high_water: Option<&str>, now: DateTime<Utc>) -> String {
 
 struct SearchResult<T> {
     items: Vec<T>,
-    /// Where the next search should resume from (see `fetch_search`).
+    /// The newest `updatedAt` among the hits.
     high_water: Option<String>,
 }
 
-/// The high-water mark after one more page. Normally the newest hit seen;
-/// on the last page GitHub will serve, it's the last hit's position in the
-/// `sort:updated-asc` order instead, so the next run resumes from where
-/// this one stopped rather than jumping past results it never fetched.
-/// GitHub reports `hasNextPage: false` at its 1,000-result cap, so the page
-/// number is the only signal.
-// ponytail: 1,000+ items inside one OVERLAP_MINUTES window can't advance the
-// mark and that search stalls; persist a "capped" flag that skips the
-// overlap if a bulk edit ever hits it.
-fn next_high_water<T>(seen: Option<String>, page: &Page<T>, page_number: usize) -> Option<String> {
-    if page_number == MAX_PAGES {
-        page.last_updated.clone().or(seen)
-    } else {
-        seen.max(page.high_water.clone())
-    }
+/// Where the next page of a search comes from.
+#[derive(Debug, PartialEq, Eq)]
+struct SearchPosition {
+    since: String,
+    cursor: Option<String>,
+    /// Pages already read from this `since`, so toward GitHub's cap.
+    pages: usize,
 }
 
-/// Pages through one org search, oldest first (see `next_high_water`).
+/// Where to go after `page`, or `None` when the search is finished. A new
+/// search as soon as the timestamp has moved; the cursor only while a whole
+/// page shares one second. GitHub reports `hasNextPage: false` at its
+/// 1,000-result cap, so the page count is the only signal for that.
+fn next_position<T>(at: &SearchPosition, page: &Page<T>) -> Option<SearchPosition> {
+    let restart = |since: String| {
+        Some(SearchPosition {
+            since,
+            cursor: None,
+            pages: 0,
+        })
+    };
+    let at_cap = at.pages + 1 == MAX_PAGES;
+    if !page.has_next_page && !at_cap {
+        return None;
+    }
+    let resume = page.resume_from.as_deref();
+    if let Some(resume) = resume.filter(|r| *r > at.since.as_str()) {
+        return restart(resume.to_string());
+    }
+    if at_cap {
+        eprintln!(
+            "github sync: over 1,000 results updated at {}, more than GitHub serves; \
+             skipping the rest of that second",
+            at.since
+        );
+        let since = DateTime::parse_from_rfc3339(&at.since).ok()?;
+        return restart(rfc3339(
+            since.with_timezone(&Utc) + chrono::Duration::seconds(1),
+        ));
+    }
+    Some(SearchPosition {
+        since: at.since.clone(),
+        cursor: Some(page.end_cursor.clone()?),
+        pages: at.pages + 1,
+    })
+}
+
+/// Reads one org search to the end, oldest first. Each page is a new search
+/// from where the last one ended rather than a cursor offset: an item
+/// updated mid-run moves to the end of the sort, which shifts every later
+/// result and lets one slide onto a page already read, and a single search
+/// stops at 1,000 results. Re-reading the hits around a boundary is
+/// harmless - every write is an upsert.
 async fn fetch_search<T>(
     tokens: &mut TokenSource,
     query: &str,
-    q: &str,
+    search_string: impl Fn(&str) -> String,
+    since: &str,
     parse: fn(Value) -> Result<Page<T>>,
     what: &str,
     skipped: &mut Vec<String>,
 ) -> Result<SearchResult<T>> {
     let mut items = Vec::new();
     let mut high_water: Option<String> = None;
-    let mut cursor: Option<String> = None;
-    for page_number in 1..=MAX_PAGES {
+    let mut position = SearchPosition {
+        since: since.to_string(),
+        cursor: None,
+        pages: 0,
+    };
+    loop {
         let data = tokens
             .graphql(
                 query,
-                serde_json::json!({ "q": q, "cursor": cursor }),
+                serde_json::json!({
+                    "q": search_string(&position.since),
+                    "cursor": position.cursor,
+                }),
                 skipped,
             )
             .await
             .with_context(|| format!("{what} search failed"))?;
-        let page = parse(data)?;
-        high_water = next_high_water(high_water, &page, page_number);
-        items.extend(page.items);
-        if page_number == MAX_PAGES {
-            eprintln!(
-                "github sync: {what} search reached page {MAX_PAGES}, the last GitHub serves; \
-                 anything past it is picked up from {} on the next run",
-                high_water.as_deref().unwrap_or("the same point")
-            );
+        let mut page = parse(data)?;
+        high_water = high_water.max(page.high_water.take());
+        items.append(&mut page.items);
+        match next_position(&position, &page) {
+            Some(next) => position = next,
+            None => return Ok(SearchResult { items, high_water }),
         }
-        if !page.has_next_page {
-            break;
-        }
-        cursor = page.end_cursor;
     }
-    Ok(SearchResult { items, high_water })
 }
 
 /// Everything one run fetched, before anything is written.
@@ -260,7 +295,8 @@ pub async fn collect(
     let prs = fetch_search(
         tokens,
         &graphql::pr_search_query(),
-        &graphql::search_string(org, SearchKind::Pr, pr_since),
+        |since| graphql::search_string(org, SearchKind::Pr, since),
+        pr_since,
         graphql::parse_pr_page,
         "PR",
         &mut skipped,
@@ -269,7 +305,8 @@ pub async fn collect(
     let issues = fetch_search(
         tokens,
         &graphql::issue_search_query(),
-        &graphql::search_string(org, SearchKind::Issue, issue_since),
+        |since| graphql::search_string(org, SearchKind::Issue, since),
+        issue_since,
         graphql::parse_issue_page,
         "issue",
         &mut skipped,
@@ -628,25 +665,71 @@ mod tests {
         assert_eq!(since_for(Some("yesterday"), now()), "2026-10-02T02:00:00Z");
     }
 
-    #[test]
-    fn next_high_water_resumes_from_the_last_hit_on_the_final_page() {
-        let page = Page::<()> {
+    const T0: &str = "2026-10-15T09:00:00Z";
+    const T1: &str = "2026-10-15T10:00:00Z";
+
+    fn at(since: &str, cursor: Option<&str>, pages: usize) -> SearchPosition {
+        SearchPosition {
+            since: since.into(),
+            cursor: cursor.map(Into::into),
+            pages,
+        }
+    }
+
+    fn page(resume_from: Option<&str>, end_cursor: Option<&str>, has_next: bool) -> Page<()> {
+        Page {
             items: vec![],
-            end_cursor: None,
-            // GitHub's answer at the 1,000-result cap, with 60k more results.
-            has_next_page: false,
-            high_water: Some("2026-10-15T12:00:00Z".into()),
-            last_updated: Some("2026-10-15T09:00:00Z".into()),
-        };
-        let seen = || Some("2026-10-15T08:00:00Z".to_string());
+            end_cursor: end_cursor.map(Into::into),
+            has_next_page: has_next,
+            high_water: None,
+            resume_from: resume_from.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn next_position_starts_a_new_search_once_the_timestamp_moves() {
+        let next = next_position(&at(T0, Some("c"), 3), &page(Some(T1), Some("d"), true));
+        assert_eq!(next, Some(at(T1, None, 0)));
+    }
+
+    #[test]
+    fn next_position_uses_the_cursor_while_the_timestamp_stands_still() {
+        // A full page updated in the same second, then one with only hidden items.
+        for resume_from in [Some(T0), None] {
+            let next = next_position(&at(T0, None, 0), &page(resume_from, Some("c"), true));
+            assert_eq!(next, Some(at(T0, Some("c"), 1)));
+        }
+    }
+
+    #[test]
+    fn next_position_stops_when_github_has_nothing_more() {
         assert_eq!(
-            next_high_water(seen(), &page, MAX_PAGES - 1).as_deref(),
-            Some("2026-10-15T12:00:00Z")
+            next_position(&at(T0, None, 0), &page(Some(T1), None, false)),
+            None
         );
         assert_eq!(
-            next_high_water(seen(), &page, MAX_PAGES).as_deref(),
-            Some("2026-10-15T09:00:00Z")
+            next_position(&at(T0, None, 0), &page(Some(T0), None, true)),
+            None
         );
+    }
+
+    #[test]
+    fn next_position_moves_past_a_second_with_more_results_than_github_serves() {
+        // GitHub reports hasNextPage: false at its 1,000-result cap.
+        let next = next_position(
+            &at(T0, Some("c"), MAX_PAGES - 1),
+            &page(Some(T0), None, false),
+        );
+        assert_eq!(next, Some(at("2026-10-15T09:00:01Z", None, 0)));
+    }
+
+    #[test]
+    fn next_position_prefers_the_real_timestamp_at_the_result_cap() {
+        let next = next_position(
+            &at(T0, Some("c"), MAX_PAGES - 1),
+            &page(Some(T1), None, false),
+        );
+        assert_eq!(next, Some(at(T1, None, 0)));
     }
 
     fn actor(login: &str) -> Actor {

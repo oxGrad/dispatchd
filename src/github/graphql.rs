@@ -20,6 +20,8 @@ pub const SUB_ISSUE_BATCH: usize = 20;
 /// Children per parent in `sub_issues_query`; a list that hits this is
 /// reported incomplete (`SubIssueList::complete`).
 pub const SUB_ISSUES_PER_PARENT: u32 = 100;
+/// How many of a page's last hits `Page::resume_from` looks at.
+const RESUME_TAIL: usize = 5;
 
 /// GraphQL rejects a query that defines a fragment it doesn't use, so the
 /// PR search (no issue fields) gets `ACTOR_FRAGMENT` alone and the issue
@@ -210,10 +212,13 @@ pub struct Page<T> {
     /// parents riding along with them, which didn't come from the
     /// time-ordered search, so mustn't advance the sync's high-water mark.
     pub high_water: Option<String>,
-    /// The last search hit's `updatedAt`, i.e. how far through the
-    /// `sort:updated-asc` order this page got - the safe resume point when
-    /// paging stops early (see `sync::next_high_water`).
-    pub last_updated: Option<String>,
+    /// Where a search continuing after this page should start: the oldest
+    /// `updatedAt` among its last `RESUME_TAIL` hits (see
+    /// `sync::fetch_search`). Not just the last hit's, because GitHub sorts
+    /// by its search index, which can lag: one hit's live `updatedAt` can be
+    /// far newer than its place in the order, and resuming from it would
+    /// jump past results never fetched.
+    pub resume_from: Option<String>,
 }
 
 /// One parent's full sub-issue list from `sub_issues_query`.
@@ -490,7 +495,7 @@ fn page<T>(items: Vec<T>, info: RawPageInfo, hit_updated: Vec<String>) -> Page<T
         end_cursor: info.end_cursor,
         has_next_page: info.has_next_page,
         high_water: hit_updated.iter().max().cloned(),
-        last_updated: hit_updated.last().cloned(),
+        resume_from: hit_updated.iter().rev().take(RESUME_TAIL).min().cloned(),
     }
 }
 
@@ -654,7 +659,7 @@ mod tests {
         assert!(page.has_next_page);
         assert_eq!(page.end_cursor.as_deref(), Some("Y3Vyc29y"));
         assert_eq!(page.high_water.as_deref(), Some("2026-10-15T08:00:00Z"));
-        assert_eq!(page.last_updated.as_deref(), Some("2026-10-15T08:00:00Z"));
+        assert_eq!(page.resume_from.as_deref(), Some("2026-10-15T08:00:00Z"));
         assert_eq!(page.items.len(), 1);
         let pr = &page.items[0];
         assert_eq!(pr.state, "merged");
@@ -781,14 +786,34 @@ mod tests {
     }
 
     #[test]
-    fn last_updated_is_the_last_hit_in_sort_order_not_the_max() {
-        let mut first = raw_issue("I_1", 1, "a", &[]);
-        first["updatedAt"] = json!("2026-10-15T10:00:00Z");
-        let mut second = raw_issue("I_2", 2, "b", &[]);
-        second["updatedAt"] = json!("2026-10-15T09:00:00Z");
-        let page = parse_issue_page(search(vec![first, second], true)).unwrap();
-        assert_eq!(page.high_water.as_deref(), Some("2026-10-15T10:00:00Z"));
-        assert_eq!(page.last_updated.as_deref(), Some("2026-10-15T09:00:00Z"));
+    fn resume_from_is_not_fooled_by_a_lagging_hit_at_the_page_end() {
+        let hit = |updated: &str| {
+            let mut i = raw_issue("I_1", 1, "a", &[]);
+            i["updatedAt"] = json!(updated);
+            i
+        };
+        let hits = vec![
+            hit("2026-10-15T09:00:00Z"),
+            hit("2026-10-15T09:01:00Z"),
+            // Updated moments ago, but the search index still sorts it here.
+            hit("2026-10-15T23:00:00Z"),
+        ];
+        let page = parse_issue_page(search(hits, true)).unwrap();
+        assert_eq!(page.high_water.as_deref(), Some("2026-10-15T23:00:00Z"));
+        assert_eq!(page.resume_from.as_deref(), Some("2026-10-15T09:00:00Z"));
+    }
+
+    #[test]
+    fn resume_from_only_looks_at_the_end_of_the_page() {
+        let hits = (0..7)
+            .map(|minute| {
+                let mut i = raw_issue("I_1", 1, "a", &[]);
+                i["updatedAt"] = json!(format!("2026-10-15T09:0{minute}:00Z"));
+                i
+            })
+            .collect();
+        let page = parse_issue_page(search(hits, true)).unwrap();
+        assert_eq!(page.resume_from.as_deref(), Some("2026-10-15T09:02:00Z"));
     }
 
     #[test]

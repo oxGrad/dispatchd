@@ -482,7 +482,10 @@ retries next interval; reports render from whatever's already stored.
 *As built (phase 2):* each search starts 10 minutes before its
 high-water mark, since GitHub's search index can lag a write; the mark
 only advances from the search hits themselves (never from parents or
-by-id lookups riding along) and only after every write succeeded.
+by-id lookups riding along) and only after every write succeeded. Each
+page is a new search from the previous page's timestamp rather than a
+cursor offset, so an update mid-run can't shift a result across a page
+boundary and no single search reaches GitHub's 1,000-result cap.
 `dispatchd github preview --days N` runs the same queries once and
 prints a summary without touching the DB, for checking the integration
 end to end. The four queries are validated against GitHub's published

@@ -393,8 +393,8 @@ src/
                  pure parsers into Issue/PullRequest/Review rows, each
                  Issue tagged with its Origin (SearchHit / Parent / ById /
                  SubIssue); Page::high_water comes from search hits only,
-                 Page::last_updated is the resume point when paging is cut
-                 short; SubIssueList::complete says whether a deliverable's
+                 Page::resume_from is where the next page's search starts;
+                 SubIssueList::complete says whether a deliverable's
                  child list can prove a child was removed; SUB_ISSUE_BATCH
                  = 20 keeps that query under GitHub's 500k-node limit.
                  store.rs - write_batch (one transaction per run: deduped
@@ -406,9 +406,11 @@ src/
                  sync_summary. sync.rs - TokenSource (cached installation
                  token, checked before every request; owns the one HTTP
                  client), collect (the whole fetch pipeline, no DB: one
-                 generic fetch_search for both searches, logging and
-                 resuming from last_updated if GitHub's 1,000-result cap
-                 cuts it short; PR-linked issues by id; sub-issues only for
+                 generic fetch_search for both searches, each page a new
+                 search from the last one's timestamp - next_position - so
+                 mid-run updates can't shift results across a page and
+                 GitHub's 1,000-result cap doesn't apply; PR-linked issues
+                 by id; sub-issues only for
                  deliverables behind *fresh* rows - parents_to_expand -
                  so the 10-min overlap doesn't re-expand forever),
                  sync_once (collect + write_batch + member id resolution,
