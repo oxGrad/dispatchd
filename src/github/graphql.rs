@@ -14,8 +14,8 @@ pub const PAGE_SIZE: u32 = 100;
 /// IDs per `issues_by_id_query` lookup; GitHub's maximum for `nodes(ids:)`.
 pub const NODES_BATCH: usize = 100;
 /// Parents per `sub_issues_query`. Each parent can expand to 100 children
-/// x (20 assignees + 30 labels), and GitHub refuses any query whose
-/// worst case passes 500,000 nodes - 100 parents would be ~510k, 20 is ~102k.
+/// x (20 assignees + 100 labels), and GitHub refuses any query whose
+/// worst case passes 500,000 nodes - 100 parents would be ~1.2M, 20 is ~242k.
 pub const SUB_ISSUE_BATCH: usize = 20;
 /// Children per parent in `sub_issues_query`; a list that hits this is
 /// reported incomplete (`SubIssueList::complete`).
@@ -25,7 +25,8 @@ const RESUME_TAIL: usize = 5;
 
 /// GraphQL rejects a query that defines a fragment it doesn't use, so the
 /// PR search (no issue fields) gets `ACTOR_FRAGMENT` alone and the issue
-/// queries get both.
+/// queries get both. GitHub allows 10 assignees and 100 labels per issue, so
+/// `IssueFields` always reads both lists whole.
 const ACTOR_FRAGMENT: &str = r#"
 fragment ActorFields on Actor { login ... on User { databaseId } }
 "#;
@@ -35,7 +36,7 @@ fragment IssueFields on Issue {
   repository { name }
   author { ...ActorFields }
   assignees(first: 20) { nodes { databaseId } }
-  labels(first: 30) { nodes { name } }
+  labels(first: 100) { nodes { name } }
 }
 "#;
 
@@ -44,6 +45,8 @@ fragment IssueFields on Issue {
 /// its reviews - the *last* 100: every reply in a review thread is its own
 /// COMMENTED review, so a busy PR passes 100, and `first` would keep the
 /// oldest and drop the new ones the sync is fetching it for.
+// ponytail: 100 closing links per PR, GitHub's page maximum; closing keywords
+// have no documented limit. Paginate if a PR ever links more.
 pub fn pr_search_query() -> String {
     format!(
         r#"query($q: String!, $cursor: String) {{
@@ -54,7 +57,7 @@ pub fn pr_search_query() -> String {
         id number title state isDraft createdAt updatedAt mergedAt closedAt
         repository {{ name }}
         author {{ ...ActorFields }}
-        closingIssuesReferences(first: 20) {{ nodes {{ id }} }}
+        closingIssuesReferences(first: 100) {{ nodes {{ id }} }}
         reviews(last: 100) {{ nodes {{ id state submittedAt author {{ ...ActorFields }} }} }}
       }}
     }}
@@ -631,7 +634,7 @@ mod tests {
     #[test]
     fn sub_issue_batches_stay_under_githubs_node_limit() {
         // Worst case per parent: every child with every assignee and label.
-        let per_parent = 1 + SUB_ISSUES_PER_PARENT as usize * (1 + 20 + 30);
+        let per_parent = 1 + SUB_ISSUES_PER_PARENT as usize * (1 + 20 + 100);
         assert!(SUB_ISSUE_BATCH * per_parent < 500_000);
     }
 
