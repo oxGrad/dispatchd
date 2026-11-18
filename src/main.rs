@@ -198,11 +198,11 @@ async fn run_status() -> anyhow::Result<()> {
 /// errors, without opening the DB, taking the singleton lock, or
 /// connecting to Discord (unlike the default run, which does all three).
 fn run_validate() -> anyhow::Result<()> {
+    let config = Config::load()?;
     match config::config_file_path()? {
         Some(path) => println!("config.toml: ok ({})", path.display()),
         None => println!("config.toml: not configured (using defaults)"),
     }
-    let config = Config::load()?;
     match &config.github {
         Some(github) => println!(
             "github: configured (app {} on {}, sync every {} min)",

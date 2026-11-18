@@ -98,7 +98,11 @@ impl Default for Config {
 
 /// Mirrors exactly what's optional in the TOML file. A missing or empty
 /// file deserializes to all-`None`, which is a valid state (defaults only).
+/// Unknown keys are an error, here and in every table: a top-level key
+/// written below a `[table]` header belongs to that table in TOML, and
+/// silently ignoring it once left the bot without discord_guild_id.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
     schedule: RawSchedule,
@@ -115,6 +119,7 @@ struct RawConfig {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawSchedule {
     thread_creation_time: Option<String>,
     todo_time: Option<String>,
@@ -127,17 +132,20 @@ struct RawSchedule {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawFollowup {
     todo_delay_minutes: Option<u32>,
     update_delay_minutes: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawCarryover {
     lookback_days: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawGithub {
     app_id: Option<u64>,
     org: Option<String>,
@@ -540,6 +548,16 @@ mod tests {
         assert_eq!(config.day_summary_time, jiff::civil::time(18, 30, 0, 0));
         assert_eq!(config.meeting_time, defaults.meeting_time);
         assert_eq!(config.update_time, defaults.update_time);
+    }
+
+    #[test]
+    fn top_level_key_under_a_table_is_an_error() {
+        let (_dir, path) = write_config(
+            "timezone = \"Asia/Jakarta\"\n[github]\napp_id = 1\norg = \"o\"\n\
+             discord_guild_id = 111111111111111111\n",
+        );
+        let err = format!("{:#}", read_raw_config(&path).unwrap_err());
+        assert!(err.contains("unknown field `discord_guild_id`"), "{err}");
     }
 
     #[test]
