@@ -2,8 +2,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::NaiveTime;
-use chrono_tz::Tz;
+use jiff::civil::Time;
+use jiff::tz::TimeZone;
 use serde::Deserialize;
 
 /// Env var that, when set, points directly at the config file to load,
@@ -33,15 +33,15 @@ const DEFAULT_GITHUB_SYNC_INTERVAL_MINUTES: u32 = 10;
 /// program. Every field is guaranteed valid.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
-    pub thread_creation_time: NaiveTime,
-    pub todo_time: NaiveTime,
-    pub update_time: NaiveTime,
+    pub thread_creation_time: Time,
+    pub todo_time: Time,
+    pub update_time: Time,
     /// When the daily meeting actually starts.
-    pub meeting_time: NaiveTime,
+    pub meeting_time: Time,
     /// When the full-detail day progress summary is posted into today's
     /// standup thread - fires on this clock time regardless of whether
     /// everyone has submitted yet, same as the other schedule entries.
-    pub day_summary_time: NaiveTime,
+    pub day_summary_time: Time,
     /// How many minutes before `meeting_time` the pre-meeting reminder fires.
     pub meeting_reminder_lead_minutes: u32,
     pub todo_followup_delay_minutes: u32,
@@ -51,7 +51,7 @@ pub struct Config {
     pub carryover_lookback_days: u32,
     pub ticker_interval_seconds: u64,
     pub run_on_weekends: bool,
-    pub timezone: Tz,
+    pub timezone: TimeZone,
     pub db_path: PathBuf,
     pub discord_guild_id: Option<u64>,
     pub discord_standup_channel_id: Option<u64>,
@@ -291,13 +291,12 @@ impl Config {
     }
 }
 
-fn parse_time(s: &str) -> Result<NaiveTime> {
-    NaiveTime::parse_from_str(s, "%H:%M").with_context(|| format!("expected HH:MM, got {s:?}"))
+fn parse_time(s: &str) -> Result<Time> {
+    Time::strptime("%H:%M", s).with_context(|| format!("expected HH:MM, got {s:?}"))
 }
 
-fn parse_timezone(s: &str) -> Result<Tz> {
-    s.parse::<Tz>()
-        .map_err(|e| anyhow::anyhow!("unknown IANA timezone {s:?}: {e}"))
+fn parse_timezone(s: &str) -> Result<TimeZone> {
+    TimeZone::get(s).map_err(|e| anyhow::anyhow!("unknown IANA timezone {s:?}: {e}"))
 }
 
 pub(crate) fn xdg_dirs() -> xdg::BaseDirectories {
@@ -421,10 +420,7 @@ mod tests {
         let config = Config::from_raw(raw).unwrap();
 
         let defaults = Config::default();
-        assert_eq!(
-            config.update_time,
-            NaiveTime::from_hms_opt(18, 30, 0).unwrap()
-        );
+        assert_eq!(config.update_time, jiff::civil::time(18, 30, 0, 0));
         assert_eq!(config.thread_creation_time, defaults.thread_creation_time);
         assert_eq!(config.todo_time, defaults.todo_time);
         assert_eq!(config.meeting_time, defaults.meeting_time);
@@ -525,10 +521,7 @@ mod tests {
         let config = Config::from_raw(raw).unwrap();
 
         let defaults = Config::default();
-        assert_eq!(
-            config.thread_creation_time,
-            NaiveTime::from_hms_opt(7, 45, 0).unwrap()
-        );
+        assert_eq!(config.thread_creation_time, jiff::civil::time(7, 45, 0, 0));
         assert_eq!(config.todo_time, defaults.todo_time);
     }
 
@@ -536,7 +529,7 @@ mod tests {
     fn day_summary_time_defaults_to_4pm_and_is_overridable_independently() {
         assert_eq!(
             Config::default().day_summary_time,
-            NaiveTime::from_hms_opt(16, 0, 0).unwrap()
+            jiff::civil::time(16, 0, 0, 0)
         );
 
         let (_dir, path) = write_config("[schedule]\nday_summary_time = \"18:30\"\n");
@@ -544,10 +537,7 @@ mod tests {
         let config = Config::from_raw(raw).unwrap();
 
         let defaults = Config::default();
-        assert_eq!(
-            config.day_summary_time,
-            NaiveTime::from_hms_opt(18, 30, 0).unwrap()
-        );
+        assert_eq!(config.day_summary_time, jiff::civil::time(18, 30, 0, 0));
         assert_eq!(config.meeting_time, defaults.meeting_time);
         assert_eq!(config.update_time, defaults.update_time);
     }
@@ -590,29 +580,17 @@ mod tests {
         let raw = read_raw_config(&path).unwrap();
         let config = Config::from_raw(raw).unwrap();
 
-        assert_eq!(
-            config.thread_creation_time,
-            NaiveTime::from_hms_opt(8, 0, 0).unwrap()
-        );
-        assert_eq!(config.todo_time, NaiveTime::from_hms_opt(8, 15, 0).unwrap());
-        assert_eq!(
-            config.update_time,
-            NaiveTime::from_hms_opt(14, 45, 0).unwrap()
-        );
-        assert_eq!(
-            config.meeting_time,
-            NaiveTime::from_hms_opt(17, 0, 0).unwrap()
-        );
-        assert_eq!(
-            config.day_summary_time,
-            NaiveTime::from_hms_opt(18, 0, 0).unwrap()
-        );
+        assert_eq!(config.thread_creation_time, jiff::civil::time(8, 0, 0, 0));
+        assert_eq!(config.todo_time, jiff::civil::time(8, 15, 0, 0));
+        assert_eq!(config.update_time, jiff::civil::time(14, 45, 0, 0));
+        assert_eq!(config.meeting_time, jiff::civil::time(17, 0, 0, 0));
+        assert_eq!(config.day_summary_time, jiff::civil::time(18, 0, 0, 0));
         assert_eq!(config.meeting_reminder_lead_minutes, 10);
         assert_eq!(config.todo_followup_delay_minutes, 45);
         assert_eq!(config.update_followup_delay_minutes, 20);
         assert_eq!(config.ticker_interval_seconds, 120);
         assert!(config.run_on_weekends);
-        assert_eq!(config.timezone, Tz::Asia__Jakarta);
+        assert_eq!(config.timezone.iana_name(), Some("Asia/Jakarta"));
         assert_eq!(
             config.db_path,
             PathBuf::from("/tmp/custom/dispatchd.sqlite3")

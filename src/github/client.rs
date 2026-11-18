@@ -7,7 +7,6 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use chrono::DateTime;
 use serde::Deserialize;
 
 use super::auth::{AppKey, InstallationToken};
@@ -61,9 +60,11 @@ pub fn parse_installation(body: &str) -> Result<Installation> {
 pub fn parse_access_token(body: &str) -> Result<InstallationToken> {
     let raw: RawAccessToken = serde_json::from_str(body)
         .context("unexpected response from POST /app/installations/{id}/access_tokens")?;
-    let expires_at = DateTime::parse_from_rfc3339(&raw.expires_at)
+    let expires_at = raw
+        .expires_at
+        .parse::<jiff::Timestamp>()
         .with_context(|| format!("unexpected token expiry {:?}", raw.expires_at))?
-        .timestamp();
+        .as_second();
     Ok(InstallationToken {
         token: raw.token,
         expires_at,
@@ -341,7 +342,7 @@ pub fn parse_user_id(body: &str) -> Result<i64> {
 pub async fn check(app_id: u64, org: &str, key: &AppKey) -> Result<AppCheck> {
     let started = Instant::now();
     let client = Client::new();
-    let jwt = key.app_jwt(app_id, chrono::Utc::now().timestamp())?;
+    let jwt = key.app_jwt(app_id, jiff::Timestamp::now().as_second())?;
     let app = client.app(&jwt).await?;
     let installation = client.org_installation(&jwt, org).await?;
     let token = client

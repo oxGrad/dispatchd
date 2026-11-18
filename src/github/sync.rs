@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, SecondsFormat, Utc};
+use jiff::{SignedDuration, Timestamp};
 use rusqlite::Connection;
 use serde_json::Value;
 
@@ -72,7 +72,7 @@ impl TokenSource {
     /// it's called before every request: a long run (a big backfill on a
     /// slow link) can outlive one token.
     pub async fn token(&mut self) -> Result<String> {
-        let now = Utc::now().timestamp();
+        let now = Timestamp::now().as_second();
         if let Some(token) = self.token.as_ref().filter(|t| !t.needs_refresh(now)) {
             return Ok(token.token.clone());
         }
@@ -120,18 +120,18 @@ impl TokenSource {
     }
 }
 
-fn rfc3339(t: DateTime<Utc>) -> String {
-    t.to_rfc3339_opts(SecondsFormat::Secs, true)
+fn rfc3339(t: Timestamp) -> String {
+    format!("{t:.0}")
 }
 
 /// Where an incremental search starts: `OVERLAP_MINUTES` before the stored
 /// high-water mark, or `BACKFILL_DAYS` back on the very first run (or if
 /// the stored mark is unreadable).
-pub fn since_for(high_water: Option<&str>, now: DateTime<Utc>) -> String {
+pub fn since_for(high_water: Option<&str>, now: Timestamp) -> String {
     let start = high_water
-        .and_then(|hw| DateTime::parse_from_rfc3339(hw).ok())
-        .map(|hw| hw.with_timezone(&Utc) - chrono::Duration::minutes(OVERLAP_MINUTES))
-        .unwrap_or_else(|| now - chrono::Duration::days(BACKFILL_DAYS));
+        .and_then(|hw| hw.parse::<Timestamp>().ok())
+        .map(|hw| hw - SignedDuration::from_mins(OVERLAP_MINUTES))
+        .unwrap_or_else(|| now - SignedDuration::from_hours(24 * BACKFILL_DAYS));
     rfc3339(start)
 }
 
@@ -176,10 +176,8 @@ fn next_position<T>(at: &SearchPosition, page: &Page<T>) -> Option<SearchPositio
              skipping the rest of that second",
             at.since
         );
-        let since = DateTime::parse_from_rfc3339(&at.since).ok()?;
-        return restart(rfc3339(
-            since.with_timezone(&Utc) + chrono::Duration::seconds(1),
-        ));
+        let since = at.since.parse::<Timestamp>().ok()?;
+        return restart(rfc3339(since + SignedDuration::from_secs(1)));
     }
     Some(SearchPosition {
         since: at.since.clone(),
@@ -401,7 +399,7 @@ pub async fn sync_once(
     db: &Arc<Mutex<Connection>>,
     tokens: &mut TokenSource,
     org: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<SyncReport> {
     let (pr_hw, issue_hw) = {
         let conn = db.lock().expect("db mutex poisoned");
@@ -510,7 +508,7 @@ pub async fn run_loop(db: Arc<Mutex<Connection>>, github: GithubConfig, key: App
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
-        let now = Utc::now();
+        let now = Timestamp::now();
         match sync_once(&db, &mut tokens, &github.org, now).await {
             Ok(report) => println!(
                 "github sync: {} PRs, {} issues ({} sub-issue lists), {} member ids \
@@ -539,7 +537,7 @@ pub async fn run_loop(db: Arc<Mutex<Connection>>, github: GithubConfig, key: App
 /// against the real org and prints a summary, without opening the DB.
 pub async fn preview(github: &GithubConfig, key: AppKey, days: u32) -> Result<String> {
     let mut tokens = TokenSource::new(github, key);
-    let since = rfc3339(Utc::now() - chrono::Duration::days(i64::from(days)));
+    let since = rfc3339(Timestamp::now() - SignedDuration::from_hours(24 * i64::from(days)));
     let collected = collect(&mut tokens, &github.org, &since, &since, None, |ids| {
         Ok(ids.to_vec())
     })
@@ -641,10 +639,8 @@ mod tests {
     use super::*;
     use crate::github::graphql::{Actor, Review};
 
-    fn now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-10-16T02:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc)
+    fn now() -> Timestamp {
+        "2026-10-16T02:00:00Z".parse().unwrap()
     }
 
     #[test]

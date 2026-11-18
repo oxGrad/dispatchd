@@ -164,12 +164,11 @@ pub fn backfill_missed(
     today: &str,
     include_weekends: bool,
 ) -> Result<Vec<String>> {
-    use chrono::{Datelike, NaiveDate, Weekday};
+    use jiff::ToSpan;
+    use jiff::civil::{Date, Weekday};
 
-    let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d")?;
-    let since = (today_date - chrono::Duration::days(MISSED_BACKFILL_DAYS))
-        .format("%Y-%m-%d")
-        .to_string();
+    let today_date = Date::strptime("%Y-%m-%d", today)?;
+    let since = (today_date - MISSED_BACKFILL_DAYS.days()).to_string();
     let mut stmt = conn.prepare(
         "SELECT DISTINCT date FROM entries
          WHERE date >= ?1 AND date < ?2
@@ -182,8 +181,8 @@ pub fn backfill_missed(
 
     let mut recorded = Vec::new();
     for date in dates {
-        let weekday = NaiveDate::parse_from_str(&date, "%Y-%m-%d")?.weekday();
-        if !include_weekends && matches!(weekday, Weekday::Sat | Weekday::Sun) {
+        let weekday = Date::strptime("%Y-%m-%d", &date)?.weekday();
+        if !include_weekends && matches!(weekday, Weekday::Saturday | Weekday::Sunday) {
             continue;
         }
         record_missed(conn, &date)?;

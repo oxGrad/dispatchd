@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
-use chrono::{Datelike, NaiveDate, NaiveTime};
-use chrono_tz::Tz;
+use jiff::civil::{Date, Time};
+use jiff::tz::TimeZone;
 use rusqlite::Connection;
 use serenity::all::{
     CommandInteraction, CommandOptionType, Context as SerenityContext, CreateAttachment,
@@ -52,8 +52,8 @@ pub async fn handle(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
-    day_summary_time: NaiveTime,
+    timezone: &TimeZone,
+    day_summary_time: Time,
     run_on_weekends: bool,
 ) {
     let discord_user_id = command.user.id.to_string();
@@ -142,7 +142,7 @@ pub async fn handle(
 /// on a Saturday would be wrong.
 fn is_ritual_day(today: &str, run_on_weekends: bool) -> bool {
     run_on_weekends
-        || NaiveDate::parse_from_str(today, "%Y-%m-%d")
+        || Date::strptime("%Y-%m-%d", today)
             .map(|d| !super::ticker::is_weekend(d.weekday()))
             .unwrap_or(true)
 }
@@ -156,14 +156,14 @@ fn pending_today_note(
     includes_today: bool,
     recorded: bool,
     ritual_day: bool,
-    day_summary_time: NaiveTime,
+    day_summary_time: Time,
 ) -> Option<String> {
     if !includes_today || recorded || !ritual_day {
         return None;
     }
     Some(format!(
         "ℹ️ Today's misses haven't been recorded yet - that happens at {}.",
-        day_summary_time.format("%H:%M")
+        day_summary_time.strftime("%H:%M")
     ))
 }
 
@@ -171,8 +171,8 @@ fn pending_today_note(
 mod tests {
     use super::*;
 
-    fn t(s: &str) -> NaiveTime {
-        NaiveTime::parse_from_str(s, "%H:%M").unwrap()
+    fn t(s: &str) -> Time {
+        Time::strptime("%H:%M", s).unwrap()
     }
 
     #[test]

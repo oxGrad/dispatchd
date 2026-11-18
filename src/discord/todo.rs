@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use chrono_tz::Tz;
+use jiff::tz::TimeZone;
 use rusqlite::Connection;
 use serenity::all::{
     AutocompleteChoice, CommandDataOption, CommandDataOptionValue, CommandInteraction,
@@ -136,7 +136,7 @@ pub async fn handle_modal_submission(
     ctx: &SerenityContext,
     modal: &ModalInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
 ) {
     let task = modal_value(modal, TASK_INPUT_ID).unwrap_or_default();
     let notes = modal_value(modal, NOTES_INPUT_ID).filter(|s| !s.trim().is_empty());
@@ -195,7 +195,7 @@ pub async fn handle_edit(
     command: &CommandInteraction,
     options: &[CommandDataOption],
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
 ) {
     let Some(id) = parse_id_option(options) else {
         reply_ephemeral(
@@ -282,7 +282,7 @@ pub async fn handle_edit_modal_submission(
     ctx: &SerenityContext,
     modal: &ModalInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
 ) {
     let Some(id) = modal
         .data
@@ -341,7 +341,7 @@ pub async fn handle_delete(
     command: &CommandInteraction,
     options: &[CommandDataOption],
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
 ) {
     let Some(id) = parse_id_option(options) else {
         reply_ephemeral(
@@ -422,7 +422,7 @@ pub async fn handle_list(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
     carryover_lookback_days: u32,
 ) {
     let discord_user_id = command.user.id.to_string();
@@ -509,7 +509,7 @@ pub async fn handle_autocomplete(
     ctx: &SerenityContext,
     autocomplete: &AutocompleteInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
 ) {
     let Some((_, options)) = subcommand(&autocomplete.data.options) else {
         return;

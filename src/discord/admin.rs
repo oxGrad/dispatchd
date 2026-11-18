@@ -291,7 +291,7 @@ pub async fn handle_upgrade(
         channel_id: command.channel_id.to_string(),
         target_version: version,
         restart,
-        requested_at: chrono::Utc::now().to_rfc3339(),
+        requested_at: jiff::Timestamp::now().to_string(),
     };
     let tmp = format!(
         "{}/.upgrade.request.{}",

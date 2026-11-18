@@ -33,6 +33,12 @@ posts into a "Standup: YYYY-MM-DD" thread in the team's standup channel:
    qualifies. Either way, today's misses (per-member, `/todo` and
    `/progress` tracked independently) are recorded permanently, so the
    tech lead can review any date range later with `/missed` (see below).
+   With the [GitHub integration](github-setup.md) on, the message also
+   gets a one-line team total (`GitHub: 3 PRs merged · 1 sub-issue closed
+   (D.P.1.2) · 4 reviews`, no names), and the attachment gains a `SOW` and
+   a `GitHub` column plus two sections: **GitHub work not on a todo** (PRs
+   merged/opened and issues opened/closed today by a member, that no todo
+   covers) and **Code reviews** (who reviewed which PRs today).
 
 If you miss a step, dispatchd nags you with an `@mention` in the thread a
 while after each of the two prompts above (default 30 minutes) - once per
@@ -217,6 +223,21 @@ Any todos carried over from earlier days (still open, no Done report)
 appear in a **Carried over** block at the end of each member's section,
 with the latest status and whether it was updated today.
 
+## `/team github` - tech lead only
+
+Needs the [GitHub integration](github-setup.md). `/team github
+start:<date> end:<date>` (same dates as `/recap`, so no dates = today)
+shows the team's GitHub totals, then one line per member: PRs merged,
+PRs opened and still open, sub-issues closed (with their SOW refs),
+issues opened, and PRs reviewed. For a single day each count lists the
+items (`2 PRs merged (api#210, api#224)`); for a range it's counts only.
+Credit always goes to the PR's **author** - never to whoever clicked
+merge - and a sub-issue closed by a PR is credited to that PR's author
+(to its assignees if it was closed by hand). A member without a
+`github_user` shows "no GitHub account linked"; one added since the last
+sync shows "not resolved yet". Ephemeral, split across messages when
+long. Same `lead`/`viewer` gate as `/team status`.
+
 ## `/team remind` - tech lead only
 
 `/team remind member:<name> kind:<todo|progress>` posts a reminder that
@@ -261,6 +282,18 @@ recap. Days with no activity at all are left out rather than shown
 empty. It's an attachment rather than chat text so a long
 range's table isn't squeezed into (or split across) Discord's
 2000-character message limit, and so the columns actually line up.
+
+With the [GitHub integration](github-setup.md) on, both commands produce
+the stakeholder report instead: a **Deliverables** table (one row per SOW
+deliverable with activity in the range: sub-issues closed out of total as
+of `end`, `(+N)` closed within the range, PRs merged, todos done), then a
+section per deliverable listing its sub-issues by state (blocked, not
+started, in progress, closed) with their PRs and last activity. Work not
+linked to any deliverable gets its own row. **It has no names in it**, so
+it can go to stakeholders as is. Both commands take an optional
+`include_member_detail` (default off): turn it on to append the per-day
+tables (standup, GitHub work not on a todo, code reviews) with names, for
+your own use.
 
 ## `/missed` - tech lead only
 

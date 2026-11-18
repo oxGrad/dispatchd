@@ -1,11 +1,15 @@
 use anyhow::Result;
-use chrono::{NaiveDate, Utc};
-use chrono_tz::Tz;
+use jiff::Timestamp;
+use jiff::civil::Date;
+use jiff::tz::TimeZone;
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Today's date, in the given timezone, as `YYYY-MM-DD`.
-pub fn today_in(tz: &Tz) -> String {
-    Utc::now().with_timezone(tz).format("%Y-%m-%d").to_string()
+pub fn today_in(tz: &TimeZone) -> String {
+    Timestamp::now()
+        .to_zoned_datetime(tz.clone())
+        .date()
+        .to_string()
 }
 
 /// Inserts a new `type = 'todo'` row. `todo_id`/`status`/`progress`/`blocker`
@@ -29,7 +33,7 @@ pub fn insert_todo(
             task,
             notes,
             sow_ref,
-            Utc::now().to_rfc3339()
+            Timestamp::now().to_string()
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -59,7 +63,7 @@ pub fn insert_update(
             status,
             progress,
             blocker,
-            Utc::now().to_rfc3339()
+            Timestamp::now().to_string()
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -135,8 +139,8 @@ pub fn list_todos(
 /// is returned unchanged. Used to label carried-over todos in the
 /// `/progress add` autocomplete, `/todo list`, and `/team report`.
 pub fn short_date(ymd: &str) -> String {
-    NaiveDate::parse_from_str(ymd, "%Y-%m-%d")
-        .map(|d| d.format("%b %-d").to_string())
+    Date::strptime("%Y-%m-%d", ymd)
+        .map(|d| d.strftime("%b %-d").to_string())
         .unwrap_or_else(|_| ymd.to_string())
 }
 
@@ -575,7 +579,6 @@ pub fn entries_since(conn: &Connection, date: &str, after_id: i64) -> Result<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
 
     fn open_test_db() -> Connection {
         let dir = tempfile::tempdir().unwrap();
@@ -650,7 +653,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert!(chrono::DateTime::parse_from_rfc3339(&created_at).is_ok());
+        assert!(created_at.parse::<Timestamp>().is_ok());
     }
 
     #[test]
@@ -706,8 +709,8 @@ mod tests {
 
     #[test]
     fn today_in_returns_a_parseable_date() {
-        let result = today_in(&Tz::UTC);
-        assert!(NaiveDate::parse_from_str(&result, "%Y-%m-%d").is_ok());
+        let result = today_in(&TimeZone::UTC);
+        assert!(Date::strptime("%Y-%m-%d", &result).is_ok());
     }
 
     #[test]
