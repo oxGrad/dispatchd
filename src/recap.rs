@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use chrono::NaiveDate;
+use jiff::ToSpan;
+use jiff::civil::Date;
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub const DEFAULT_RECAP_DAYS: i64 = 14;
@@ -49,29 +50,26 @@ pub struct DayRecap {
     pub rows: Vec<RecapRow>,
 }
 
-fn parse_today(today: &str) -> Result<NaiveDate, String> {
-    NaiveDate::parse_from_str(today, "%Y-%m-%d")
+fn parse_today(today: &str) -> Result<Date, String> {
+    Date::strptime("%Y-%m-%d", today)
         .map_err(|_| "⚠️ Internal error resolving today's date.".to_string())
 }
 
-fn parse_option_date(value: &str, which: &str) -> Result<NaiveDate, String> {
-    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+fn parse_option_date(value: &str, which: &str) -> Result<Date, String> {
+    Date::strptime("%Y-%m-%d", value)
         .map_err(|_| format!("⚠️ Invalid {which} date {value:?} - use YYYY-MM-DD."))
 }
 
-fn format_range(start: NaiveDate, end: NaiveDate) -> (String, String) {
-    (
-        start.format("%Y-%m-%d").to_string(),
-        end.format("%Y-%m-%d").to_string(),
-    )
+fn format_range(start: Date, end: Date) -> (String, String) {
+    (start.to_string(), end.to_string())
 }
 
 /// `/recap-biweekly`'s fixed range: the `DEFAULT_RECAP_DAYS` days ending
 /// yesterday (today is still in progress) - run on Oct 1, that's Sep 17 to
 /// Sep 30.
 pub fn biweekly_range(today: &str) -> Result<(String, String), String> {
-    let end = parse_today(today)? - chrono::Duration::days(1);
-    let start = end - chrono::Duration::days(DEFAULT_RECAP_DAYS - 1);
+    let end = parse_today(today)? - 1.day();
+    let start = end - (DEFAULT_RECAP_DAYS - 1).days();
     Ok(format_range(start, end))
 }
 
@@ -105,7 +103,7 @@ pub fn resolve_day_or_range(
     if start_date > end_date {
         return Err("⚠️ start must be on or before end.".to_string());
     }
-    let span_days = (end_date - start_date).num_days() + 1;
+    let span_days = i64::from((end_date - start_date).get_days()) + 1;
     if span_days > MAX_RECAP_DAYS {
         return Err(format!(
             "⚠️ That's {span_days} days - a range covers at most {MAX_RECAP_DAYS}. Pick a narrower range."
@@ -120,14 +118,14 @@ pub fn resolve_day_or_range(
 /// `start`/`end` are trusted to already be validated `YYYY-MM-DD` strings
 /// (see `resolve_day_or_range` / `biweekly_range`).
 pub fn recap_range(conn: &Connection, start: &str, end: &str) -> Result<Vec<DayRecap>> {
-    let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d").context("invalid start date")?;
-    let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d").context("invalid end date")?;
+    let start_date = Date::strptime("%Y-%m-%d", start).context("invalid start date")?;
+    let end_date = Date::strptime("%Y-%m-%d", end).context("invalid end date")?;
 
     let mut out = Vec::new();
     let mut date = start_date;
     while date <= end_date {
-        out.extend(day_recap(conn, &date.format("%Y-%m-%d").to_string())?);
-        date = date.succ_opt().expect("date overflow");
+        out.extend(day_recap(conn, &date.to_string())?);
+        date = date.tomorrow().expect("date overflow");
     }
     Ok(out)
 }

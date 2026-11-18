@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use chrono_tz::Tz;
+use jiff::tz::TimeZone;
 use rusqlite::Connection;
 use serenity::all::{
     CommandInteraction, CommandOptionType, Context as SerenityContext, CreateAttachment,
@@ -62,7 +62,7 @@ pub async fn handle(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
     github: bool,
 ) {
     let today = entries::today_in(timezone);
@@ -79,7 +79,7 @@ pub async fn handle_biweekly(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
     github: bool,
 ) {
     let today = entries::today_in(timezone);
@@ -116,7 +116,7 @@ async fn respond(
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
     range: Result<(String, String), String>,
-    timezone: &Tz,
+    timezone: &TimeZone,
     shape: Shape,
     command_name: &str,
 ) {

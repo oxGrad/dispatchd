@@ -10,8 +10,8 @@ mod todo;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use chrono::NaiveTime;
-use chrono_tz::Tz;
+use jiff::civil::Time;
+use jiff::tz::TimeZone;
 use rusqlite::Connection;
 use serenity::all::{
     ActionRowComponent, ChannelId, Client, CommandDataOption, CommandDataOptionValue,
@@ -27,9 +27,9 @@ use crate::members;
 pub struct Handler {
     guild_id: GuildId,
     db: Arc<Mutex<Connection>>,
-    timezone: Tz,
+    timezone: TimeZone,
     carryover_lookback_days: u32,
-    day_summary_time: NaiveTime,
+    day_summary_time: Time,
     run_on_weekends: bool,
     github: Option<GithubConfig>,
 }
@@ -332,7 +332,7 @@ pub async fn run(
         .event_handler(Handler {
             guild_id: GuildId::new(guild_id),
             db: db.clone(),
-            timezone: config.timezone,
+            timezone: config.timezone.clone(),
             carryover_lookback_days: config.carryover_lookback_days,
             day_summary_time: config.day_summary_time,
             run_on_weekends: config.run_on_weekends,

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use chrono_tz::Tz;
+use jiff::tz::TimeZone;
 use rusqlite::Connection;
 use serenity::all::{
     AutocompleteChoice, ChannelId, CommandDataOption, CommandDataOptionValue, CommandInteraction,
@@ -136,7 +136,7 @@ pub enum SendOutcome {
 pub async fn post_to_standup_thread(
     http: &Arc<Http>,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
     content: &str,
 ) -> SendOutcome {
     let date = entries::today_in(timezone);
@@ -175,7 +175,7 @@ pub async fn post_to_standup_thread(
 pub async fn send_reminder(
     http: &Arc<Http>,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
     member_id: &str,
     kind: RemindKind,
 ) -> SendOutcome {
@@ -186,7 +186,7 @@ pub async fn handle_status(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
     carryover_lookback_days: u32,
 ) {
     let discord_user_id = command.user.id.to_string();
@@ -232,7 +232,7 @@ pub async fn handle_report(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
     carryover_lookback_days: u32,
 ) {
     let discord_user_id = command.user.id.to_string();
@@ -321,7 +321,7 @@ pub async fn handle_github(
     command: &CommandInteraction,
     options: &[CommandDataOption],
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
     github_configured: bool,
 ) {
     let discord_user_id = command.user.id.to_string();
@@ -406,7 +406,7 @@ pub async fn handle_remind(
     command: &CommandInteraction,
     options: &[CommandDataOption],
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
 ) {
     let discord_user_id = command.user.id.to_string();
     let member = get_option_string(options, "member");
@@ -471,7 +471,7 @@ pub async fn handle_skip_meeting(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
 ) {
     let discord_user_id = command.user.id.to_string();
     let date = entries::today_in(timezone);

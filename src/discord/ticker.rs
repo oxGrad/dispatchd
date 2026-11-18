@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{Datelike, NaiveTime, Weekday};
+use jiff::civil::{Time, Weekday};
 use rusqlite::Connection;
 use serenity::all::{
     ChannelId, ChannelType, CreateAllowedMentions, CreateAttachment, CreateMessage, CreateThread,
@@ -12,13 +12,13 @@ use crate::config::Config;
 use crate::{entries, followups, members, recap, reminders};
 
 /// Pure time comparison - testable without a live clock or Discord types.
-fn is_due(now: NaiveTime, trigger: NaiveTime) -> bool {
+fn is_due(now: Time, trigger: Time) -> bool {
     now >= trigger
 }
 
 /// Pure weekday check - testable without a live clock or Discord types.
 pub(super) fn is_weekend(day: Weekday) -> bool {
-    matches!(day, Weekday::Sat | Weekday::Sun)
+    matches!(day, Weekday::Saturday | Weekday::Sunday)
 }
 
 /// Runs forever, checking every `config.ticker_interval_seconds` whether
@@ -32,10 +32,7 @@ pub async fn run(
     config: Config,
 ) {
     {
-        let today = chrono::Utc::now()
-            .with_timezone(&config.timezone)
-            .format("%Y-%m-%d")
-            .to_string();
+        let today = entries::today_in(&config.timezone);
         let conn = db.lock().expect("db mutex poisoned");
         match followups::backfill_missed(&conn, &today, config.run_on_weekends) {
             Ok(dates) if !dates.is_empty() => {
@@ -59,11 +56,11 @@ async fn tick(
     channel_id: ChannelId,
     config: &Config,
 ) {
-    let now = chrono::Utc::now().with_timezone(&config.timezone);
+    let now = jiff::Timestamp::now().to_zoned_datetime(config.timezone.clone());
     if !config.run_on_weekends && is_weekend(now.weekday()) {
         return;
     }
-    let date = now.format("%Y-%m-%d").to_string();
+    let date = now.date().to_string();
     let now_time = now.time();
 
     if is_due(now_time, config.thread_creation_time) {
@@ -83,7 +80,7 @@ async fn tick(
         .await;
     }
     let meeting_reminder_trigger = config.meeting_time
-        - chrono::Duration::minutes(config.meeting_reminder_lead_minutes.into());
+        - jiff::SignedDuration::from_mins(config.meeting_reminder_lead_minutes.into());
     if is_due(now_time, meeting_reminder_trigger) {
         maybe_fire_meeting_reminder(http, db, &date, config.meeting_reminder_lead_minutes).await;
     }
@@ -93,10 +90,10 @@ async fn tick(
         maybe_record_missed(db, &date).await;
     }
 
-    let todo_followup_trigger =
-        config.todo_time + chrono::Duration::minutes(config.todo_followup_delay_minutes.into());
-    let update_followup_trigger =
-        config.update_time + chrono::Duration::minutes(config.update_followup_delay_minutes.into());
+    let todo_followup_trigger = config.todo_time
+        + jiff::SignedDuration::from_mins(config.todo_followup_delay_minutes.into());
+    let update_followup_trigger = config.update_time
+        + jiff::SignedDuration::from_mins(config.update_followup_delay_minutes.into());
 
     if is_due(now_time, todo_followup_trigger) {
         maybe_fire_followups(
@@ -779,28 +776,28 @@ mod tests {
 
     #[test]
     fn is_due_before_trigger_time_is_false() {
-        let trigger = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
-        let now = NaiveTime::from_hms_opt(8, 59, 59).unwrap();
+        let trigger = jiff::civil::time(9, 0, 0, 0);
+        let now = jiff::civil::time(8, 59, 59, 0);
         assert!(!is_due(now, trigger));
     }
 
     #[test]
     fn is_due_at_or_after_trigger_time_is_true() {
-        let trigger = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+        let trigger = jiff::civil::time(9, 0, 0, 0);
         assert!(is_due(trigger, trigger));
-        assert!(is_due(NaiveTime::from_hms_opt(9, 0, 1).unwrap(), trigger));
-        assert!(is_due(NaiveTime::from_hms_opt(15, 0, 0).unwrap(), trigger));
+        assert!(is_due(jiff::civil::time(9, 0, 1, 0), trigger));
+        assert!(is_due(jiff::civil::time(15, 0, 0, 0), trigger));
     }
 
     #[test]
     fn is_weekend_is_true_only_for_saturday_and_sunday() {
-        assert!(is_weekend(Weekday::Sat));
-        assert!(is_weekend(Weekday::Sun));
-        assert!(!is_weekend(Weekday::Mon));
-        assert!(!is_weekend(Weekday::Tue));
-        assert!(!is_weekend(Weekday::Wed));
-        assert!(!is_weekend(Weekday::Thu));
-        assert!(!is_weekend(Weekday::Fri));
+        assert!(is_weekend(Weekday::Saturday));
+        assert!(is_weekend(Weekday::Sunday));
+        assert!(!is_weekend(Weekday::Monday));
+        assert!(!is_weekend(Weekday::Tuesday));
+        assert!(!is_weekend(Weekday::Wednesday));
+        assert!(!is_weekend(Weekday::Thursday));
+        assert!(!is_weekend(Weekday::Friday));
     }
 
     #[test]
@@ -817,14 +814,11 @@ mod tests {
 
     #[test]
     fn meeting_reminder_trigger_is_lead_minutes_before_the_meeting() {
-        let meeting = NaiveTime::from_hms_opt(16, 0, 0).unwrap();
-        let trigger = meeting - chrono::Duration::minutes(5);
-        assert_eq!(trigger, NaiveTime::from_hms_opt(15, 55, 0).unwrap());
-        assert!(!is_due(
-            NaiveTime::from_hms_opt(15, 54, 0).unwrap(),
-            trigger
-        ));
-        assert!(is_due(NaiveTime::from_hms_opt(15, 55, 0).unwrap(), trigger));
+        let meeting = jiff::civil::time(16, 0, 0, 0);
+        let trigger = meeting - jiff::SignedDuration::from_mins(5);
+        assert_eq!(trigger, jiff::civil::time(15, 55, 0, 0));
+        assert!(!is_due(jiff::civil::time(15, 54, 0, 0), trigger));
+        assert!(is_due(jiff::civil::time(15, 55, 0, 0), trigger));
     }
 
     #[test]

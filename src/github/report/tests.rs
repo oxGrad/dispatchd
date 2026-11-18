@@ -4,12 +4,12 @@
 //! so the expected output can be checked against the spec line for line.
 
 use super::*;
-use chrono_tz::Tz;
+use jiff::tz::TimeZone;
 
 const DAY: &str = "2026-10-15";
 
-fn utc() -> Tz {
-    "UTC".parse().unwrap()
+fn utc() -> TimeZone {
+    TimeZone::UTC
 }
 
 fn open_test_db() -> Connection {
@@ -277,13 +277,20 @@ fn window_covers_local_days_in_utc() {
             hi: "2026-10-16T00:00:00Z".into(),
         }
     );
-    let jakarta: Tz = "Asia/Jakarta".parse().unwrap();
+    let jakarta = TimeZone::get("Asia/Jakarta").unwrap();
     assert_eq!(
         window("2026-10-01", DAY, &jakarta).unwrap(),
         Window {
             lo: "2026-09-30T17:00:00Z".into(),
             hi: "2026-10-15T17:00:00Z".into(),
         }
+    );
+    // São Paulo skipped 2018-11-04 00:00-01:00: that day starts at 01:00
+    // local (-02:00), the first instant after the gap.
+    let sao_paulo = TimeZone::get("America/Sao_Paulo").unwrap();
+    assert_eq!(
+        window("2018-11-04", "2018-11-04", &sao_paulo).unwrap().lo,
+        "2018-11-04T03:00:00Z"
     );
 }
 
@@ -359,7 +366,7 @@ fn day_boundaries_follow_the_configured_timezone() {
         "2026-10-15T17:00:00Z",
         Some("2026-10-15T18:00:00Z"),
     );
-    let jakarta: Tz = "Asia/Jakarta".parse().unwrap();
+    let jakarta = TimeZone::get("Asia/Jakarta").unwrap();
     assert!(
         team_github(&conn, DAY, DAY, &jakarta)
             .unwrap()

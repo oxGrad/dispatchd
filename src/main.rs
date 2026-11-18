@@ -348,7 +348,10 @@ async fn main() -> anyhow::Result<()> {
         "  carryover_lookback_days:      {}",
         config.carryover_lookback_days
     );
-    println!("  timezone:                     {}", config.timezone);
+    println!(
+        "  timezone:                     {}",
+        config.timezone.iana_name().unwrap_or("unknown")
+    );
     println!(
         "  db_path:                      {}",
         config.db_path.display()

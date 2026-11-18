@@ -14,8 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
-use chrono_tz::Tz;
+use jiff::Timestamp;
+use jiff::civil::Date;
+use jiff::tz::TimeZone;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::recap::{self, DayRecap, RecapRow, sanitize_cell, text_cell};
@@ -49,36 +50,31 @@ impl Window {
     }
 }
 
-fn local_midnight_utc(date: NaiveDate, tz: &Tz) -> String {
-    let local = date.and_time(NaiveTime::MIN);
-    // A DST gap at midnight (some zones) has no exact local midnight; the
-    // earliest valid instant after it is the right start of that day.
-    let instant = tz
-        .from_local_datetime(&local)
-        .earliest()
-        .or_else(|| {
-            tz.from_local_datetime(&(local + Duration::hours(1)))
-                .earliest()
-        })
-        .map(|t| t.with_timezone(&Utc))
-        .unwrap_or_else(|| Utc.from_utc_datetime(&local));
-    instant.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+fn local_midnight_utc(date: Date, tz: &TimeZone) -> Result<String> {
+    // jiff's "compatible" rule: a midnight skipped by a DST gap (some zones)
+    // becomes the first instant after the gap, a repeated one the earlier.
+    let instant = date.to_zoned_datetime(tz.clone())?.timestamp();
+    Ok(format!("{instant:.0}"))
 }
 
 /// `start..=end` (`YYYY-MM-DD`, local days in `tz`) as a UTC `Window`.
-pub fn window(start: &str, end: &str, tz: &Tz) -> Result<Window> {
-    let start = NaiveDate::parse_from_str(start, "%Y-%m-%d").context("invalid start date")?;
-    let end = NaiveDate::parse_from_str(end, "%Y-%m-%d").context("invalid end date")?;
+pub fn window(start: &str, end: &str, tz: &TimeZone) -> Result<Window> {
+    let start = Date::strptime("%Y-%m-%d", start).context("invalid start date")?;
+    let end = Date::strptime("%Y-%m-%d", end).context("invalid end date")?;
     Ok(Window {
-        lo: local_midnight_utc(start, tz),
-        hi: local_midnight_utc(end + Duration::days(1), tz),
+        lo: local_midnight_utc(start, tz)?,
+        hi: local_midnight_utc(end.tomorrow()?, tz)?,
     })
 }
 
 /// A GitHub UTC timestamp's local calendar day as `"Oct 14"`.
-fn local_short_date(t: &str, tz: &Tz) -> String {
-    DateTime::parse_from_rfc3339(t)
-        .map(|t| t.with_timezone(tz).format("%b %-d").to_string())
+fn local_short_date(t: &str, tz: &TimeZone) -> String {
+    t.parse::<Timestamp>()
+        .map(|t| {
+            t.to_zoned_datetime(tz.clone())
+                .strftime("%b %-d")
+                .to_string()
+        })
         .unwrap_or_else(|_| t.to_string())
 }
 
@@ -902,7 +898,7 @@ pub fn format_github_day(
 pub fn day_summary(
     conn: &Connection,
     date: &str,
-    tz: &Tz,
+    tz: &TimeZone,
     day: Option<&DayRecap>,
 ) -> Result<(Option<String>, Option<String>)> {
     let w = window(date, date, tz)?;
@@ -1096,7 +1092,7 @@ pub fn deliverables(
     start: &str,
     end: &str,
     w: &Window,
-    tz: &Tz,
+    tz: &TimeZone,
 ) -> Result<Vec<Deliverable>> {
     // In-range todos with their status as of `end` (like every other
     // number here), plus unplanned `/progress` reports with their own (no
@@ -1479,7 +1475,7 @@ pub fn recap_file(
     conn: &Connection,
     start: &str,
     end: &str,
-    tz: &Tz,
+    tz: &TimeZone,
     include_member_detail: bool,
 ) -> Result<Option<String>> {
     let w = window(start, end, tz)?;
@@ -1487,17 +1483,17 @@ pub fn recap_file(
 
     let mut days = Vec::new();
     if include_member_detail {
-        let start_date = NaiveDate::parse_from_str(start, "%Y-%m-%d")?;
-        let end_date = NaiveDate::parse_from_str(end, "%Y-%m-%d")?;
+        let start_date = Date::strptime("%Y-%m-%d", start)?;
+        let end_date = Date::strptime("%Y-%m-%d", end)?;
         let mut date = start_date;
         while date <= end_date {
-            let day = date.format("%Y-%m-%d").to_string();
+            let day = date.to_string();
             let recap_day = recap::day_recap(conn, &day)?;
             let gh = day_github(conn, &day, &window(&day, &day, tz)?)?;
             if recap_day.is_some() || !gh.is_empty() {
                 days.push(format_github_day(conn, &day, recap_day.as_ref(), &gh, 3)?);
             }
-            date += Duration::days(1);
+            date = date.tomorrow()?;
         }
     }
     if ds.is_empty() && days.is_empty() {
@@ -1523,7 +1519,7 @@ pub fn recap_file(
 }
 
 /// `/team github`'s reply for local days `start..=end`.
-pub fn team_github(conn: &Connection, start: &str, end: &str, tz: &Tz) -> Result<String> {
+pub fn team_github(conn: &Connection, start: &str, end: &str, tz: &TimeZone) -> Result<String> {
     let w = window(start, end, tz)?;
     let activity = team_activity(conn, &w)?;
     let label = if start == end {

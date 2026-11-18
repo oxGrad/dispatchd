@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use chrono_tz::Tz;
+use jiff::tz::TimeZone;
 use rusqlite::Connection;
 use serenity::all::{
     AutocompleteChoice, CommandDataOption, CommandDataOptionValue, CommandInteraction,
@@ -301,7 +301,7 @@ pub async fn handle_autocomplete(
     ctx: &SerenityContext,
     autocomplete: &AutocompleteInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
     carryover_lookback_days: u32,
 ) {
     let Some((sub, options)) = subcommand(&autocomplete.data.options) else {
@@ -414,7 +414,7 @@ pub async fn handle_edit(
     command: &CommandInteraction,
     options: &[CommandDataOption],
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
 ) {
     let Some(update_id) = get_option_string(options, "report").and_then(|s| s.parse::<i64>().ok())
     else {
@@ -498,7 +498,7 @@ pub async fn handle_list(
     ctx: &SerenityContext,
     command: &CommandInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
 ) {
     let discord_user_id = command.user.id.to_string();
     let date = entries::today_in(timezone);
@@ -529,7 +529,7 @@ pub async fn handle_modal_submission(
     ctx: &SerenityContext,
     modal: &ModalInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
 ) {
     let discord_user_id = modal.user.id.to_string();
 
@@ -603,7 +603,7 @@ pub async fn handle_edit_modal_submission(
     ctx: &SerenityContext,
     modal: &ModalInteraction,
     db: &Arc<Mutex<Connection>>,
-    timezone: &Tz,
+    timezone: &TimeZone,
 ) {
     let discord_user_id = modal.user.id.to_string();
 

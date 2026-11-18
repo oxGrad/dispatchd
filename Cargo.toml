@@ -6,10 +6,11 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.23"
-chrono = "0.4.45"
-chrono-tz = "0.10.4"
 clap = { version = "4.6.6", features = ["derive"] }
 flate2 = "1.0"
+# tzdb-bundle-always: the system tzdata (/usr/share/zoneinfo) is used when
+# present; the bundled copy only covers a host without it.
+jiff = { version = "1.0.1", features = ["tzdb-bundle-always"] }
 libc = "0.2"
 minisign-verify = "0.3.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

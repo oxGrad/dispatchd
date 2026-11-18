@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn keeps_rows_within_retention_window() {
         let conn = open_test_db();
-        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let today = jiff::Timestamp::now().strftime("%Y-%m-%d").to_string();
         seed_reminder(&conn, &today);
         seed_followup(&conn, &today, "1");
 
