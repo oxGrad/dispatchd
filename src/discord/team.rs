@@ -268,13 +268,24 @@ pub async fn handle_report(
         }
     };
 
+    reply_in_chunks(ctx, command, body, "No activity today.", "/team report").await;
+}
+
+/// The ephemeral reply shared by `/team report` and `/team github`: the
+/// first chunk (or `empty` when there are none) as the response, the rest
+/// as follow-ups; an `Err` is a single-message reply.
+async fn reply_in_chunks(
+    ctx: &SerenityContext,
+    command: &CommandInteraction,
+    body: Result<Vec<String>, String>,
+    empty: &str,
+    command_name: &str,
+) {
     let mut chunks = match body {
         Ok(chunks) => chunks.into_iter(),
         Err(message) => vec![message].into_iter(),
     };
-    let first = chunks
-        .next()
-        .unwrap_or_else(|| "No activity today.".to_string());
+    let first = chunks.next().unwrap_or_else(|| empty.to_string());
 
     let reply = CreateInteractionResponseMessage::new()
         .content(first)
@@ -283,7 +294,7 @@ pub async fn handle_report(
         .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
         .await
     {
-        eprintln!("failed to respond to /team report: {e}");
+        eprintln!("failed to respond to {command_name}: {e}");
         return;
     }
 
@@ -297,7 +308,7 @@ pub async fn handle_report(
             )
             .await
         {
-            eprintln!("failed to send /team report follow-up: {e}");
+            eprintln!("failed to send {command_name} follow-up: {e}");
         }
     }
 }
@@ -348,34 +359,7 @@ pub async fn handle_github(
         }
     };
 
-    let mut chunks = match body {
-        Ok(chunks) => chunks.into_iter(),
-        Err(message) => vec![message].into_iter(),
-    };
-    let first = chunks.next().unwrap_or_default();
-    let reply = CreateInteractionResponseMessage::new()
-        .content(first)
-        .ephemeral(true);
-    if let Err(e) = command
-        .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
-        .await
-    {
-        eprintln!("failed to respond to /team github: {e}");
-        return;
-    }
-    for chunk in chunks {
-        if let Err(e) = command
-            .create_followup(
-                &ctx.http,
-                CreateInteractionResponseFollowup::new()
-                    .content(chunk)
-                    .ephemeral(true),
-            )
-            .await
-        {
-            eprintln!("failed to send /team github follow-up: {e}");
-        }
-    }
+    reply_in_chunks(ctx, command, body, "No GitHub activity.", "/team github").await;
 }
 
 pub async fn handle_autocomplete(

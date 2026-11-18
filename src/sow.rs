@@ -121,9 +121,10 @@ pub fn normalize(raw: &str) -> String {
 /// `title` with its SOW ref token removed, for showing a deliverable's name
 /// ("D.P.1.2 Payment gateway integration" -> "Payment gateway
 /// integration"). Strips the token `from_title` reads - the first whole
-/// `D.P.` token that parses - plus any brackets, dashes or colons left
-/// dangling around it; returns the title unchanged (trimmed) when it has
-/// no such token.
+/// `D.P.` token that parses - plus a bracket pair wrapping just it and any
+/// dashes or colons left dangling around it (brackets elsewhere, like
+/// "[API]", stay); returns the title unchanged (trimmed) when it has no
+/// such token.
 pub fn strip_from_title(title: &str) -> String {
     let in_token = |c: char| c.is_ascii_alphanumeric() || c == '.';
     let found = title
@@ -141,9 +142,16 @@ pub fn strip_from_title(title: &str) -> String {
     let Some((start, end)) = found else {
         return title.trim().to_string();
     };
-    let junk = |c: char| c.is_whitespace() || "[]()-:\u{2013}\u{2014}".contains(c);
-    let before = title[..start].trim_end_matches(junk);
-    let after = title[end..].trim_start_matches(junk);
+    let (mut before, mut after) = (title[..start].trim_end(), title[end..].trim_start());
+    if let (Some(open @ ('[' | '(')), Some(close)) = (before.chars().last(), after.chars().next())
+        && close == if open == '[' { ']' } else { ')' }
+    {
+        before = &before[..before.len() - 1];
+        after = &after[1..];
+    }
+    let junk = |c: char| c.is_whitespace() || "-:\u{2013}\u{2014}".contains(c);
+    let before = before.trim_end_matches(junk);
+    let after = after.trim_start_matches(junk);
     match (before.is_empty(), after.is_empty()) {
         (true, _) => after.trim_end().to_string(),
         (false, true) => before.trim_start().to_string(),
@@ -301,6 +309,16 @@ mod tests {
         assert_eq!(
             strip_from_title("Admin D.P.1.3: dashboard"),
             "Admin dashboard"
+        );
+        // Brackets that don't wrap the ref are part of the title.
+        assert_eq!(
+            strip_from_title("[API] D.P.1.2 Payment gateway"),
+            "[API] Payment gateway"
+        );
+        assert_eq!(strip_from_title("D.P.1.2 (v2) Payments"), "(v2) Payments");
+        assert_eq!(
+            strip_from_title("Payments – [D.P.1.2]: gateway"),
+            "Payments gateway"
         );
         assert_eq!(strip_from_title("No ref here"), "No ref here");
         assert_eq!(strip_from_title("Read the D.P. docs"), "Read the D.P. docs");

@@ -18,7 +18,7 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::recap::{self, DayRecap, RecapRow, sanitize_cell};
+use crate::recap::{self, DayRecap, RecapRow, sanitize_cell, text_cell};
 use crate::sow::{self, SowRef};
 
 /// How far back a todo's linked issue still counts as "on a todo" for the
@@ -162,18 +162,31 @@ fn review_state_label(state: &str) -> String {
     state.replace('_', " ")
 }
 
-/// The SOW ref an issue belongs to: its parent's when it's a sub-issue,
-/// else its own (a top-level issue is its own deliverable).
+/// Roster index by resolved GitHub id - how activity rows find their member.
+fn index_by_github_id(roster: &[RosterMember]) -> BTreeMap<i64, usize> {
+    roster
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| m.github_id.map(|id| (id, i)))
+        .collect()
+}
+
+/// The SOW ref an issue belongs to: its top-level ancestor's (a sub-issue
+/// takes its deliverable's - in a deliverable -> task -> sub-task chain,
+/// the top one's), its own when it's top-level. `None` when the chain's
+/// top isn't stored. `UNION` (not `ALL`) ends the walk on a cycle.
 fn issue_sow(conn: &Connection, node_id: &str) -> Result<Option<String>> {
     Ok(conn
-        .query_row(
-            "SELECT COALESCE(parent.sow_ref, CASE WHEN i.parent_node_id IS NULL THEN i.sow_ref END)
-             FROM github_issues i
-             LEFT JOIN github_issues parent ON parent.node_id = i.parent_node_id
-             WHERE i.node_id = ?1",
-            [node_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
+        .prepare_cached(
+            "WITH RECURSIVE chain(parent_node_id, sow_ref) AS (
+                 SELECT parent_node_id, sow_ref FROM github_issues WHERE node_id = ?1
+                 UNION
+                 SELECT i.parent_node_id, i.sow_ref FROM github_issues i
+                 JOIN chain ON i.node_id = chain.parent_node_id
+             )
+             SELECT sow_ref FROM chain WHERE parent_node_id IS NULL",
+        )?
+        .query_row([node_id], |row| row.get::<_, Option<String>>(0))
         .optional()?
         .flatten())
 }
@@ -248,11 +261,7 @@ pub fn team_activity(conn: &Connection, w: &Window) -> Result<TeamActivity> {
             ..MemberActivity::default()
         })
         .collect();
-    let by_id: BTreeMap<i64, usize> = roster
-        .iter()
-        .enumerate()
-        .filter_map(|(i, m)| m.github_id.map(|id| (id, i)))
-        .collect();
+    let by_id = index_by_github_id(&roster);
     let mut totals = TeamTotals::default();
 
     let mut stmt = conn.prepare(
@@ -291,7 +300,7 @@ pub fn team_activity(conn: &Connection, w: &Window) -> Result<TeamActivity> {
     }
 
     let mut stmt = conn.prepare(
-        "SELECT i.node_id, i.repo, i.number, parent.sow_ref FROM github_issues i
+        "SELECT i.node_id, i.repo, i.number FROM github_issues i
          JOIN github_issues parent ON parent.node_id = i.parent_node_id
          WHERE i.state = 'closed' AND COALESCE(i.state_reason, 'completed') = 'completed'
            AND i.closed_at >= ?1 AND i.closed_at < ?2
@@ -305,36 +314,38 @@ pub fn team_activity(conn: &Connection, w: &Window) -> Result<TeamActivity> {
                     repo: row.get(1)?,
                     number: row.get(2)?,
                 },
-                row.get::<_, Option<String>>(3)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    // Every merged linked PR's author, `None` for a deleted account: a
+    // merged PR by a bot or an outsider still means the assignee didn't
+    // do the work, so only "no merged PR at all" falls back to assignees.
     let mut pr_authors = conn.prepare(
-        "SELECT DISTINCT p.author_id FROM github_pr_issues pi
+        "SELECT p.author_id FROM github_pr_issues pi
          JOIN github_prs p ON p.node_id = pi.pr_node_id
-         WHERE pi.issue_node_id = ?1 AND p.state = 'merged' AND p.author_id IS NOT NULL",
+         WHERE pi.issue_node_id = ?1 AND p.state = 'merged'",
     )?;
     let mut assignees =
         conn.prepare("SELECT github_id FROM github_issue_assignees WHERE issue_node_id = ?1")?;
-    for (node_id, item, sow_ref) in closed {
-        let credit = |ids: Vec<i64>| -> BTreeSet<usize> {
-            ids.iter().filter_map(|id| by_id.get(id).copied()).collect()
-        };
-        let mut credited = credit(
-            pr_authors
+    for (node_id, item) in closed {
+        let authors: Vec<Option<i64>> = pr_authors
+            .query_map([&node_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let workers: Vec<i64> = if authors.is_empty() {
+            assignees
                 .query_map([&node_id], |row| row.get(0))?
-                .collect::<rusqlite::Result<_>>()?,
-        );
-        if credited.is_empty() {
-            credited = credit(
-                assignees
-                    .query_map([&node_id], |row| row.get(0))?
-                    .collect::<rusqlite::Result<_>>()?,
-            );
-        }
+                .collect::<rusqlite::Result<_>>()?
+        } else {
+            authors.into_iter().flatten().collect()
+        };
+        let credited: BTreeSet<usize> = workers
+            .iter()
+            .filter_map(|id| by_id.get(id).copied())
+            .collect();
         if credited.is_empty() {
             continue;
         }
+        let sow_ref = issue_sow(conn, &node_id)?;
         for i in credited {
             members[i].sub_issues_closed.push(SubIssueClosed {
                 item: item.clone(),
@@ -614,16 +625,14 @@ fn linked_to_todos(conn: &Connection, date: &str) -> Result<(BTreeSet<String>, B
 /// opened/closed that aren't on a todo, and who reviewed what.
 pub fn day_github(conn: &Connection, date: &str, w: &Window) -> Result<DayGithub> {
     let roster = roster(conn)?;
-    let by_id: BTreeMap<i64, usize> = roster
-        .iter()
-        .enumerate()
-        .filter_map(|(i, m)| m.github_id.map(|id| (id, i)))
-        .collect();
+    let by_id = index_by_github_id(&roster);
     let (linked_issues, linked_prs) = linked_to_todos(conn, date)?;
-    let mut unplanned = Vec::new();
+    // Keyed by roster index, so the section sorts in roster (name) order.
+    let mut unplanned: Vec<(usize, UnplannedItem)> = Vec::new();
 
     let mut stmt = conn.prepare(
-        "SELECT node_id, repo, number, title, author_id, created_at, merged_at FROM github_prs
+        "SELECT node_id, repo, number, title, author_id, created_at, merged_at, closed_at
+         FROM github_prs
          WHERE author_id IS NOT NULL
            AND ((merged_at >= ?1 AND merged_at < ?2) OR (created_at >= ?1 AND created_at < ?2))",
     )?;
@@ -639,25 +648,24 @@ pub fn day_github(conn: &Connection, date: &str, w: &Window) -> Result<DayGithub
                 row.get::<_, i64>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut pr_issues = conn.prepare(
         "SELECT issue_node_id FROM github_pr_issues WHERE pr_node_id = ?1 ORDER BY issue_node_id",
     )?;
-    for (node_id, item, title, author, created, merged) in prs {
+    for (node_id, item, title, author, created, merged, closed) in prs {
         let Some(&i) = by_id.get(&author) else {
             continue;
         };
+        // Also covers a PR closing a linked issue: linked_to_todos adds those.
         if linked_prs.contains(&node_id) {
             continue;
         }
         let closes: Vec<String> = pr_issues
             .query_map([&node_id], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        if closes.iter().any(|issue| linked_issues.contains(issue)) {
-            continue;
-        }
         let mut sow = None;
         for issue in &closes {
             if let Some(found) = issue_sow(conn, issue)? {
@@ -665,19 +673,24 @@ pub fn day_github(conn: &Connection, date: &str, w: &Window) -> Result<DayGithub
                 break;
             }
         }
+        // "opened" as team_activity counts it: still open at the day's end,
+        // so a PR abandoned the day it was opened isn't listed.
         let today = if w.contains_opt(&merged) {
             "merged"
-        } else if w.contains(&created) {
+        } else if w.contains(&created) && closed.as_deref().is_none_or(|t| t >= w.hi.as_str()) {
             "opened"
         } else {
             continue;
         };
-        unplanned.push(UnplannedItem {
-            author: roster[i].name.clone(),
-            item: format!("PR {item} {title}"),
-            sow,
-            today,
-        });
+        unplanned.push((
+            i,
+            UnplannedItem {
+                author: roster[i].name.clone(),
+                item: format!("PR {item} {title}"),
+                sow,
+                today,
+            },
+        ));
     }
 
     // `closed` only for a close as completed, like every other report here:
@@ -719,14 +732,18 @@ pub fn day_github(conn: &Connection, date: &str, w: &Window) -> Result<DayGithub
         } else {
             continue;
         };
-        unplanned.push(UnplannedItem {
-            author: roster[i].name.clone(),
-            item: format!("Issue {item} {title}"),
-            sow: issue_sow(conn, &node_id)?,
-            today,
-        });
+        unplanned.push((
+            i,
+            UnplannedItem {
+                author: roster[i].name.clone(),
+                item: format!("Issue {item} {title}"),
+                sow: issue_sow(conn, &node_id)?,
+                today,
+            },
+        ));
     }
-    unplanned.sort_by(|a, b| a.author.cmp(&b.author).then_with(|| a.item.cmp(&b.item)));
+    unplanned.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.item.cmp(&y.item)));
+    let unplanned = unplanned.into_iter().map(|(_, u)| u).collect();
 
     let reviews = reviews_by_member(conn, w, &by_id)?
         .into_iter()
@@ -755,10 +772,7 @@ pub fn format_day_sections(d: &DayGithub, level: usize) -> String {
                 vec![
                     sanitize_cell(&u.author),
                     sanitize_cell(&u.item),
-                    u.sow
-                        .as_deref()
-                        .map(sanitize_cell)
-                        .unwrap_or_else(|| "—".into()),
+                    text_cell(u.sow.as_deref()),
                     u.today.to_string(),
                 ]
             })
@@ -982,6 +996,16 @@ struct LinkedPr {
     updated_at: String,
 }
 
+impl LinkedPr {
+    /// When it was merged or closed; `None` while it's open.
+    fn finished(&self) -> Option<&str> {
+        self.merged_at
+            .as_deref()
+            .or(self.closed_at.as_deref())
+            .filter(|_| self.state != "open")
+    }
+}
+
 /// Whether an issue/PR may have been worked on in `w`. Only its latest
 /// `updated_at` is stored, so one touched after the range too can't be
 /// told apart from one idle during it: anything that existed before the
@@ -1012,8 +1036,8 @@ fn linked_prs(stmt: &mut rusqlite::Statement, issue: &str) -> Result<Vec<LinkedP
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// Books PRs linked to deliverable `key` (to its parent issue or to any of
-/// its sub-issues, dropped ones included): they're never `—`-row work,
+/// Books PRs linked to deliverable `key` (to its parent issue or anywhere
+/// below it, dropped sub-issues included): they're never `—`-row work,
 /// those merged in `w` count toward its `PRs merged`, and any activity in
 /// `w` lists it.
 fn note_prs(
@@ -1032,12 +1056,7 @@ fn note_prs(
                 .or_default()
                 .insert(pr.item.clone());
         }
-        let finished = pr
-            .merged_at
-            .as_deref()
-            .or(pr.closed_at.as_deref())
-            .filter(|_| pr.state != "open");
-        if touched_in(w, &pr.created_at, &pr.updated_at, finished) {
+        if touched_in(w, &pr.created_at, &pr.updated_at, pr.finished()) {
             active.insert(key.clone());
         }
     }
@@ -1056,14 +1075,15 @@ fn linked_todo_status(
     end: &str,
 ) -> Result<Option<(String, Option<String>, String)>> {
     Ok(conn
-        .query_row(
+        .prepare_cached(
             "SELECT u.status, u.blocker, u.date FROM entries u
              JOIN entries t ON t.id = u.todo_id
              WHERE u.type = 'update' AND t.github_issue_id = ?1 AND u.date <= ?2
              ORDER BY u.id DESC LIMIT 1",
-            params![issue, end],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
+        )?
+        .query_row(params![issue, end], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
         .optional()?)
 }
 
@@ -1078,12 +1098,18 @@ pub fn deliverables(
     w: &Window,
     tz: &Tz,
 ) -> Result<Vec<Deliverable>> {
-    // In-range todos with their final status.
+    // In-range todos with their status as of `end` (like every other
+    // number here), plus unplanned `/progress` reports with their own (no
+    // todo, so no SOW ref: the `—` row).
     let mut stmt = conn.prepare(
         "SELECT t.sow_ref,
-                (SELECT u.status FROM entries u WHERE u.type = 'update' AND u.todo_id = t.id
+                (SELECT u.status FROM entries u
+                 WHERE u.type = 'update' AND u.todo_id = t.id AND u.date <= ?2
                  ORDER BY u.id DESC LIMIT 1)
-         FROM entries t WHERE t.type = 'todo' AND t.date >= ?1 AND t.date <= ?2",
+         FROM entries t WHERE t.type = 'todo' AND t.date >= ?1 AND t.date <= ?2
+         UNION ALL
+         SELECT NULL, status FROM entries
+         WHERE type = 'update' AND todo_id IS NULL AND date >= ?1 AND date <= ?2",
     )?;
     let todos: Vec<TodoStatus> = stmt
         .query_map(params![start, end], |row| {
@@ -1101,9 +1127,13 @@ pub fn deliverables(
         Some(sow_ref) => DeliverableKey::Sow(sow_ref),
         None => DeliverableKey::Raw(raw.trim().to_string()),
     };
-    let blank = |key: DeliverableKey, title: String| Deliverable {
+    // Named by its ref until a parent issue's title names it.
+    let blank = |key: DeliverableKey| Deliverable {
+        title: match &key {
+            DeliverableKey::Unlinked => "Not linked to a deliverable".to_string(),
+            key => key_label(key),
+        },
         key,
-        title,
         sub_issues: None,
         prs_merged: None,
         todos: (0, 0),
@@ -1126,11 +1156,21 @@ pub fn deliverables(
                 updated_at
          FROM github_issues WHERE parent_node_id = ?1 ORDER BY repo, number",
     )?;
+    // PRs linked to an issue or to anything below it (a task's sub-tasks):
+    // a deliverable -> task -> sub-task chain's PRs are the deliverable's
+    // work. `UNION` (not `ALL`) ends the walk on a cycle.
     let mut prs_stmt = conn.prepare(
-        "SELECT p.repo, p.number, p.state, p.is_draft, p.created_at, p.merged_at, p.closed_at,
-                p.updated_at
-         FROM github_pr_issues pi JOIN github_prs p ON p.node_id = pi.pr_node_id
-         WHERE pi.issue_node_id = ?1 ORDER BY p.repo, p.number",
+        "WITH RECURSIVE tree(node_id) AS (
+             SELECT ?1
+             UNION
+             SELECT i.node_id FROM github_issues i JOIN tree ON i.parent_node_id = tree.node_id
+         )
+         SELECT DISTINCT p.repo, p.number, p.state, p.is_draft, p.created_at, p.merged_at,
+                p.closed_at, p.updated_at
+         FROM tree
+         JOIN github_pr_issues pi ON pi.issue_node_id = tree.node_id
+         JOIN github_prs p ON p.node_id = pi.pr_node_id
+         ORDER BY p.repo, p.number",
     )?;
     let mut sow_prs: BTreeSet<ItemRef> = BTreeSet::new();
     let mut active: BTreeSet<DeliverableKey> = BTreeSet::new();
@@ -1139,17 +1179,17 @@ pub fn deliverables(
     for (parent_id, parent_title, sow_raw) in parents {
         let key = key_of(&sow_raw);
         let entry = out.entry(key.clone()).or_insert_with(|| {
-            // A title that's only the ref strips to nothing: name it by the ref.
+            let mut d = blank(key.clone());
+            // A title that's only the ref strips to nothing: keep the ref.
             let title = sow::strip_from_title(&parent_title);
-            let title = if title.is_empty() {
-                key_label(&key)
-            } else {
-                title
-            };
-            blank(key.clone(), title)
+            if !title.is_empty() {
+                d.title = title;
+            }
+            d
         });
         let counts = entry.sub_issues.get_or_insert((0, 0, 0));
-        // A PR linked straight to the parent is the deliverable's work too.
+        // The parent's tree: PRs linked to it directly, to any sub-issue
+        // (dropped ones included) or further down.
         note_prs(
             &linked_prs(&mut prs_stmt, &parent_id)?,
             &key,
@@ -1177,8 +1217,6 @@ pub fn deliverables(
             })?
             .collect::<rusqlite::Result<_>>()?;
         for child in children {
-            let prs = linked_prs(&mut prs_stmt, &child.node_id)?;
-            note_prs(&prs, &key, w, &mut sow_prs, &mut merged_by_key, &mut active);
             let dropped = child.state == "closed"
                 && matches!(
                     child.state_reason.as_deref(),
@@ -1212,10 +1250,16 @@ pub fn deliverables(
             let todo = linked_todo_status(conn, &child.node_id, end)?;
             // Every PR that existed by the range end - not filtered on
             // `updated_at`, which a later push or comment moves past it.
+            let prs = linked_prs(&mut prs_stmt, &child.node_id)?;
             let prs_shown: Vec<&LinkedPr> = prs
                 .iter()
                 .filter(|pr| pr.created_at.as_str() < w.hi.as_str())
                 .collect();
+            // Open as of the range end, not now: one merged since was
+            // still in progress then.
+            let open_at_end = prs_shown
+                .iter()
+                .any(|pr| pr.finished().is_none_or(|t| t >= w.hi.as_str()));
             let (state, last_activity) = if closed_by_end {
                 (
                     SubIssueState::Closed,
@@ -1225,9 +1269,22 @@ pub fn deliverables(
                         .map(|t| format!("{} closed", local_short_date(t, tz))),
                 )
             } else {
-                let latest_pr = prs_shown.iter().map(|pr| pr.updated_at.as_str()).max();
-                let pr_activity =
-                    latest_pr.map(|t| format!("{} PR updated", local_short_date(t, tz)));
+                // Only the latest `updated_at` is stored: past the range end,
+                // fall back to the last event still dated inside it.
+                let hi = w.hi.as_str();
+                let pr_activity = prs_shown
+                    .iter()
+                    .map(|pr| {
+                        if pr.updated_at.as_str() < hi {
+                            (pr.updated_at.as_str(), "updated")
+                        } else if let Some(t) = pr.finished().filter(|t| *t < hi) {
+                            (t, pr.state.as_str())
+                        } else {
+                            (pr.created_at.as_str(), "opened")
+                        }
+                    })
+                    .max()
+                    .map(|(t, what)| format!("{} PR {what}", local_short_date(t, tz)));
                 match todo {
                     Some((status, blocker, date)) if status == "blocked" => (
                         SubIssueState::Blocked,
@@ -1246,9 +1303,7 @@ pub fn deliverables(
                             Some(format!("{} reported", crate::entries::short_date(&date)))
                         }),
                     ),
-                    None if prs_shown.iter().any(|pr| pr.state == "open") => {
-                        (SubIssueState::InProgress, pr_activity)
-                    }
+                    None if open_at_end => (SubIssueState::InProgress, pr_activity),
                     None => (SubIssueState::NotStarted, None),
                 }
             };
@@ -1283,14 +1338,7 @@ pub fn deliverables(
             Some(raw) => key_of(raw),
             None => DeliverableKey::Unlinked,
         };
-        let entry = out.entry(key.clone()).or_insert_with(|| {
-            let title = match &key {
-                DeliverableKey::Sow(sow_ref) => sow_ref.to_string(),
-                DeliverableKey::Raw(raw) => raw.clone(),
-                DeliverableKey::Unlinked => "Not linked to a deliverable".to_string(),
-            };
-            blank(key.clone(), title)
-        });
+        let entry = out.entry(key.clone()).or_insert_with(|| blank(key.clone()));
         entry.todos.1 += 1;
         if todo.status.as_deref() == Some("done") {
             entry.todos.0 += 1;
@@ -1321,12 +1369,9 @@ pub fn deliverables(
         .filter(|(item, author)| roster_ids.contains(author) && !sow_prs.contains(item))
         .count();
     if unlinked_prs > 0 {
-        let entry = out.entry(DeliverableKey::Unlinked).or_insert_with(|| {
-            blank(
-                DeliverableKey::Unlinked,
-                "Not linked to a deliverable".into(),
-            )
-        });
+        let entry = out
+            .entry(DeliverableKey::Unlinked)
+            .or_insert_with(|| blank(DeliverableKey::Unlinked));
         entry.prs_merged = Some(unlinked_prs);
         active.insert(DeliverableKey::Unlinked);
     }
@@ -1406,10 +1451,7 @@ pub fn format_deliverables(ds: &[Deliverable]) -> String {
                         } else {
                             r.prs.join(", ")
                         },
-                        r.last_activity
-                            .as_deref()
-                            .map(sanitize_cell)
-                            .unwrap_or_else(|| "—".into()),
+                        text_cell(r.last_activity.as_deref()),
                     ]
                 })
                 .collect();

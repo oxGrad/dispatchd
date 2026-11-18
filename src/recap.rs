@@ -316,7 +316,7 @@ fn status_cell(row: &RecapRow) -> String {
     format!("{glyph} {label}")
 }
 
-fn text_cell(value: Option<&str>) -> String {
+pub(crate) fn text_cell(value: Option<&str>) -> String {
     value.map(sanitize_cell).unwrap_or_else(|| "—".to_string())
 }
 

@@ -425,6 +425,120 @@ fn a_sub_issue_closed_without_a_pr_credits_its_assignees_and_not_planned_is_igno
 }
 
 #[test]
+fn a_sub_issue_closed_by_an_outsiders_pr_is_not_credited_to_its_assignee() {
+    let conn = open_test_db();
+    member(&conn, "2", "Sari", "senior", Some(("sari", 2)));
+    issue(
+        &conn,
+        "I_100",
+        100,
+        "Parent",
+        None,
+        None,
+        Some("D.P.2.1"),
+        "2026-09-01T00:00:00Z",
+        None,
+    );
+    issue(
+        &conn,
+        "I_1",
+        1,
+        "Fixed by a contractor",
+        Some(2),
+        Some("I_100"),
+        None,
+        "2026-10-01T00:00:00Z",
+        Some(("2026-10-15T08:00:00Z", "completed")),
+    );
+    pr(
+        &conn,
+        "PR_9",
+        "api",
+        9,
+        "Fix",
+        Some(99),
+        "merged",
+        "2026-10-14T00:00:00Z",
+        Some("2026-10-15T08:00:00Z"),
+    );
+    link(&conn, "PR_9", "I_1");
+    conn.execute(
+        "INSERT INTO github_issue_assignees (issue_node_id, github_id) VALUES ('I_1', 2)",
+        [],
+    )
+    .unwrap();
+
+    let a = team_activity(&conn, &day_window()).unwrap();
+    assert!(a.totals.sub_issue_sows.is_empty());
+    assert!(a.members[0].sub_issues_closed.is_empty());
+}
+
+/// A deliverable -> task -> sub-task chain: the sub-task's close and PR
+/// belong to the top-level deliverable, not to the (ref-less) task.
+#[test]
+fn a_sub_task_counts_toward_its_top_level_deliverable() {
+    let conn = open_test_db();
+    member(&conn, "1", "Budi", "senior", Some(("budi-dev", 1)));
+    issue(
+        &conn,
+        "I_600",
+        600,
+        "D.P.4.1 Billing",
+        None,
+        None,
+        Some("D.P.4.1"),
+        "2026-09-01T00:00:00Z",
+        None,
+    );
+    issue(
+        &conn,
+        "I_601",
+        601,
+        "Invoices",
+        None,
+        Some("I_600"),
+        None,
+        "2026-09-01T00:00:00Z",
+        None,
+    );
+    issue(
+        &conn,
+        "I_602",
+        602,
+        "Invoice PDF",
+        None,
+        Some("I_601"),
+        None,
+        "2026-09-01T00:00:00Z",
+        Some(("2026-10-15T08:00:00Z", "completed")),
+    );
+    pr(
+        &conn,
+        "PR_603",
+        "api",
+        603,
+        "Invoice PDF",
+        Some(1),
+        "merged",
+        "2026-10-14T00:00:00Z",
+        Some("2026-10-15T07:00:00Z"),
+    );
+    link(&conn, "PR_603", "I_602");
+
+    let a = team_activity(&conn, &day_window()).unwrap();
+    assert_eq!(a.totals.sub_issue_sows, vec![Some("D.P.4.1".to_string())]);
+    assert_eq!(
+        issue_sow(&conn, "I_602").unwrap().as_deref(),
+        Some("D.P.4.1")
+    );
+
+    let ds = range_deliverables(&conn);
+    assert_eq!(ds.len(), 1, "no `—` row: the PR is the deliverable's");
+    assert_eq!(ds[0].prs_merged, Some(1));
+    assert_eq!(ds[0].breakdown[0].prs, vec!["api#603 merged".to_string()]);
+}
+
+#[test]
 fn an_unresolved_github_user_says_so() {
     let conn = open_test_db();
     member(&conn, "1", "Budi", "senior", None);
@@ -531,6 +645,30 @@ fn day_github_lists_unplanned_work_and_reviews_by_name() {
             "Sari: api#210 approved",
         ]
     );
+}
+
+#[test]
+fn a_pr_abandoned_the_day_it_was_opened_is_not_listed() {
+    let conn = open_test_db();
+    member(&conn, "1", "Budi", "senior", Some(("budi-dev", 1)));
+    pr(
+        &conn,
+        "PR_230",
+        "api",
+        230,
+        "Spike",
+        Some(1),
+        "closed",
+        "2026-10-15T09:00:00Z",
+        None,
+    );
+    conn.execute(
+        "UPDATE github_prs SET closed_at = '2026-10-15T17:00:00Z' WHERE node_id = 'PR_230'",
+        [],
+    )
+    .unwrap();
+    let gh = day_github(&conn, DAY, &day_window()).unwrap();
+    assert!(gh.unplanned.is_empty(), "{gh:?}");
 }
 
 #[test]
@@ -997,6 +1135,9 @@ fn a_past_range_keeps_work_touched_again_after_it() {
         .unwrap();
     assert_eq!(retries.state, SubIssueState::InProgress);
     assert_eq!(retries.prs, vec!["api#221 draft".to_string()]);
+    // Its Oct 20 push is after the range: the last dated event in it is
+    // the PR's opening.
+    assert_eq!(retries.last_activity.as_deref(), Some("Oct 14 PR opened"));
 
     let mobile = ds
         .iter()
@@ -1007,6 +1148,49 @@ fn a_past_range_keeps_work_touched_again_after_it() {
     let unlinked = ds.last().unwrap();
     assert_eq!(unlinked.key, DeliverableKey::Unlinked);
     assert_eq!(unlinked.prs_merged, Some(1), "only api#224 is unlinked");
+}
+
+#[test]
+fn a_pr_merged_after_the_range_was_in_progress_during_it() {
+    let conn = open_test_db();
+    issue(
+        &conn,
+        "I_500",
+        500,
+        "D.P.3.1 Search",
+        None,
+        None,
+        Some("D.P.3.1"),
+        "2026-09-01T00:00:00Z",
+        None,
+    );
+    issue(
+        &conn,
+        "I_501",
+        501,
+        "Indexer",
+        None,
+        Some("I_500"),
+        None,
+        "2026-09-01T00:00:00Z",
+        Some(("2026-10-17T00:00:00Z", "completed")),
+    );
+    pr(
+        &conn,
+        "PR_502",
+        "api",
+        502,
+        "Indexer",
+        Some(1),
+        "merged",
+        "2026-10-05T00:00:00Z",
+        Some("2026-10-17T00:00:00Z"),
+    );
+    link(&conn, "PR_502", "I_501");
+
+    let ds = range_deliverables(&conn);
+    assert_eq!(ds[0].sub_issues, Some((0, 1, 0)));
+    assert_eq!(ds[0].breakdown[0].state, SubIssueState::InProgress);
 }
 
 #[test]
@@ -1047,6 +1231,49 @@ fn recap_file_is_person_free_unless_member_detail_is_asked_for() {
         "{detailed}"
     );
     assert!(detailed.contains("Budi"), "{detailed}");
+}
+
+#[test]
+fn todos_done_ignores_reports_after_the_range_end() {
+    let conn = open_test_db();
+    example_deliverable(&conn);
+    conn.execute(
+        "INSERT INTO entries (discord_user_id, date, type, task, todo_id, status, progress,
+             created_at)
+         SELECT '1', '2026-10-16', 'update', 't', id, 'done', 'p', 'x'
+         FROM entries WHERE task = 'Workshop'",
+        [],
+    )
+    .unwrap();
+    let ds = range_deliverables(&conn);
+    let workshop = ds
+        .iter()
+        .find(|d| key_label(&d.key) == "Payment stuff")
+        .unwrap();
+    assert_eq!(workshop.todos, (0, 1));
+}
+
+#[test]
+fn unplanned_reports_count_in_the_unlinked_row() {
+    let conn = open_test_db();
+    member(&conn, "1", "Budi", "senior", Some(("budi-dev", 1)));
+    conn.execute(
+        "INSERT INTO entries (discord_user_id, date, type, task, status, progress, created_at)
+         VALUES ('1', ?1, 'update', 'Hotfix prod', 'done', 'p', 'x')",
+        [DAY],
+    )
+    .unwrap();
+    let w = window(DAY, DAY, &utc()).unwrap();
+    let ds = deliverables(&conn, DAY, DAY, &w, &utc()).unwrap();
+    assert_eq!(ds.len(), 1);
+    assert_eq!(ds[0].key, DeliverableKey::Unlinked);
+    assert_eq!(ds[0].todos, (1, 1));
+    // Not "No activity on <day>".
+    assert!(
+        recap_file(&conn, DAY, DAY, &utc(), false)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
