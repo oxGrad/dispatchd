@@ -125,13 +125,16 @@ fn logout_at(cred_path: &str) -> Result<()> {
 /// status` is a one-off interactive invocation with no such directory, so
 /// it decrypts the credential itself. Requires root (the `--with-key=host`
 /// key is root-only); returns `None` rather than erroring on any failure
-/// so `status` can just report "no token" instead of aborting.
-pub fn decrypt_cred_file(cred_path: &str) -> Option<String> {
+/// so `status` can just report "no token" instead of aborting. `name` is the
+/// name it was encrypted with (`encrypt_secret`): without `--name`,
+/// `systemd-creds decrypt` expects the file name (`discord_token.cred`)
+/// and rejects the credential.
+pub fn decrypt_cred_file(name: &str, cred_path: &str) -> Option<String> {
     if !std::path::Path::new(cred_path).exists() {
         return None;
     }
     let output = Command::new("systemd-creds")
-        .args(["decrypt", cred_path, "-"])
+        .args(["decrypt", &format!("--name={name}"), cred_path, "-"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -159,16 +162,17 @@ pub struct DiscordPing {
 /// Discord's API and records round-trip latency. Rendered by `format_ping`
 /// so `/admin status` can reuse the same data.
 pub async fn ping_report() -> DiscordPing {
-    let token =
-        match crate::discord_token().or_else(|| decrypt_cred_file(crate::service::CRED_PATH)) {
-            Some(t) => t,
-            None => {
-                return DiscordPing {
-                    token_found: false,
-                    result: None,
-                };
-            }
-        };
+    let token = match crate::discord_token()
+        .or_else(|| decrypt_cred_file("discord_token", crate::service::CRED_PATH))
+    {
+        Some(t) => t,
+        None => {
+            return DiscordPing {
+                token_found: false,
+                result: None,
+            };
+        }
+    };
     let start = std::time::Instant::now();
     let http = serenity::http::Http::new(&token);
     let result = match http.get_current_user().await {
@@ -214,7 +218,10 @@ mod tests {
 
     #[test]
     fn decrypt_cred_file_returns_none_for_a_missing_file() {
-        assert_eq!(decrypt_cred_file("/nonexistent/discord_token.cred"), None);
+        assert_eq!(
+            decrypt_cred_file("discord_token", "/nonexistent/discord_token.cred"),
+            None
+        );
     }
 
     #[test]

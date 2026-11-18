@@ -143,8 +143,9 @@ pub async fn preview(days: u32) -> Result<()> {
 /// The App key the way the bot resolves it (`github::app_key_pem`), or by
 /// decrypting the credential file directly for a one-off root invocation.
 fn key_pem() -> Option<String> {
-    crate::github::app_key_pem()
-        .or_else(|| crate::discord_login::decrypt_cred_file(GITHUB_CRED_PATH))
+    crate::github::app_key_pem().or_else(|| {
+        crate::discord_login::decrypt_cred_file(crate::github::CRED_NAME, GITHUB_CRED_PATH)
+    })
 }
 
 pub struct GithubPing {
