@@ -68,7 +68,7 @@ jobs:
 
   build-macos:
     needs: [check, audit]
-    runs-on: macos-14
+    runs-on: macos-latest
     env:
       TARGET: aarch64-apple-darwin
     steps:
