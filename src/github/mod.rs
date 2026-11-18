@@ -1,11 +1,16 @@
 //! GitHub App integration (see
-//! `docs/superpowers/specs/2026-10-15-github-activity-design.md`). Phase 1
-//! is authentication only: `auth` (key parsing, JWT, token refresh rule),
-//! `client` (the REST calls + response parsing), and the key resolution
-//! below. Nothing here syncs or stores activity yet.
+//! `docs/superpowers/specs/2026-10-15-github-activity-design.md`): `auth`
+//! (key parsing, JWT, token refresh rule), `client` (the REST/GraphQL
+//! calls + response parsing), `graphql` (the sync's queries and pure
+//! parsers), `store` (the `github_*` tables), `sync` (the background sync
+//! loop and `github preview`), and the key resolution below. Nothing reads
+//! the synced data for reports yet (design phase 3).
 
 pub mod auth;
 pub mod client;
+pub mod graphql;
+pub mod store;
+pub mod sync;
 
 use std::env;
 

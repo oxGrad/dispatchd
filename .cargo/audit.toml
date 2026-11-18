@@ -38,6 +38,21 @@
 #   secrets, which only leak if a custom ClientSessionStore logs them with
 #   Debug. serenity / tokio-tungstenite use rustls' built-in session cache,
 #   whose Debug output is redacted.
+#
+# RUSTSEC-2026-0382 (rustls-webpki, 2026-10-20) is pinned the same way: it was
+# only fixed in 0.103.16, which the rustls 0.23 tree is on, and has no 0.102.x
+# release. It accepts certificate paths through distrusted emSign
+# intermediates when the trust anchors allow them. The gateway connection
+# anchors on webpki-roots (tokio-tungstenite 0.21's rustls-tls-webpki-roots ->
+# webpki-roots 0.26.11 -> 1.x), and webpki-roots 1.0.10 removed the emSign ECC
+# Root CA - G3 root those paths need. Cargo.lock must stay on webpki-roots
+# >= 1.0.10 for this to hold; cargo-audit enforces that (RUSTSEC-2026-0381).
+#
+# RUSTSEC-2026-0459 (libsqlite3-sys 0.37, bundled SQLite < 3.54) needs a
+# crafted database + `-wal` file pair written by a less trusted party.
+# dispatchd only opens its own DB, in a directory the service user owns. The
+# fix is libsqlite3-sys 0.39 via rusqlite 0.41, which rusqlite_migration
+# doesn't support yet. Remove this entry once it does and rusqlite is bumped.
 [advisories]
 ignore = [
     "RUSTSEC-2026-0098", # rustls-webpki: URI name constraints incorrectly accepted
@@ -46,4 +61,6 @@ ignore = [
     "RUSTSEC-2026-0104", # rustls-webpki: reachable panic parsing CRLs
     "RUSTSEC-2026-0349", # rustls 0.22: post-quantum key share downgrade (no PQ group in 0.22)
     "RUSTSEC-2026-0346", # rustls 0.22: Debug of client session values (custom stores only)
+    "RUSTSEC-2026-0382", # rustls-webpki 0.102: emSign intermediates (root gone from webpki-roots >= 1.0.10)
+    "RUSTSEC-2026-0459", # libsqlite3-sys 0.37: crafted db + -wal pair (dispatchd only opens its own DB)
 ]

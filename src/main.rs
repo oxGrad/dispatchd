@@ -13,6 +13,7 @@ mod members;
 mod recap;
 mod reminders;
 mod service;
+mod sow;
 mod status;
 mod upgrade;
 
@@ -119,6 +120,13 @@ enum GithubCommand {
     },
     /// Remove the encrypted GitHub App private key
     Logout,
+    /// Fetch the org's recent PRs/issues/reviews with the sync's own
+    /// queries and print a summary, without touching the database
+    Preview {
+        /// How many days back to look (1-14)
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=14))]
+        days: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -282,6 +290,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Github {
             action: GithubCommand::Logout,
         }) => return github_login::logout(),
+        Some(Command::Github {
+            action: GithubCommand::Preview { days },
+        }) => return github_login::preview(days).await,
         Some(Command::Service {
             action: ServiceCommand::Install,
         }) => return service::install(),
