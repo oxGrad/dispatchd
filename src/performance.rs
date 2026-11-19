@@ -103,18 +103,21 @@ pub fn performance(
             let rows: Vec<bool> = conn
                 .prepare(
                     "WITH RECURSIVE chain(root, id) AS (
+                         -- a chain is one member's (carry_over_todo checks the
+                         -- owner) and never starts after its own todos
                          SELECT id, id FROM entries WHERE type = 'todo' AND carried_from IS NULL
+                           AND discord_user_id = ?1 AND date <= ?3
                          UNION ALL
                          SELECT chain.root, e.id FROM entries e JOIN chain ON e.carried_from = chain.id)
                      SELECT DISTINCT c.root, EXISTS(
                          SELECT 1 FROM chain c2 JOIN entries u
                            ON u.todo_id = c2.id AND u.type = 'update'
-                          AND u.status = 'done' AND u.date <= ?4
+                          AND u.status = 'done' AND u.date <= ?3
                          WHERE c2.root = c.root)
                      FROM chain c JOIN entries t ON t.id = c.id
                      WHERE t.discord_user_id = ?1 AND t.date >= ?2 AND t.date <= ?3",
                 )?
-                .query_map(params![id, start, end, end], |r| r.get(1))?
+                .query_map(params![id, start, end], |r| r.get(1))?
                 .collect::<rusqlite::Result<_>>()?;
             (rows.len(), rows.iter().filter(|d| **d).count())
         };

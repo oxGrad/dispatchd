@@ -129,7 +129,7 @@ impl EventHandler for Handler {
                     Some(("help", _)) => progress::handle_help(&ctx, &command).await,
                     _ => {}
                 },
-                // Three subcommands, so `match` rather than `if let`.
+                // The `leave` subcommand group, ahead of the plain subcommands.
                 "team" if team::leave_subcommand(&command.data.options).is_some() => {
                     if let Some((sub, opts)) = team::leave_subcommand(&command.data.options) {
                         team::handle_leave(

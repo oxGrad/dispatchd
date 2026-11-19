@@ -347,9 +347,10 @@ pub fn carryover_report(
     Ok(out)
 }
 
-/// The candidate check shared by `carryover_origin` and `carry_over_todo`:
-/// `origin_id` is currently one of this member's carry-over candidates.
-fn origin_candidate(
+/// The origin todo's fields (to prefill the carry modal), `Some` only when
+/// `origin_id` is currently one of the member's carry-over candidates.
+/// Also `carry_over_todo`'s candidacy re-check.
+pub fn carryover_origin(
     conn: &Connection,
     discord_user_id: &str,
     today: &str,
@@ -386,18 +387,6 @@ fn origin_candidate(
         .optional()?)
 }
 
-/// The origin todo's fields (to prefill the carry modal), `Some` only when
-/// `origin_id` is currently one of the member's carry-over candidates.
-pub fn carryover_origin(
-    conn: &Connection,
-    discord_user_id: &str,
-    today: &str,
-    lookback_days: i64,
-    origin_id: i64,
-) -> Result<Option<TodoForEdit>> {
-    origin_candidate(conn, discord_user_id, today, lookback_days, origin_id)
-}
-
 /// Carries `origin_id` over: re-checks candidacy and inserts today's todo
 /// with `carried_from = origin_id` in one transaction. `None` when the
 /// origin isn't a candidate (not theirs, finished, too old, already carried).
@@ -413,23 +402,14 @@ pub fn carry_over_todo(
     sow_ref: Option<&str>,
 ) -> Result<Option<i64>> {
     let tx = conn.unchecked_transaction()?;
-    if origin_candidate(&tx, discord_user_id, today, lookback_days, origin_id)?.is_none() {
+    if carryover_origin(&tx, discord_user_id, today, lookback_days, origin_id)?.is_none() {
         return Ok(None);
     }
+    let id = insert_todo(&tx, discord_user_id, today, task, notes, sow_ref)?;
     tx.execute(
-        "INSERT INTO entries (discord_user_id, date, type, task, notes, sow_ref, carried_from, created_at)
-         VALUES (?1, ?2, 'todo', ?3, ?4, ?5, ?6, ?7)",
-        params![
-            discord_user_id,
-            today,
-            task,
-            notes,
-            sow_ref,
-            origin_id,
-            Timestamp::now().to_string()
-        ],
+        "UPDATE entries SET carried_from = ?1 WHERE id = ?2",
+        params![origin_id, id],
     )?;
-    let id = tx.last_insert_rowid();
     tx.commit()?;
     Ok(Some(id))
 }

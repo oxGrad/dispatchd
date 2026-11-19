@@ -224,9 +224,8 @@ pub fn rederive_member(
     Ok(())
 }
 
-/// How far back `backfill_missed` looks. Must stay well under
-/// `maintenance`'s 90-day `reminders_sent` retention, or a day whose
-/// `missed_recorded` marker was pruned would be recorded a second time.
+/// How far back `backfill_missed` looks. (`maintenance` never prunes the
+/// `missed_recorded` markers, so a recorded day is never recorded twice.)
 const MISSED_BACKFILL_DAYS: i64 = 14;
 
 /// Records the miss snapshot for any past day in the last

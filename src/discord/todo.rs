@@ -125,31 +125,41 @@ fn todo_modal(custom_id: String, title: &str, prefill: Option<TodoForEdit>) -> C
         sow_ref: None,
     });
     CreateModal::new(custom_id, title).components(vec![
-        CreateActionRow::InputText(
-            CreateInputText::new(InputTextStyle::Short, "Task", TASK_INPUT_ID)
-                .required(true)
-                .value(task),
-        ),
-        CreateActionRow::InputText(
+        CreateActionRow::InputText(with_value(
+            CreateInputText::new(InputTextStyle::Short, "Task", TASK_INPUT_ID).required(true),
+            task,
+        )),
+        CreateActionRow::InputText(with_value(
             CreateInputText::new(
                 InputTextStyle::Paragraph,
                 "Notes (optional)",
                 NOTES_INPUT_ID,
             )
-            .required(false)
-            .value(notes.unwrap_or_default()),
-        ),
-        CreateActionRow::InputText(
+            .required(false),
+            notes.unwrap_or_default(),
+        )),
+        CreateActionRow::InputText(with_value(
             CreateInputText::new(
                 InputTextStyle::Short,
                 "SOW Ref (optional)",
                 SOW_REF_INPUT_ID,
             )
             .required(false)
-            .max_length(SOW_REF_MAX_LEN)
-            .value(sow_ref.unwrap_or_default()),
-        ),
+            .max_length(SOW_REF_MAX_LEN),
+            sow_ref.unwrap_or_default(),
+        )),
     ])
+}
+
+/// Sets `value` only when there is one: a blank `/todo add` modal sends no
+/// `value` at all (as it did before the add/edit/carry modals were shared)
+/// rather than `""`.
+fn with_value(input: CreateInputText, value: String) -> CreateInputText {
+    if value.is_empty() {
+        input
+    } else {
+        input.value(value)
+    }
 }
 
 pub async fn handle_add(
