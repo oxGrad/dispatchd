@@ -360,7 +360,9 @@ src/
   recap.rs       resolve_day_or_range (`/recap` start/end validation:
                  none = today, one = that day, both = range, capped at
                  60 days) + resolve_month_or_range (same, but none = the
-                 current month; `/team performance`, capped at 366 days) +
+                 1st of the month to today; `/team performance`, capped at
+                 366 days) + month_bounds (the whole current month,
+                 `/team leave list`'s no-dates default) +
                  biweekly_range (`/recap-biweekly`'s
                  fixed 14 days ending yesterday) + recap_range/day_rows
                  (per-day todo+latest-update rows, bucketed
@@ -619,7 +621,8 @@ src/
                     replies "not configured" when [github] is off;
                     `leave add|remove|list` (leave.rs; remove/add
                     re-derive recorded days via followups::rederive_member;
-                    list chunked); `performance` (handle_performance ->
+                    list defaults to the whole month, recap::month_bounds,
+                    and is chunked); `performance` (handle_performance ->
                     build_performance) - is_lead-gated, ephemeral reply
                     with a `performance-<start>_<end>.md` attachment from
                     performance::format_performance_file, no dates = this

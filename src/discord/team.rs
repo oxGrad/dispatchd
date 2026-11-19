@@ -769,12 +769,11 @@ pub async fn handle_leave(
         };
 
         if sub == "list" {
-            let (s, e) = match crate::recap::resolve_month_or_range(
-                start.as_deref(),
-                end.as_deref(),
-                &today,
-                366,
-            ) {
+            let range = match (start.as_deref(), end.as_deref()) {
+                (None, None) => crate::recap::month_bounds(&today),
+                (s, e) => crate::recap::resolve_month_or_range(s, e, &today, 366),
+            };
+            let (s, e) = match range {
                 Ok(r) => r,
                 Err(msg) => break 'reply msg,
             };

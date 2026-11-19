@@ -97,6 +97,13 @@ pub fn resolve_month_or_range(
     resolve_range(start, end, today, true, max_days)
 }
 
+/// The 1st through the last day of `today`'s month - `/team leave list`'s
+/// default, so upcoming leave this month shows too.
+pub fn month_bounds(today: &str) -> Result<(String, String), String> {
+    let today = parse_today(today)?;
+    Ok(format_range(today.first_of_month(), today.last_of_month()))
+}
+
 fn resolve_range(
     start: Option<&str>,
     end: Option<&str>,
@@ -457,6 +464,14 @@ mod tests {
             resolve_month_or_range(Some("2025-01-01"), Some("2026-11-19"), "2026-11-19", 366)
                 .unwrap_err()
                 .contains("366")
+        );
+    }
+
+    #[test]
+    fn month_bounds_is_the_whole_current_month() {
+        assert_eq!(
+            month_bounds("2026-11-19").unwrap(),
+            ("2026-11-01".into(), "2026-11-30".into())
         );
     }
 
