@@ -83,13 +83,17 @@ pub fn performance(
             .filter(|d| !missed_any.contains(**d))
             .count();
 
-        let missed_of = |kind: &str| {
-            strings(
+        // Only misses on Expected days, so the Missed columns and On time
+        // can't contradict each other (e.g. a miss on a leave day).
+        let missed_of = |kind: &str| -> Result<Vec<String>> {
+            let mut ds = strings(
                 conn,
                 "SELECT date FROM missed_submissions WHERE discord_user_id = ?1 AND kind = ?2
                  AND date >= ?3 AND date <= ?4 ORDER BY date",
                 params![id, kind, start, end],
-            )
+            )?;
+            ds.retain(|d| expected_days.contains(&d));
+            Ok(ds)
         };
         let (tasks, done): (usize, usize) = {
             let rows: Vec<bool> = conn
@@ -349,6 +353,20 @@ mod tests {
         assert_eq!(bima.name, "Bima");
         assert_eq!((bima.expected, bima.on_time), (4, 2));
         assert_eq!(bima.sick_dates, vec!["2026-11-04"]);
+        assert_eq!(bima.missed_todo, vec!["2026-11-05"]);
+        assert_eq!(bima.missed_progress, vec!["2026-11-05", "2026-11-06"]);
+    }
+
+    #[test]
+    fn a_miss_on_a_leave_day_is_not_counted() {
+        // Bima is sick Nov 4 (not Expected); a stray miss row there is ignored.
+        let conn = fixture();
+        conn.execute(
+            "INSERT INTO missed_submissions (date, discord_user_id, kind) VALUES ('2026-11-04', '1', 'todo')",
+            [],
+        )
+        .unwrap();
+        let bima = &performance(&conn, "2026-11-01", "2026-11-30", None).unwrap()[1];
         assert_eq!(bima.missed_todo, vec!["2026-11-05"]);
         assert_eq!(bima.missed_progress, vec!["2026-11-05", "2026-11-06"]);
     }
