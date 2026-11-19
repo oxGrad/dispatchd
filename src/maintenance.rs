@@ -11,8 +11,8 @@ const RETENTION_DAYS: u32 = 90;
 /// recap depends on - and neither is `missed_submissions`, nor the
 /// `missed_recorded` markers in `reminders_sent`: `/team performance`
 /// counts a day as expected only if its marker exists, over ranges up to a
-/// year. Returns (reminders_sent
-/// rows deleted, followups_sent rows deleted).
+/// year. Returns (reminders_sent rows deleted,
+/// followups_sent rows deleted).
 pub fn run(conn: &Connection) -> Result<(usize, usize)> {
     let cutoff = format!("-{RETENTION_DAYS} days");
 

@@ -73,9 +73,8 @@ pub fn biweekly_range(today: &str) -> Result<(String, String), String> {
     Ok(format_range(start, end))
 }
 
-/// Resolves the `start`/`end` options shared by `/recap`:
-/// neither given = today, exactly one given = that single day, both given
-/// = the inclusive range (at most `MAX_RECAP_DAYS`). Returns a user-facing
+/// Resolves `/recap`'s `start`/`end` options: neither given = today, exactly one
+/// given = that single day, both given = the inclusive range (at most `MAX_RECAP_DAYS`). Returns a user-facing
 /// error string rather than `anyhow::Error`: every failure here is bad
 /// caller input (unparsable date, inverted or oversized range), not an
 /// internal fault.

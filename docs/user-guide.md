@@ -62,13 +62,17 @@ other. When a cut-off passes, dispatchd posts an alert in the thread that
 Submitting afterwards doesn't undo the miss, but the work still shows up
 as normal.
 
-If the bot itself was offline at any point between the start of the
-working day and a cut-off, that cut-off is **waived** for the day: nobody is
-marked as missing, and the thread gets a notice with no mentions asking
-everyone to submit anyway. A short restart doesn't trigger this - only a
-real gap in the bot's uptime does. The tech lead can mark a member on
-leave or sick for a day with `/team leave` (see below), which stops the
-nags and records no miss for those days.
+Each cut-off has its own downtime window. If the bot was offline at any
+point between the morning ping and the `/todo` cut-off (09:00 to 11:00 by
+default), the `/todo` cut-off is **waived** for the day; if it was offline
+between the afternoon reminder and the `/progress` cut-off (15:00 to 15:50
+by default), the `/progress` cut-off is waived. Morning downtime doesn't
+waive `/progress`. A waived cut-off marks nobody as missing, and the thread
+gets a notice with no mentions asking everyone to submit anyway. A short
+restart doesn't trigger this: only a gap longer than about two ticker
+intervals does. The tech lead can mark a member on leave or sick for a
+day with `/team leave` (see below), which stops the nags and records no
+miss for those days.
 
 All of this happens automatically - you don't run any command to make the
 thread or reminders appear. You only need the commands below to actually

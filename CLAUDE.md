@@ -324,7 +324,8 @@ src/
                  meant for a `.md` file attachment (alignment only reads
                  right in a fixed-width viewer, not a chat message);
                  used by recap::format_day_table_file and
-                 performance::format_performance_file. team_status / team_report take
+                 performance::format_performance_file. team_status /
+                 team_report take
                  carryover_lookback_days; MemberStatus gains
                  carried_count, MemberReport gains carried
                  (Vec<CarryoverDetail>); matched_update_count is now
@@ -359,7 +360,8 @@ src/
   recap.rs       resolve_day_or_range (`/recap` start/end validation:
                  none = today, one = that day, both = range, capped at
                  60 days) + resolve_month_or_range (same, but none = the
-                 current month; `/team performance`, capped at 366 days) + biweekly_range (`/recap-biweekly`'s
+                 current month; `/team performance`, capped at 366 days) +
+                 biweekly_range (`/recap-biweekly`'s
                  fixed 14 days ending yesterday) + recap_range/day_rows
                  (per-day todo+latest-update rows, bucketed
                  blocked/no-report/in-progress/done, plus ad-hoc updates
@@ -480,7 +482,8 @@ src/
                  UTC Timestamp), uptime spans (start_span at ticker
                  startup, touch_span every tick; never pruned) + covered /
                  day_cutoffs (a cut-off is waived when the spans leave a
-                 gap between the day's todo_time and that cut-off),
+                 gap in its own window: todo_time -> todo_cutoff for
+                 /todo, update_time -> progress_cutoff for /progress),
                  ensure_rules_since / rules_since (app_meta
                  'cutoff_rules_since': the first day the cut-off rules
                  apply, for the performance report's old-rule note)
@@ -690,7 +693,8 @@ src/
                     single day to just the date; "No activity on/between
                     ..." when empty) plus, when there's anything to show, a
                     `recap-<start>_<end>.md` attachment (`recap-<date>.md`
-                    for a single day - attachment_name, shared with /team performance)
+                    for a single day - attachment_name, shared with
+                    /team performance)
                     (recap::format_recap_file - one column-aligned day
                     table per day, recap::recap_range) - no chunking, an
                     attachment isn't bound by Discord's 2000-char cap.
