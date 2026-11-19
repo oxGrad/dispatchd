@@ -31,10 +31,11 @@ pub async fn run(
     channel_id: ChannelId,
     config: Config,
 ) {
+    let rules = crate::cutoffs::Rules::from_config(&config);
     {
         let today = entries::today_in(&config.timezone);
         let conn = db.lock().expect("db mutex poisoned");
-        match followups::backfill_missed(&conn, &today, config.run_on_weekends) {
+        match followups::backfill_missed(&conn, &today, config.run_on_weekends, &rules) {
             Ok(dates) if !dates.is_empty() => {
                 println!("backfilled missed submissions for {}", dates.join(", "))
             }
@@ -46,7 +47,7 @@ pub async fn run(
     let mut interval = tokio::time::interval(Duration::from_secs(config.ticker_interval_seconds));
     loop {
         interval.tick().await;
-        tick(&http, &db, channel_id, &config).await;
+        tick(&http, &db, channel_id, &config, &rules).await;
     }
 }
 
@@ -55,6 +56,7 @@ async fn tick(
     db: &Arc<Mutex<Connection>>,
     channel_id: ChannelId,
     config: &Config,
+    rules: &crate::cutoffs::Rules,
 ) {
     let now = jiff::Timestamp::now().to_zoned_datetime(config.timezone.clone());
     if !config.run_on_weekends && is_weekend(now.weekday()) {
@@ -87,7 +89,7 @@ async fn tick(
     if is_due(now_time, config.day_summary_time) {
         maybe_fire_day_summary(http, db, &date, config).await;
         maybe_fire_missing_submissions(http, db, &date).await;
-        maybe_record_missed(db, &date).await;
+        maybe_record_missed(db, &date, rules).await;
     }
 
     let todo_followup_trigger = config.todo_time
@@ -102,6 +104,7 @@ async fn tick(
             &date,
             "todo_followup",
             followups::members_missing_todo,
+            &cutoff_str(&date, config.todo_cutoff_time, &config.timezone),
             "📋 don't forget to submit your `/todo` for today!",
         )
         .await;
@@ -113,6 +116,7 @@ async fn tick(
             &date,
             "update_followup",
             followups::members_missing_update,
+            &cutoff_str(&date, config.progress_cutoff_time, &config.timezone),
             "⏰ don't forget to submit a `/progress add` report for today's todo(s)!",
         )
         .await;
@@ -383,7 +387,11 @@ async fn maybe_fire_missing_submissions(http: &Arc<Http>, db: &Arc<Mutex<Connect
 /// deleted standup thread (which stops both messages from ever sending)
 /// must never stop this from being recorded, since the record itself
 /// doesn't depend on the thread existing at all.
-async fn maybe_record_missed(db: &Arc<Mutex<Connection>>, date: &str) {
+async fn maybe_record_missed(
+    db: &Arc<Mutex<Connection>>,
+    date: &str,
+    rules: &crate::cutoffs::Rules,
+) {
     match already_sent(db, date, "missed_recorded") {
         Ok(true) => return,
         Ok(false) => {}
@@ -395,7 +403,9 @@ async fn maybe_record_missed(db: &Arc<Mutex<Connection>>, date: &str) {
 
     // record_missed writes the missed_recorded marker itself, atomically.
     let conn = db.lock().expect("db mutex poisoned");
-    if let Err(e) = followups::record_missed(&conn, date) {
+    let recorded = crate::cutoffs::day_cutoffs(&conn, rules, date)
+        .and_then(|day| followups::record_missed(&conn, date, &day));
+    if let Err(e) = recorded {
         eprintln!("failed to record missed submissions for {date}: {e}");
     }
 }
@@ -677,6 +687,17 @@ fn quote_block(text: &str) -> String {
     format!("\n> {}", text.replace('\n', "\n> "))
 }
 
+/// UTC instant of local `time` on `date`, as the text `created_at` is
+/// compared against. The live nags ignore uptime waivers, so this is all
+/// they need. On a conversion failure falls back to a far-future instant,
+/// so every entry counts and nobody is nagged (nags aren't records, and a
+/// false nag is worse than a missed one).
+fn cutoff_str(date: &str, time: jiff::civil::Time, tz: &jiff::tz::TimeZone) -> String {
+    crate::cutoffs::instant(date, time, tz)
+        .map(|t| t.to_string())
+        .unwrap_or_else(|_| "9999-12-31T00:00:00Z".into())
+}
+
 /// Nags each member `query` returns as missing something for `date`, one
 /// in-thread `@mention` per person, skipping anyone already nagged today
 /// (per the doc's "at most once" framing - a restart mid-way through
@@ -686,12 +707,13 @@ async fn maybe_fire_followups(
     db: &Arc<Mutex<Connection>>,
     date: &str,
     kind: &str,
-    query: fn(&Connection, &str) -> anyhow::Result<Vec<String>>,
+    query: fn(&Connection, &str, &str) -> anyhow::Result<Vec<String>>,
+    cutoff: &str,
     message: &str,
 ) {
     let missing = {
         let conn = db.lock().expect("db mutex poisoned");
-        query(&conn, date)
+        query(&conn, date, cutoff)
     };
     let missing = match missing {
         Ok(ids) if ids.is_empty() => return,

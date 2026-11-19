@@ -1,6 +1,8 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::cutoffs::{DayCutoffs, Rules, day_cutoffs};
+
 /// Whether a follow-up of `kind` ("todo_followup" | "update_followup")
 /// already fired for `discord_user_id` on `date`.
 pub fn already_sent(
@@ -28,58 +30,69 @@ pub fn mark_sent(conn: &Connection, date: &str, discord_user_id: &str, kind: &st
     Ok(())
 }
 
-/// Members with no `type = 'todo'` row for `date` at all. Excludes role
-/// `viewer` - view-only members aren't expected to submit one, so they're
-/// never nagged for it.
-pub fn members_missing_todo(conn: &Connection, date: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
+const NOT_ON_LEAVE: &str =
+    "discord_user_id NOT IN (SELECT discord_user_id FROM member_leave WHERE date = ?1)";
+
+/// Members (not `viewer`, not on leave for `date`) with no `type = 'todo'`
+/// row for `date` created before `todo_cutoff` (a UTC RFC3339 instant). One
+/// todo before the cut-off is enough; later ones don't rescue a miss.
+pub fn members_missing_todo(
+    conn: &Connection,
+    date: &str,
+    todo_cutoff: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!(
         "SELECT discord_user_id FROM members
-         WHERE role != 'viewer'
+         WHERE role != 'viewer' AND {NOT_ON_LEAVE}
            AND discord_user_id NOT IN (
-             SELECT discord_user_id FROM entries WHERE type = 'todo' AND date = ?1
-         )",
-    )?;
+             SELECT discord_user_id FROM entries
+             WHERE type = 'todo' AND date = ?1 AND created_at < ?2
+         )"
+    ))?;
     let ids = stmt
-        .query_map(params![date], |row| row.get(0))?
+        .query_map(params![date, todo_cutoff], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(ids)
 }
 
-/// Members who posted at least one todo for `date` but have at least one
-/// that still has no matching update. Someone with zero todos isn't
-/// included here - there's nothing to update against, so they're only
-/// nagged by the todo follow-up. Shared by the live `update_followup` nag
-/// and `record_missed` below - a stated todo left with no report against
-/// it is the sharper "missed /progress" signal, not just "posted zero
-/// updates today" (which double-counts a total no-show already caught by
-/// `members_missing_todo`, and would also flag someone with zero todos
-/// who has nothing to report progress on in the first place).
-pub fn members_missing_update(conn: &Connection, date: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT discord_user_id FROM entries
-         WHERE type = 'todo' AND date = ?1
-           AND id NOT IN (SELECT todo_id FROM entries WHERE type = 'update' AND todo_id IS NOT NULL)",
-    )?;
+/// Members (not `viewer`, not on leave) who posted a todo for `date` before
+/// `progress_cutoff` that has no `/progress` report created before
+/// `progress_cutoff` against it. A todo added after the cut-off isn't
+/// judged (nothing to report on yet); a report after it doesn't count.
+/// Someone with no todo isn't included - only the todo miss covers them.
+/// Shared by the live `update_followup` nag and `record_missed`.
+pub fn members_missing_update(
+    conn: &Connection,
+    date: &str,
+    progress_cutoff: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT e.discord_user_id FROM entries e
+         JOIN members m ON m.discord_user_id = e.discord_user_id
+         WHERE m.role != 'viewer' AND e.type = 'todo' AND e.date = ?1
+           AND e.created_at < ?2
+           AND e.{NOT_ON_LEAVE}
+           AND e.id NOT IN (
+             SELECT todo_id FROM entries
+             WHERE type = 'update' AND todo_id IS NOT NULL AND created_at < ?2)"
+    ))?;
     let ids = stmt
-        .query_map(params![date], |row| row.get(0))?
+        .query_map(params![date, progress_cutoff], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(ids)
 }
 
-/// Members with no `entries` row of any type (`todo` or `update`) for
-/// `date` at all - i.e. submitted nothing whatsoever today. Distinct from
-/// `members_missing_todo`/`members_missing_update` above, which each
-/// track one submission kind independently; this is the "no activity at
-/// all" set the day summary's missing-submissions message nags. Excludes
-/// role `viewer`, same as `members_missing_todo`.
+/// Members (not `viewer`, not on leave) with no `entries` row of any type
+/// for `date` at all - the set the day summary's missing-submissions
+/// message nags. Distinct from the two cut-off-aware queries above.
 pub fn members_with_no_activity(conn: &Connection, date: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT discord_user_id FROM members
-         WHERE role != 'viewer'
+         WHERE role != 'viewer' AND {NOT_ON_LEAVE}
            AND discord_user_id NOT IN (
              SELECT discord_user_id FROM entries WHERE date = ?1
-         )",
-    )?;
+         )"
+    ))?;
     let ids = stmt
         .query_map(params![date], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -108,8 +121,8 @@ impl MissedDetail {
 }
 
 /// Records `date`'s miss snapshot into `missed_submissions`: one row per
-/// member per kind - 'todo' from `members_missing_todo` (no todo
-/// submitted at all), 'update' from `members_missing_update` (had a todo
+/// member per kind (skipping a kind `day` waives) - 'todo' from
+/// `members_missing_todo` (no todo submitted before the cut-off), 'update' from `members_missing_update` (had a todo
 /// today but left at least one without a `/progress` report against it -
 /// the tighter, more actionable signal than "posted zero updates all
 /// day", and one that correctly excludes a member with no todo at all,
@@ -122,24 +135,88 @@ impl MissedDetail {
 /// than once for the same date. Unlike `followups_sent`/`reminders_sent`,
 /// nothing prunes `missed_submissions` - it's retained history, same as
 /// `entries`.
-pub fn record_missed(conn: &Connection, date: &str) -> Result<()> {
+pub fn record_missed(conn: &Connection, date: &str, day: &DayCutoffs) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    for id in members_missing_todo(&tx, date)? {
-        tx.execute(
-            "INSERT OR IGNORE INTO missed_submissions (date, discord_user_id, kind) VALUES (?1, ?2, 'todo')",
-            params![date, id],
-        )?;
-    }
-    for id in members_missing_update(&tx, date)? {
-        tx.execute(
-            "INSERT OR IGNORE INTO missed_submissions (date, discord_user_id, kind) VALUES (?1, ?2, 'update')",
-            params![date, id],
-        )?;
-    }
+    insert_misses(&tx, date, day, None)?;
     tx.execute(
         "INSERT OR IGNORE INTO reminders_sent (date, type) VALUES (?1, 'missed_recorded')",
         params![date],
     )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Inserts `date`'s miss rows, skipping a waived kind, for everyone or
+/// just `only`.
+fn insert_misses(
+    conn: &Connection,
+    date: &str,
+    day: &DayCutoffs,
+    only: Option<&str>,
+) -> Result<()> {
+    let kinds = [
+        (
+            "todo",
+            day.todo_waived,
+            members_missing_todo(conn, date, &day.todo_cutoff)?,
+        ),
+        (
+            "update",
+            day.progress_waived,
+            members_missing_update(conn, date, &day.progress_cutoff)?,
+        ),
+    ];
+    for (kind, waived, ids) in kinds {
+        if waived {
+            continue;
+        }
+        for id in ids.iter().filter(|i| only.is_none_or(|o| o == i.as_str())) {
+            conn.execute(
+                "INSERT OR IGNORE INTO missed_submissions (date, discord_user_id, kind) VALUES (?1, ?2, ?3)",
+                params![date, id, kind],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Re-judges one member's recorded days after their leave changed. Only
+/// days with a `missed_recorded` marker are touched. On or after
+/// `rules_since` the member's rows are deleted and re-derived under the
+/// cut-off rules (waived kinds skipped). Before it (or with no
+/// `rules_since`) the old end-of-day verdicts stand: rows are deleted only
+/// if the member is on leave that date now, never inserted - so removing
+/// leave can't re-judge an old day, and a leave removal on a day that
+/// never had leave can't erase an old miss.
+// Called by the leave commands in Task 5.
+#[allow(dead_code)]
+pub fn rederive_member(
+    conn: &Connection,
+    discord_user_id: &str,
+    dates: &[String],
+    rules: &Rules,
+    rules_since: Option<&str>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for date in dates {
+        if !crate::reminders::already_sent(&tx, date, "missed_recorded")? {
+            continue;
+        }
+        if rules_since.is_some_and(|since| date.as_str() >= since) {
+            tx.execute(
+                "DELETE FROM missed_submissions WHERE date = ?1 AND discord_user_id = ?2",
+                params![date, discord_user_id],
+            )?;
+            let day = day_cutoffs(&tx, rules, date)?;
+            insert_misses(&tx, date, &day, Some(discord_user_id))?;
+        } else {
+            tx.execute(
+                "DELETE FROM missed_submissions WHERE date = ?1 AND discord_user_id = ?2
+                 AND discord_user_id IN (SELECT discord_user_id FROM member_leave WHERE date = ?1)",
+                params![date, discord_user_id],
+            )?;
+        }
+    }
     tx.commit()?;
     Ok(())
 }
@@ -163,6 +240,7 @@ pub fn backfill_missed(
     conn: &Connection,
     today: &str,
     include_weekends: bool,
+    rules: &Rules,
 ) -> Result<Vec<String>> {
     use jiff::ToSpan;
     use jiff::civil::{Date, Weekday};
@@ -185,7 +263,8 @@ pub fn backfill_missed(
         if !include_weekends && matches!(weekday, Weekday::Saturday | Weekday::Sunday) {
             continue;
         }
-        record_missed(conn, &date)?;
+        let day = day_cutoffs(conn, rules, &date)?;
+        record_missed(conn, &date, &day)?;
         recorded.push(date);
     }
     Ok(recorded)
@@ -306,6 +385,63 @@ fn short_date_list(dates: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::entries;
+    use crate::leave;
+    use jiff::Timestamp;
+
+    /// A cut-off far in the future: every entry counts, which is what the
+    /// pre-existing tests assume.
+    const OPEN: &str = "9999-12-31T00:00:00Z";
+    fn open_day() -> DayCutoffs {
+        DayCutoffs {
+            todo_cutoff: OPEN.into(),
+            progress_cutoff: OPEN.into(),
+            todo_waived: false,
+            progress_waived: false,
+        }
+    }
+    fn set_created_at(conn: &Connection, id: i64, ts: &str) {
+        conn.execute(
+            "UPDATE entries SET created_at = ?1 WHERE id = ?2",
+            params![ts, id],
+        )
+        .unwrap();
+    }
+    fn seed_leave(conn: &Connection, id: &str, date: &str) {
+        leave::add(conn, id, &[date.to_string()], leave::Reason::Sick).unwrap();
+    }
+    /// UTC rules (09:00/11:00/15:00/15:50, 120 s tolerance), no uptime.
+    fn utc_rules() -> Rules {
+        use jiff::civil::time;
+        Rules {
+            tz: jiff::tz::TimeZone::UTC,
+            todo_time: time(9, 0, 0, 0),
+            todo_cutoff: time(11, 0, 0, 0),
+            update_time: time(15, 0, 0, 0),
+            progress_cutoff: time(15, 50, 0, 0),
+            tolerance: jiff::SignedDuration::from_secs(120),
+        }
+    }
+    /// One uptime span from `from`'s midnight to `to`'s 23:59 UTC.
+    fn cover(conn: &Connection, from: &str, to: &str) {
+        let id =
+            crate::cutoffs::start_span(conn, format!("{from}T00:00:00Z").parse().unwrap()).unwrap();
+        let end: Timestamp = format!("{to}T23:59:00Z").parse().unwrap();
+        crate::cutoffs::touch_span(conn, id, end).unwrap();
+    }
+    /// UTC rules plus one uptime span covering all of `date`.
+    fn covered_utc_rules(conn: &Connection, date: &str) -> Rules {
+        cover(conn, date, date);
+        utc_rules()
+    }
+    /// Distinct `discord_user_id`s in `missed_submissions`, sorted.
+    fn missed_ids(conn: &Connection) -> Vec<String> {
+        conn.prepare("SELECT DISTINCT discord_user_id FROM missed_submissions ORDER BY 1")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
 
     fn open_test_db() -> Connection {
         let dir = tempfile::tempdir().unwrap();
@@ -354,7 +490,7 @@ mod tests {
         seed_member(&conn, "2", "Budi");
         entries::insert_todo(&conn, "1", DATE, "a", None, None).unwrap();
 
-        let missing = members_missing_todo(&conn, DATE).unwrap();
+        let missing = members_missing_todo(&conn, DATE, OPEN).unwrap();
         assert_eq!(missing, vec!["2".to_string()]);
     }
 
@@ -364,7 +500,7 @@ mod tests {
         seed_member(&conn, "1", "Alice");
         seed_viewer(&conn, "2", "Watcher");
 
-        let missing = members_missing_todo(&conn, DATE).unwrap();
+        let missing = members_missing_todo(&conn, DATE, OPEN).unwrap();
         assert_eq!(missing, vec!["1".to_string()]);
     }
 
@@ -380,7 +516,7 @@ mod tests {
         let todo3 = entries::insert_todo(&conn, "3", DATE, "a", None, None).unwrap();
         entries::insert_update(&conn, "3", DATE, "a", Some(todo3), "done", "done", None).unwrap();
 
-        let missing = members_missing_update(&conn, DATE).unwrap();
+        let missing = members_missing_update(&conn, DATE, OPEN).unwrap();
         assert_eq!(missing, vec!["2".to_string()]);
     }
 
@@ -421,6 +557,8 @@ mod tests {
     #[test]
     fn backfill_missed_records_only_unrecorded_past_working_days_with_activity() {
         let conn = open_test_db();
+        let rules = utc_rules();
+        cover(&conn, "2026-09-10", "2026-10-02");
         seed_member(&conn, "1", "Alice");
         seed_member(&conn, "2", "Budi");
         for date in [
@@ -433,9 +571,9 @@ mod tests {
             entries::insert_todo(&conn, "1", date, "a", None, None).unwrap();
         }
         // 2026-09-28 (Monday) has no entries at all - skipped as a likely holiday.
-        record_missed(&conn, "2026-09-30").unwrap();
+        record_missed(&conn, "2026-09-30", &open_day()).unwrap();
 
-        let recorded = backfill_missed(&conn, "2026-10-01", false).unwrap();
+        let recorded = backfill_missed(&conn, "2026-10-01", false, &rules).unwrap();
         assert_eq!(recorded, vec!["2026-09-29".to_string()]);
         assert!(crate::reminders::already_sent(&conn, "2026-09-29", "missed_recorded").unwrap());
         let budi_missed: i64 = conn
@@ -450,12 +588,12 @@ mod tests {
 
         // Idempotent: nothing left to backfill. Weekends opt in.
         assert!(
-            backfill_missed(&conn, "2026-10-01", false)
+            backfill_missed(&conn, "2026-10-01", false, &rules)
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            backfill_missed(&conn, "2026-10-01", true).unwrap(),
+            backfill_missed(&conn, "2026-10-01", true, &rules).unwrap(),
             vec!["2026-09-27".to_string()]
         );
     }
@@ -468,7 +606,7 @@ mod tests {
 
         entries::insert_todo(&conn, "2", DATE, "b", None, None).unwrap();
 
-        record_missed(&conn, DATE).unwrap();
+        record_missed(&conn, DATE, &open_day()).unwrap();
 
         let detail = missed_detail(&conn, DATE, DATE).unwrap();
         assert_eq!(
@@ -496,7 +634,7 @@ mod tests {
         let conn = open_test_db();
         seed_member(&conn, "1", "Alice");
 
-        record_missed(&conn, DATE).unwrap();
+        record_missed(&conn, DATE, &open_day()).unwrap();
 
         let detail = missed_detail(&conn, DATE, DATE).unwrap();
         assert_eq!(detail[0].missed_todo_dates, vec![DATE.to_string()]);
@@ -509,8 +647,8 @@ mod tests {
         seed_member(&conn, "1", "Alice");
         entries::insert_todo(&conn, "1", DATE, "a", None, None).unwrap();
 
-        record_missed(&conn, DATE).unwrap();
-        record_missed(&conn, DATE).unwrap();
+        record_missed(&conn, DATE, &open_day()).unwrap();
+        record_missed(&conn, DATE, &open_day()).unwrap();
 
         let detail = missed_detail(&conn, DATE, DATE).unwrap();
         assert_eq!(detail[0].missed_todo_dates, Vec::<String>::new());
@@ -524,7 +662,7 @@ mod tests {
         let todo = entries::insert_todo(&conn, "1", DATE, "a", None, None).unwrap();
         entries::insert_update(&conn, "1", DATE, "a", Some(todo), "done", "x", None).unwrap();
 
-        record_missed(&conn, DATE).unwrap();
+        record_missed(&conn, DATE, &open_day()).unwrap();
 
         assert!(missed_detail(&conn, DATE, DATE).unwrap().is_empty());
     }
@@ -534,9 +672,9 @@ mod tests {
         let conn = open_test_db();
         seed_member(&conn, "1", "Alice"); // no todo on any of the three days
 
-        record_missed(&conn, "2026-08-28").unwrap();
-        record_missed(&conn, "2026-08-29").unwrap();
-        record_missed(&conn, "2026-08-30").unwrap();
+        record_missed(&conn, "2026-08-28", &open_day()).unwrap();
+        record_missed(&conn, "2026-08-29", &open_day()).unwrap();
+        record_missed(&conn, "2026-08-30", &open_day()).unwrap();
 
         let detail = missed_detail(&conn, "2026-08-28", "2026-08-29").unwrap();
         assert_eq!(detail.len(), 1);
@@ -556,7 +694,7 @@ mod tests {
         // signal, not a blanket zero-activity day.
         for date in ["2026-08-28", "2026-08-29", "2026-08-30"] {
             entries::insert_todo(&conn, "1", date, "a", None, None).unwrap();
-            record_missed(&conn, date).unwrap();
+            record_missed(&conn, date, &open_day()).unwrap();
         }
 
         let detail = missed_detail(&conn, "2026-08-28", "2026-08-29").unwrap();
@@ -576,7 +714,7 @@ mod tests {
 
         entries::insert_update(&conn, "2", DATE, "hotfix", None, "done", "x", None).unwrap();
 
-        record_missed(&conn, DATE).unwrap();
+        record_missed(&conn, DATE, &open_day()).unwrap();
 
         let detail = missed_detail(&conn, DATE, DATE).unwrap();
         let members: Vec<&str> = detail.iter().map(|d| d.member.as_str()).collect();
@@ -621,5 +759,174 @@ mod tests {
         }
         assert!(table_lines[2].contains("Zed"));
         assert!(table_lines[3].contains("Alice"));
+    }
+
+    #[test]
+    fn missing_todo_counts_a_todo_after_the_cutoff_as_missed() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        seed_member(&conn, "2", "B");
+        let a = entries::insert_todo(&conn, "1", DATE, "x", None, None).unwrap();
+        set_created_at(&conn, a, "2026-08-29T10:59:00Z");
+        let b = entries::insert_todo(&conn, "2", DATE, "y", None, None).unwrap();
+        set_created_at(&conn, b, "2026-08-29T11:01:00Z");
+        assert_eq!(
+            members_missing_todo(&conn, DATE, "2026-08-29T11:00:00Z").unwrap(),
+            vec!["2"]
+        );
+    }
+
+    #[test]
+    fn one_todo_before_the_cutoff_is_enough_even_with_a_later_one() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        let a = entries::insert_todo(&conn, "1", DATE, "x", None, None).unwrap();
+        set_created_at(&conn, a, "2026-08-29T09:15:00Z");
+        let b = entries::insert_todo(&conn, "1", DATE, "y", None, None).unwrap();
+        set_created_at(&conn, b, "2026-08-29T13:00:00Z");
+        assert!(
+            members_missing_todo(&conn, DATE, "2026-08-29T11:00:00Z")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn missing_todo_respects_a_non_utc_cutoff() {
+        // Asia/Jakarta 11:00 = 04:00Z.
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        seed_member(&conn, "2", "B");
+        let a = entries::insert_todo(&conn, "1", DATE, "x", None, None).unwrap();
+        set_created_at(&conn, a, "2026-08-29T03:59:00Z");
+        let b = entries::insert_todo(&conn, "2", DATE, "y", None, None).unwrap();
+        set_created_at(&conn, b, "2026-08-29T04:01:00Z");
+        let tz = jiff::tz::TimeZone::get("Asia/Jakarta").unwrap();
+        let cutoff = crate::cutoffs::instant(DATE, jiff::civil::time(11, 0, 0, 0), &tz).unwrap();
+        assert_eq!(
+            members_missing_todo(&conn, DATE, &cutoff.to_string()).unwrap(),
+            vec!["2"]
+        );
+    }
+
+    #[test]
+    fn missing_update_ignores_todos_added_after_the_progress_cutoff() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        let t = entries::insert_todo(&conn, "1", DATE, "tomorrow's plan", None, None).unwrap();
+        set_created_at(&conn, t, "2026-08-29T16:10:00Z");
+        assert!(
+            members_missing_update(&conn, DATE, "2026-08-29T15:50:00Z")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_report_after_the_progress_cutoff_does_not_count() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        let t = entries::insert_todo(&conn, "1", DATE, "x", None, None).unwrap();
+        set_created_at(&conn, t, "2026-08-29T09:00:00Z");
+        let u = entries::insert_update(&conn, "1", DATE, "x", Some(t), "done", "ok", None).unwrap();
+        set_created_at(&conn, u, "2026-08-29T15:55:00Z");
+        assert_eq!(
+            members_missing_update(&conn, DATE, "2026-08-29T15:50:00Z").unwrap(),
+            vec!["1"]
+        );
+    }
+
+    #[test]
+    fn members_on_leave_are_excluded_everywhere() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        seed_leave(&conn, "1", DATE);
+        assert!(members_missing_todo(&conn, DATE, OPEN).unwrap().is_empty());
+        assert!(members_with_no_activity(&conn, DATE).unwrap().is_empty());
+        entries::insert_todo(&conn, "1", DATE, "x", None, None).unwrap();
+        assert!(
+            members_missing_update(&conn, DATE, OPEN)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn record_missed_skips_a_waived_kind() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        let day = DayCutoffs {
+            todo_waived: true,
+            ..open_day()
+        };
+        record_missed(&conn, DATE, &day).unwrap();
+        let kinds: Vec<String> = conn
+            .prepare("SELECT kind FROM missed_submissions")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(kinds.is_empty(), "{kinds:?}");
+        assert!(crate::reminders::already_sent(&conn, DATE, "missed_recorded").unwrap());
+    }
+
+    #[test]
+    fn backfill_records_nothing_for_a_day_the_bot_was_not_up() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        entries::insert_todo(&conn, "1", "2026-09-29", "x", None, None).unwrap();
+        // No uptime coverage: both windows waived, but the day is still marked.
+        let got = backfill_missed(&conn, "2026-10-01", false, &utc_rules()).unwrap();
+        assert_eq!(got, vec!["2026-09-29"]);
+        assert!(missed_ids(&conn).is_empty());
+    }
+
+    #[test]
+    fn rederive_member_clears_then_restores_misses() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        seed_member(&conn, "2", "B");
+        let rules = covered_utc_rules(&conn, DATE);
+        record_missed(
+            &conn,
+            DATE,
+            &crate::cutoffs::day_cutoffs(&conn, &rules, DATE).unwrap(),
+        )
+        .unwrap();
+        seed_leave(&conn, "1", DATE);
+        rederive_member(&conn, "1", &[DATE.into()], &rules, Some("2026-01-01")).unwrap();
+        assert_eq!(missed_ids(&conn), vec!["2"]);
+        leave::remove(&conn, "1", &[DATE.into()]).unwrap();
+        rederive_member(&conn, "1", &[DATE.into()], &rules, Some("2026-01-01")).unwrap();
+        assert_eq!(missed_ids(&conn), vec!["1", "2"]);
+    }
+
+    #[test]
+    fn rederive_member_before_rules_since_only_clears_for_leave() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        let rules = covered_utc_rules(&conn, DATE);
+        record_missed(&conn, DATE, &open_day()).unwrap();
+        // No leave: an old-rule miss is left alone.
+        rederive_member(&conn, "1", &[DATE.into()], &rules, Some("2026-09-01")).unwrap();
+        assert_eq!(missed_ids(&conn), vec!["1"]);
+        // Leave added: cleared. Removed again: not re-judged under the new rules.
+        seed_leave(&conn, "1", DATE);
+        rederive_member(&conn, "1", &[DATE.into()], &rules, Some("2026-09-01")).unwrap();
+        assert!(missed_ids(&conn).is_empty());
+        leave::remove(&conn, "1", &[DATE.into()]).unwrap();
+        rederive_member(&conn, "1", &[DATE.into()], &rules, Some("2026-09-01")).unwrap();
+        assert!(missed_ids(&conn).is_empty());
+    }
+
+    #[test]
+    fn rederive_member_ignores_unrecorded_days() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        let rules = covered_utc_rules(&conn, DATE);
+        rederive_member(&conn, "1", &[DATE.into()], &rules, Some("2026-01-01")).unwrap();
+        assert!(missed_ids(&conn).is_empty());
+        assert!(!crate::reminders::already_sent(&conn, DATE, "missed_recorded").unwrap());
     }
 }
