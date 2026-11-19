@@ -253,16 +253,6 @@ impl Config {
             }
             None => defaults.update_time,
         };
-        let todo_cutoff_time = match raw.schedule.todo_cutoff_time {
-            Some(s) => parse_time(&s)
-                .with_context(|| format!("invalid schedule.todo_cutoff_time: {s:?}"))?,
-            None => defaults.todo_cutoff_time,
-        };
-        let progress_cutoff_time = match raw.schedule.progress_cutoff_time {
-            Some(s) => parse_time(&s)
-                .with_context(|| format!("invalid schedule.progress_cutoff_time: {s:?}"))?,
-            None => defaults.progress_cutoff_time,
-        };
         let meeting_time = match raw.schedule.meeting_time {
             Some(s) => {
                 parse_time(&s).with_context(|| format!("invalid schedule.meeting_time: {s:?}"))?
@@ -273,6 +263,19 @@ impl Config {
             Some(s) => parse_time(&s)
                 .with_context(|| format!("invalid schedule.day_summary_time: {s:?}"))?,
             None => defaults.day_summary_time,
+        };
+        // An unset cut-off is its default moved to fit the times around it,
+        // so a config written before the cut-offs existed (e.g.
+        // day_summary_time = "15:30") still loads after an upgrade.
+        let progress_cutoff_time = match raw.schedule.progress_cutoff_time {
+            Some(s) => parse_time(&s)
+                .with_context(|| format!("invalid schedule.progress_cutoff_time: {s:?}"))?,
+            None => fit(defaults.progress_cutoff_time, update_time, day_summary_time),
+        };
+        let todo_cutoff_time = match raw.schedule.todo_cutoff_time {
+            Some(s) => parse_time(&s)
+                .with_context(|| format!("invalid schedule.todo_cutoff_time: {s:?}"))?,
+            None => fit(defaults.todo_cutoff_time, todo_time, progress_cutoff_time),
         };
         let timezone = match raw.timezone {
             Some(s) => parse_timezone(&s).with_context(|| format!("invalid timezone: {s:?}"))?,
@@ -325,6 +328,14 @@ impl Config {
         check_schedule_order(&config)?;
         Ok(config)
     }
+}
+
+/// An unset cut-off: `default` capped at `hi` (the next time it must not
+/// pass), or `hi` itself when that cap isn't after `lo` (the reminder it
+/// must follow).
+fn fit(default: Time, lo: Time, hi: Time) -> Time {
+    let t = default.min(hi);
+    if t > lo { t } else { hi }
 }
 
 /// `todo_time < todo_cutoff_time <= progress_cutoff_time <= day_summary_time`
@@ -509,8 +520,26 @@ mod tests {
     }
 
     #[test]
+    fn unset_cutoffs_fit_an_older_schedule() {
+        use jiff::civil::time;
+        let load = |toml: &str| {
+            let (_dir, path) = write_config(toml);
+            Config::from_raw(read_raw_config(&path).unwrap()).unwrap()
+        };
+        // Summary before 15:50: the /progress cut-off moves up to it.
+        let c = load("[schedule]\nday_summary_time = \"15:30\"\n");
+        assert_eq!(c.progress_cutoff_time, time(15, 30, 0, 0));
+        assert_eq!(c.todo_cutoff_time, time(11, 0, 0, 0));
+        // Reminders at or after the default cut-offs: each falls back to
+        // the next time it must not pass.
+        let c = load("[schedule]\ntodo_time = \"11:30\"\nupdate_time = \"15:55\"\n");
+        assert_eq!(c.progress_cutoff_time, time(16, 0, 0, 0));
+        assert_eq!(c.todo_cutoff_time, time(16, 0, 0, 0));
+    }
+
+    #[test]
     fn ordering_error_names_both_keys() {
-        let (_dir, path) = write_config("[schedule]\nupdate_time = \"16:00\"\n");
+        let (_dir, path) = write_config("[schedule]\nprogress_cutoff_time = \"14:00\"\n");
         let err = format!(
             "{:#}",
             Config::from_raw(read_raw_config(&path).unwrap()).unwrap_err()

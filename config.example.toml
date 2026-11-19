@@ -50,6 +50,13 @@
 # Deadline for /progress: every todo submitted before this needs at
 # least one report submitted before this.
 # progress_cutoff_time = "15:50"
+#
+# Order: todo_time < todo_cutoff_time <= progress_cutoff_time <=
+# day_summary_time, and update_time < progress_cutoff_time; dispatchd
+# won't start otherwise. A cut-off left unset is moved to fit: capped at
+# the next time it must not pass, or set to it when the default would land
+# at or before its reminder (e.g. day_summary_time = "15:30" gives a 15:30
+# /progress cut-off).
 
 # When the daily team meeting actually starts.
 # meeting_time = "16:00"

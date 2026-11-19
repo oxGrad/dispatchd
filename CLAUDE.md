@@ -268,7 +268,9 @@ src/
                  [schedule] todo_cutoff_time (11:00) / progress_cutoff_time
                  (15:50), validated at load: todo_time < todo_cutoff_time
                  <= progress_cutoff_time <= day_summary_time and
-                 update_time < progress_cutoff_time
+                 update_time < progress_cutoff_time. An unset cut-off is
+                 fitted to the times around it (fit), so a pre-cut-off
+                 config still loads
   db/            SQLite connection + embedded migrations (0005 adds
                  members.is_admin, 0006 adds missed_submissions - never
                  pruned by maintenance.rs, same as entries; 0007 indexes
