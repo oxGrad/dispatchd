@@ -43,6 +43,14 @@
 # /progress report against their todos.
 # update_time = "15:00"
 
+# Deadline for the day's /todo. A todo submitted after this counts as
+# missed. Members still missing one are @mentioned in the thread.
+# todo_cutoff_time = "11:00"
+
+# Deadline for /progress: every todo submitted before this needs at
+# least one report submitted before this.
+# progress_cutoff_time = "15:50"
+
 # When the daily team meeting actually starts.
 # meeting_time = "16:00"
 
