@@ -666,15 +666,8 @@ pub async fn handle_leave(
         result.unwrap_or_else(failed)
     };
 
-    let reply = CreateInteractionResponseMessage::new()
-        .content(reply_text)
-        .ephemeral(true);
-    if let Err(e) = command
-        .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
-        .await
-    {
-        eprintln!("failed to respond to /team leave: {e}");
-    }
+    let chunks = status::split_into_messages(&reply_text, 1900);
+    reply_in_chunks(ctx, command, Ok(chunks), "No leave.", "/team leave").await;
 }
 
 pub async fn handle_skip_meeting(
@@ -778,6 +771,29 @@ mod tests {
             leave_removed_reply("Bima", 2),
             "✅ Removed 2 leave day(s) for Bima."
         );
+    }
+
+    #[test]
+    fn long_leave_list_splits_within_discord_limit() {
+        let rows: Vec<LeaveDay> = (1..=28)
+            .flat_map(|d| {
+                (0..4).map(move |m| LeaveDay {
+                    date: format!("2026-11-{d:02}"),
+                    discord_user_id: m.to_string(),
+                    name: format!("Member{m}"),
+                    reason: Reason::Leave,
+                })
+            })
+            .collect();
+        let text = format_leave_list(&rows, "2026-11-01", "2026-11-30");
+        assert!(text.len() > 2000);
+        let chunks = status::split_into_messages(&text, 2000);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 2000));
+        let joined = chunks.join("\n");
+        for line in text.lines() {
+            assert!(joined.contains(line), "missing {line}");
+        }
     }
 
     #[test]
