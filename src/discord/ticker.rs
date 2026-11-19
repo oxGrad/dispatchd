@@ -133,30 +133,24 @@ async fn tick(
     let update_followup_trigger = config.update_time
         + jiff::SignedDuration::from_mins(config.update_followup_delay_minutes.into());
 
-    if is_due(now_time, todo_followup_trigger)
-        && let Some(cutoff) = cutoff_str(&date, rules.todo_cutoff, &rules.tz)
-    {
+    if is_due(now_time, todo_followup_trigger) {
         maybe_fire_followups(
             http,
             db,
             &date,
             "todo_followup",
             followups::members_missing_todo,
-            &cutoff,
             "📋 don't forget to submit your `/todo` for today!",
         )
         .await;
     }
-    if is_due(now_time, update_followup_trigger)
-        && let Some(cutoff) = cutoff_str(&date, rules.progress_cutoff, &rules.tz)
-    {
+    if is_due(now_time, update_followup_trigger) {
         maybe_fire_followups(
             http,
             db,
             &date,
             "update_followup",
             followups::members_missing_update,
-            &cutoff,
             "⏰ don't forget to submit a `/progress add` report for today's todo(s)!",
         )
         .await;
@@ -880,37 +874,23 @@ fn quote_block(text: &str) -> String {
     format!("\n> {}", text.replace('\n', "\n> "))
 }
 
-/// UTC instant of local `time` on `date`, as the text `created_at` is
-/// compared against. The live nags ignore uptime waivers, so this is all
-/// they need. On a conversion failure it logs and returns `None`, and the
-/// caller skips that nag for the tick (a false nag is worse than a missed
-/// one).
-fn cutoff_str(date: &str, time: jiff::civil::Time, tz: &jiff::tz::TimeZone) -> Option<String> {
-    match crate::cutoffs::instant(date, time, tz) {
-        Ok(t) => Some(t.to_string()),
-        Err(e) => {
-            eprintln!("failed to compute cut-off instant for {date}: {e}");
-            None
-        }
-    }
-}
-
 /// Nags each member `query` returns as missing something for `date`, one
 /// in-thread `@mention` per person, skipping anyone already nagged today
 /// (per the doc's "at most once" framing - a restart mid-way through
-/// nagging several people won't re-nag the ones already done).
+/// nagging several people won't re-nag the ones already done). Asks
+/// "anything yet?" (`NO_CUTOFF`), not "anything on time?", so a nag that
+/// fires after the cut-off doesn't tell a late submitter to submit again.
 async fn maybe_fire_followups(
     http: &Arc<Http>,
     db: &Arc<Mutex<Connection>>,
     date: &str,
     kind: &str,
     query: fn(&Connection, &str, &str) -> anyhow::Result<Vec<String>>,
-    cutoff: &str,
     message: &str,
 ) {
     let missing = {
         let conn = db.lock().expect("db mutex poisoned");
-        query(&conn, date, cutoff)
+        query(&conn, date, crate::cutoffs::NO_CUTOFF)
     };
     let missing = match missing {
         Ok(ids) if ids.is_empty() => return,

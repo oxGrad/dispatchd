@@ -95,12 +95,16 @@ pub fn rules_apply(conn: &Connection, date: &str) -> Result<bool> {
     Ok(rules_since(conn)?.is_some_and(|since| date >= since.as_str()))
 }
 
+/// A cut-off that never passes: counts every submission of the day, the
+/// old end-of-day rule. Also what the follow-up nags use, since they ask
+/// "anything yet?", not "anything on time?".
+pub const NO_CUTOFF: &str = "9999-12-31T00:00:00Z";
+
 /// `date`'s cut-off instants and downtime waivers. Before the rules apply
 /// (`rules_apply`), the old end-of-day rule: no cut-off, nothing waived -
 /// so the alert, recording, backfill and re-derivation all agree.
 pub fn day_cutoffs(conn: &Connection, rules: &Rules, date: &str) -> Result<DayCutoffs> {
     if !rules_apply(conn, date)? {
-        const NO_CUTOFF: &str = "9999-12-31T00:00:00Z";
         return Ok(DayCutoffs {
             todo_cutoff: NO_CUTOFF.into(),
             progress_cutoff: NO_CUTOFF.into(),
