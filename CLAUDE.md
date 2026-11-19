@@ -491,7 +491,9 @@ src/
   cutoffs.rs     Rules (from Config: tz, the four times, uptime tolerance
                  of 2 x ticker_interval_seconds), instant (local time ->
                  UTC Timestamp), uptime spans (start_span at ticker
-                 startup, touch_span every tick; never pruned) + covered /
+                 startup, touch_span from its own heartbeat task every
+                 ticker interval - not the tick, so a slow tick never
+                 reads as downtime; never pruned) + covered /
                  day_cutoffs (a cut-off is waived when the spans leave a
                  gap in its own window: todo_time -> todo_cutoff for
                  /todo, update_time -> progress_cutoff for /progress),
@@ -704,7 +706,8 @@ src/
                     alert @-mentioning whoever is still missing it
                     (cutoff_alert_message), or a no-mention waiver notice
                     when the bot's uptime had a gap before that cut-off.
-                    Startup records an uptime span, touched every tick
+                    Startup records an uptime span, touched by its own
+                    heartbeat task
     recap.rs       /recap start:<date> end:<date> (none = today, one =
                     that day, both = range - recap::resolve_day_or_range)
                     and /recap-biweekly (no options, recap::biweekly_range

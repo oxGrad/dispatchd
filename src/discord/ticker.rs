@@ -55,10 +55,29 @@ pub async fn run(
         span_id
     };
 
-    let mut interval = tokio::time::interval(Duration::from_secs(config.ticker_interval_seconds));
+    let every = Duration::from_secs(config.ticker_interval_seconds);
+    // Uptime is bumped by its own task, not the tick, so a tick stuck on
+    // slow or rate-limited Discord calls can't look like downtime and
+    // waive a cut-off. Runs every day, weekends included; day_cutoffs
+    // treats a window as waived unless this keeps up.
+    if let Some(id) = span_id {
+        let db = db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(every);
+            loop {
+                interval.tick().await;
+                let conn = db.lock().expect("db mutex poisoned");
+                if let Err(e) = crate::cutoffs::touch_span(&conn, id, jiff::Timestamp::now()) {
+                    eprintln!("failed to touch uptime span: {e}");
+                }
+            }
+        });
+    }
+
+    let mut interval = tokio::time::interval(every);
     loop {
         interval.tick().await;
-        tick(&http, &db, channel_id, &config, &rules, span_id).await;
+        tick(&http, &db, channel_id, &config, &rules).await;
     }
 }
 
@@ -68,18 +87,8 @@ async fn tick(
     channel_id: ChannelId,
     config: &Config,
     rules: &crate::cutoffs::Rules,
-    span_id: Option<i64>,
 ) {
-    let ts = jiff::Timestamp::now();
-    // Uptime is tracked every day, so this precedes the weekend return.
-    // day_cutoffs treats a window as waived unless this has been bumped.
-    if let Some(id) = span_id {
-        let conn = db.lock().expect("db mutex poisoned");
-        if let Err(e) = crate::cutoffs::touch_span(&conn, id, ts) {
-            eprintln!("failed to touch uptime span: {e}");
-        }
-    }
-    let now = ts.to_zoned_datetime(config.timezone.clone());
+    let now = jiff::Timestamp::now().to_zoned_datetime(config.timezone.clone());
     if !config.run_on_weekends && is_weekend(now.weekday()) {
         return;
     }
