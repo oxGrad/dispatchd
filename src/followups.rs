@@ -99,27 +99,6 @@ pub fn members_with_no_activity(conn: &Connection, date: &str) -> Result<Vec<Str
     Ok(ids)
 }
 
-/// One member's detail for the `/missed` report: every date in the
-/// queried range they missed `/todo` entirely, and every date they left a
-/// todo with no `/progress` report against it, each ascending. Built from
-/// `missed_submissions` (see `record_missed` below), not computed live -
-/// only members with at least one miss are returned by `missed_detail`, a
-/// clean record isn't worth a row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MissedDetail {
-    pub member: String,
-    pub missed_todo_dates: Vec<String>,
-    pub missed_update_dates: Vec<String>,
-}
-
-impl MissedDetail {
-    /// Total missed days across both kinds - the ranking `/missed`'s
-    /// summary table sorts by, most-missed first.
-    fn missed_days(&self) -> usize {
-        self.missed_todo_dates.len() + self.missed_update_dates.len()
-    }
-}
-
 /// Records `date`'s miss snapshot into `missed_submissions`: one row per
 /// member per kind (skipping a kind `day` waives) - 'todo' from
 /// `members_missing_todo` (no todo submitted before the cut-off), 'update' from `members_missing_update` (had a todo
@@ -127,7 +106,7 @@ impl MissedDetail {
 /// the tighter, more actionable signal than "posted zero updates all
 /// day", and one that correctly excludes a member with no todo at all,
 /// since `members_missing_todo` already covers that case). A member
-/// hitting both gets a row of each kind, so `/missed` can report on
+/// hitting both gets a row of each kind, so `/team performance` can report on
 /// either independently. Writes the day's `missed_recorded` marker in
 /// the same transaction, so a day is never half-recorded or recorded
 /// without its marker (which the ticker and `backfill_missed` check).
@@ -227,7 +206,7 @@ const MISSED_BACKFILL_DAYS: i64 = 14;
 /// Records the miss snapshot for any past day in the last
 /// `MISSED_BACKFILL_DAYS` the ticker never got to - the bot was down at
 /// `day_summary_time` and only came back after midnight, so without this
-/// `/missed` would silently report nobody missing anything that day. Only
+/// `/team performance` would silently report nobody missing anything that day. Only
 /// days with at least one entry count: a day nobody submitted anything is
 /// far more likely a holiday (or the bot, and with it the ritual, being
 /// off) than the whole team missing it, and recording it would blame
@@ -266,117 +245,6 @@ pub fn backfill_missed(
         recorded.push(date);
     }
     Ok(recorded)
-}
-
-/// The `/missed` report's underlying data: one `MissedDetail` per member
-/// with at least one miss in `[start, end]` (inclusive) per
-/// `missed_submissions`, alphabetical by name (the summary table
-/// `format_missed_report_file` renders below the detail re-sorts by day
-/// count - this order is about finding a specific member's section
-/// quickly).
-/// `start`/`end` are trusted to already be validated `YYYY-MM-DD` strings
-/// (see `recap::resolve_day_or_range`, reused by the command).
-pub fn missed_detail(conn: &Connection, start: &str, end: &str) -> Result<Vec<MissedDetail>> {
-    let mut stmt = conn.prepare(
-        "SELECT COALESCE(m.name, ms.discord_user_id) AS member, ms.date, ms.kind
-         FROM missed_submissions ms
-         LEFT JOIN members m ON m.discord_user_id = ms.discord_user_id
-         WHERE ms.date >= ?1 AND ms.date <= ?2
-         ORDER BY member ASC, ms.date ASC",
-    )?;
-    let rows = stmt
-        .query_map(params![start, end], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    let mut details: Vec<MissedDetail> = Vec::new();
-    for (member, date, kind) in rows {
-        if details.last().is_none_or(|d| d.member != member) {
-            details.push(MissedDetail {
-                member,
-                missed_todo_dates: Vec::new(),
-                missed_update_dates: Vec::new(),
-            });
-        }
-        let detail = details.last_mut().expect("just pushed above");
-        match kind.as_str() {
-            "todo" => detail.missed_todo_dates.push(date),
-            "update" => detail.missed_update_dates.push(date),
-            _ => {}
-        }
-    }
-    Ok(details)
-}
-
-/// Renders the `/missed` report as `.md` file content: a per-member
-/// detail section - which exact dates they missed `/todo` and which they
-/// missed `/progress` - then a summary table of day counts across the
-/// whole range ranked most-missed first (`status::render_aligned_table`,
-/// so the columns actually line up in the file). `None` when `details` is
-/// empty - the caller shows a plain "nothing missed" message instead, no
-/// file needed. Dates render short (`entries::short_date`, e.g. "Sep 15"),
-/// same as everywhere else a date reaches a Discord reply.
-pub fn format_missed_report_file(
-    details: &[MissedDetail],
-    start: &str,
-    end: &str,
-) -> Option<String> {
-    if details.is_empty() {
-        return None;
-    }
-
-    let mut out = format!("# Missed submissions ({start} to {end})\n");
-    for detail in details {
-        out.push_str(&format!("\n## {}\n", detail.member.replace('|', "/")));
-        if !detail.missed_todo_dates.is_empty() {
-            out.push_str(&format!(
-                "- Missed /todo: {}\n",
-                short_date_list(&detail.missed_todo_dates)
-            ));
-        }
-        if !detail.missed_update_dates.is_empty() {
-            out.push_str(&format!(
-                "- Missed /progress: {}\n",
-                short_date_list(&detail.missed_update_dates)
-            ));
-        }
-    }
-
-    let mut ranked: Vec<&MissedDetail> = details.iter().collect();
-    ranked.sort_by(|a, b| {
-        b.missed_days()
-            .cmp(&a.missed_days())
-            .then_with(|| a.member.cmp(&b.member))
-    });
-    let headers = ["Member", "Missed /todo", "Missed /progress"];
-    let rows: Vec<Vec<String>> = ranked
-        .iter()
-        .map(|d| {
-            vec![
-                d.member.replace('|', "/"),
-                d.missed_todo_dates.len().to_string(),
-                d.missed_update_dates.len().to_string(),
-            ]
-        })
-        .collect();
-    out.push_str(&format!(
-        "\n## Summary\n\n{}",
-        crate::status::render_aligned_table(&headers, &rows)
-    ));
-    Some(out)
-}
-
-fn short_date_list(dates: &[String]) -> String {
-    dates
-        .iter()
-        .map(|d| crate::entries::short_date(d))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 #[cfg(test)]
@@ -620,47 +488,35 @@ mod tests {
         );
     }
 
+    fn missed_rows(conn: &Connection, date: &str) -> Vec<(String, String)> {
+        conn.prepare(
+            "SELECT discord_user_id, kind FROM missed_submissions WHERE date = ?1 ORDER BY 1, 2",
+        )
+        .unwrap()
+        .query_map([date], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    fn row(id: &str, kind: &str) -> (String, String) {
+        (id.to_string(), kind.to_string())
+    }
+
     #[test]
     fn record_missed_writes_a_row_per_kind_for_each_missing_member() {
         let conn = open_test_db();
         seed_member(&conn, "1", "Alice"); // no todo at all - todo miss only
-        seed_member(&conn, "2", "Budi"); // todo left with no update - both
+        seed_member(&conn, "2", "Budi"); // todo left with no update - update miss
 
         entries::insert_todo(&conn, "2", DATE, "b", None, None).unwrap();
 
         record_missed(&conn, DATE, &open_day()).unwrap();
 
-        let detail = missed_detail(&conn, DATE, DATE).unwrap();
         assert_eq!(
-            detail,
-            vec![
-                MissedDetail {
-                    member: "Alice".to_string(),
-                    missed_todo_dates: vec![DATE.to_string()],
-                    missed_update_dates: vec![],
-                },
-                MissedDetail {
-                    member: "Budi".to_string(),
-                    missed_todo_dates: vec![],
-                    missed_update_dates: vec![DATE.to_string()],
-                },
-            ]
+            missed_rows(&conn, DATE),
+            vec![row("1", "todo"), row("2", "update")]
         );
-    }
-
-    #[test]
-    fn record_missed_excludes_a_member_with_no_todo_from_the_update_miss() {
-        // A total no-show (no todo, no update) is a todo miss, not an
-        // "also missed update" - there's nothing to have reported
-        // progress against in the first place.
-        let conn = open_test_db();
-        seed_member(&conn, "1", "Alice");
-
-        record_missed(&conn, DATE, &open_day()).unwrap();
-
-        let detail = missed_detail(&conn, DATE, DATE).unwrap();
-        assert_eq!(detail[0].missed_todo_dates, vec![DATE.to_string()]);
-        assert!(detail[0].missed_update_dates.is_empty());
     }
 
     #[test]
@@ -672,13 +528,11 @@ mod tests {
         record_missed(&conn, DATE, &open_day()).unwrap();
         record_missed(&conn, DATE, &open_day()).unwrap();
 
-        let detail = missed_detail(&conn, DATE, DATE).unwrap();
-        assert_eq!(detail[0].missed_todo_dates, Vec::<String>::new());
-        assert_eq!(detail[0].missed_update_dates, vec![DATE.to_string()]);
+        assert_eq!(missed_rows(&conn, DATE), vec![row("1", "update")]);
     }
 
     #[test]
-    fn missed_detail_is_empty_for_a_member_with_no_misses() {
+    fn record_missed_writes_nothing_for_a_member_with_no_misses() {
         let conn = open_test_db();
         seed_member(&conn, "1", "Alice");
         let todo = entries::insert_todo(&conn, "1", DATE, "a", None, None).unwrap();
@@ -686,101 +540,7 @@ mod tests {
 
         record_missed(&conn, DATE, &open_day()).unwrap();
 
-        assert!(missed_detail(&conn, DATE, DATE).unwrap().is_empty());
-    }
-
-    #[test]
-    fn missed_detail_lists_every_missed_todo_date_in_range_and_excludes_outside_days() {
-        let conn = open_test_db();
-        seed_member(&conn, "1", "Alice"); // no todo on any of the three days
-
-        record_missed(&conn, "2026-08-28", &open_day()).unwrap();
-        record_missed(&conn, "2026-08-29", &open_day()).unwrap();
-        record_missed(&conn, "2026-08-30", &open_day()).unwrap();
-
-        let detail = missed_detail(&conn, "2026-08-28", "2026-08-29").unwrap();
-        assert_eq!(detail.len(), 1);
-        assert_eq!(
-            detail[0].missed_todo_dates,
-            vec!["2026-08-28".to_string(), "2026-08-29".to_string()]
-        );
-        assert!(detail[0].missed_update_dates.is_empty());
-    }
-
-    #[test]
-    fn missed_detail_lists_every_missed_update_date_in_range_and_excludes_outside_days() {
-        let conn = open_test_db();
-        seed_member(&conn, "1", "Alice");
-
-        // A todo every day, never updated - the tighter "missed /progress"
-        // signal, not a blanket zero-activity day.
-        for date in ["2026-08-28", "2026-08-29", "2026-08-30"] {
-            entries::insert_todo(&conn, "1", date, "a", None, None).unwrap();
-            record_missed(&conn, date, &open_day()).unwrap();
-        }
-
-        let detail = missed_detail(&conn, "2026-08-28", "2026-08-29").unwrap();
-        assert_eq!(detail.len(), 1);
-        assert!(detail[0].missed_todo_dates.is_empty());
-        assert_eq!(
-            detail[0].missed_update_dates,
-            vec!["2026-08-28".to_string(), "2026-08-29".to_string()]
-        );
-    }
-
-    #[test]
-    fn missed_detail_is_ordered_alphabetically_by_member() {
-        let conn = open_test_db();
-        seed_member(&conn, "1", "Zed"); // no todo, no update at all - todo miss only
-        seed_member(&conn, "2", "Alice"); // ad-hoc update posted, no todo - todo miss only
-
-        entries::insert_update(&conn, "2", DATE, "hotfix", None, "done", "x", None).unwrap();
-
-        record_missed(&conn, DATE, &open_day()).unwrap();
-
-        let detail = missed_detail(&conn, DATE, DATE).unwrap();
-        let members: Vec<&str> = detail.iter().map(|d| d.member.as_str()).collect();
-        assert_eq!(members, vec!["Alice", "Zed"]);
-    }
-
-    #[test]
-    fn format_missed_report_file_is_none_when_details_are_empty() {
-        assert_eq!(
-            format_missed_report_file(&[], "2026-08-01", "2026-08-14"),
-            None
-        );
-    }
-
-    #[test]
-    fn format_missed_report_file_lists_dates_per_member_then_an_aligned_ranked_summary_table() {
-        let details = vec![
-            MissedDetail {
-                member: "Alice".to_string(),
-                missed_todo_dates: vec![],
-                missed_update_dates: vec!["2026-08-01".to_string()],
-            },
-            MissedDetail {
-                member: "Zed".to_string(),
-                missed_todo_dates: vec!["2026-08-01".to_string(), "2026-08-02".to_string()],
-                missed_update_dates: vec!["2026-08-02".to_string()],
-            },
-        ];
-        let out = format_missed_report_file(&details, "2026-08-01", "2026-08-14").unwrap();
-        assert!(out.starts_with("# Missed submissions (2026-08-01 to 2026-08-14)\n"));
-        assert!(out.contains("## Alice\n- Missed /progress: Aug 1\n"));
-        assert!(out.contains("## Zed\n- Missed /todo: Aug 1, Aug 2\n- Missed /progress: Aug 2\n"));
-        assert!(out.contains("## Summary\n\n| Member"));
-
-        // Zed (2+1=3 missed days) outranks Alice (0+1=1) in the summary,
-        // and every table line (header, separator, both rows) lines up.
-        let table_lines: Vec<&str> = out.lines().skip_while(|l| !l.starts_with('|')).collect();
-        assert_eq!(table_lines.len(), 4);
-        let width = table_lines[0].chars().count();
-        for line in &table_lines {
-            assert_eq!(line.chars().count(), width, "misaligned line: {line:?}");
-        }
-        assert!(table_lines[2].contains("Zed"));
-        assert!(table_lines[3].contains("Alice"));
+        assert!(missed_rows(&conn, DATE).is_empty());
     }
 
     #[test]

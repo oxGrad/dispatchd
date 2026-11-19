@@ -32,7 +32,7 @@ posts into a "Standup: YYYY-MM-DD" thread in the team's standup channel:
    todo nor a progress update today at all - skipped entirely if nobody
    qualifies. Either way, today's misses (per-member, `/todo` and
    `/progress` tracked independently) are recorded permanently, so the
-   tech lead can review any date range later with `/missed` (see below).
+   tech lead can review any date range later with `/team performance` (see below).
    With the [GitHub integration](github-setup.md) on, the message also
    gets a one-line team total (`GitHub: 3 PRs merged · 1 sub-issue closed
    (D.P.1.2) · 4 reviews`, no names), and the attachment gains a `SOW` and
@@ -44,6 +44,31 @@ If you miss a step, dispatchd nags you with an `@mention` in the thread a
 while after each of the two prompts above (default 30 minutes) - once per
 person per day, not on every tick. The exact times and delays are
 configurable per team, so treat the above as defaults, not guarantees.
+
+### Cut-offs, alerts and the downtime waiver
+
+Submitting late counts as missing. The morning ping opens with the standing
+rules, including two deadlines (defaults shown, both configurable):
+
+- **`/todo` cut-off, 11:00** - a todo submitted after this counts as a
+  missed `/todo`.
+- **`/progress` cut-off, 15:50** - every todo submitted before this needs
+  at least one `/progress` report submitted before it, or it counts as a
+  missed `/progress`.
+
+`/todo` and `/progress` are tracked independently; one doesn't cover the
+other. When a cut-off passes, dispatchd posts an alert in the thread that
+`@mentions` everyone still missing it, and says the miss has been recorded.
+Submitting afterwards doesn't undo the miss, but the work still shows up
+as normal.
+
+If the bot itself was offline at any point between the start of the
+working day and a cut-off, that cut-off is **waived** for the day: nobody is
+marked as missing, and the thread gets a notice with no mentions asking
+everyone to submit anyway. A short restart doesn't trigger this - only a
+real gap in the bot's uptime does. The tech lead can mark a member on
+leave or sick for a day with `/team leave` (see below), which stops the
+nags and records no miss for those days.
 
 All of this happens automatically - you don't run any command to make the
 thread or reminders appear. You only need the commands below to actually
@@ -305,24 +330,28 @@ it can go to stakeholders as is. Both commands take an optional
 tables (standup, GitHub work not on a todo, code reviews) with names, for
 your own use.
 
-## `/missed` - tech lead only
+## `/team performance` - tech lead only
 
-`/missed start:<date> end:<date>` reports who missed a `/todo`, a
-`/progress` update, or both, on each day in the range. "Missed
-`/progress`" means a todo that day with no report filed against it, not
-just an entirely quiet day - if you had nothing planned, that's a missed
-`/todo` instead, not double-counted as a missed update too. Like
-`/recap`, the reply is a short message with a `.md` file attached: a
-section per member listing the exact dates they missed each one, then a
-column-aligned summary table ranking everyone by total missed days.
-Same date handling as `/recap` (no dates = today, one date = just that
-day, both = the range); there's no biweekly shortcut, pass both dates for
-a two-week view. This reads from a daily snapshot the bot takes at
-`day_summary_time` (see "The daily ritual" above), not a live query, so a
-day only shows up here once that snapshot has run - if your range
-includes today and the snapshot hasn't run yet, the reply says so. Members with a clean record
-for the whole range aren't listed at all, and if nobody missed anything
-you just get a plain "nothing missed" message with no attachment.
+`/team performance start:<date> end:<date>` is the per-member review for a
+period: no dates = this month, one date = just that day, both = the range
+(up to a year). The reply is a short message with a `.md` file attached,
+holding:
+
+- **Standup discipline** - per member: days expected (working days the bot
+  recorded, minus leave and sick days), leave and sick day counts, missed
+  `/todo` and missed `/progress` counts, and the share of expected days
+  submitted on time. Misses follow the cut-off rules above, and a day whose
+  cut-off was waived for downtime is not counted against anyone.
+- **Output** - tasks, how many were done, and days spent blocked; with the
+  [GitHub integration](github-setup.md) on, also PRs merged and open,
+  reviews and sub-issues closed.
+- A per-member list of the exact dates behind each count.
+
+A day only counts as expected once the bot has taken its end-of-day
+snapshot (at `day_summary_time`), so if the range includes today and that
+hasn't happened yet, the reply says so. If the range starts before the
+cut-offs were introduced, the file notes that earlier misses were judged by
+the old end-of-day rule.
 
 ## View-only access - the `viewer` role
 

@@ -1,6 +1,5 @@
 //! Per-member review report (`/team performance`): standup discipline plus
 //! output, as data and `.md` rendering. Serenity-free.
-#![allow(dead_code)] // the `/team performance` command uses this; removed with it
 
 use crate::entries::short_date;
 use crate::github::report::{MemberActivity, team_activity, window};

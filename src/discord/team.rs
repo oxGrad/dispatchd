@@ -1,24 +1,28 @@
 use std::sync::{Arc, Mutex};
 
+use jiff::civil::{Date, Time};
 use jiff::tz::TimeZone;
 use rusqlite::Connection;
 use serenity::all::{
     AutocompleteChoice, ChannelId, CommandDataOption, CommandDataOptionValue, CommandInteraction,
     CommandInteraction as AutocompleteInteraction, CommandOptionType, Context as SerenityContext,
-    CreateAutocompleteResponse, CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage, Http,
-    Permissions,
+    CreateAttachment, CreateAutocompleteResponse, CreateCommand, CreateCommandOption,
+    CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage,
+    CreateMessage, Http, Permissions,
 };
 
 use crate::cutoffs::{self, Rules};
 use crate::leave::{self, LeaveDay, Reason};
-use crate::{entries, followups, members, status};
+use crate::{entries, followups, members, performance, recap, reminders, status};
 
 use super::get_option_string;
+use super::recap::{attachment_name, range_label};
 
 pub fn command() -> CreateCommand {
     CreateCommand::new("team")
-        .description("Tech-lead tools: status, full report, reminders, GitHub activity")
+        .description(
+            "Tech-lead tools: status, report, reminders, leave, GitHub activity, performance",
+        )
         .default_member_permissions(Permissions::MANAGE_GUILD)
         .add_option(CreateCommandOption::new(
             CommandOptionType::SubCommand,
@@ -58,6 +62,21 @@ pub fn command() -> CreateCommand {
             "Cancel today's meeting and tell the team you're all caught up",
         ))
         .add_option(leave_group())
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "performance",
+                "Per-member review: standup discipline and output for a period",
+            )
+            .add_sub_option(date_option(
+                "start",
+                "Start date YYYY-MM-DD (default: this month)",
+            ))
+            .add_sub_option(date_option(
+                "end",
+                "End date YYYY-MM-DD (default: this month)",
+            )),
+        )
         .add_option(
             CreateCommandOption::new(
                 CommandOptionType::SubCommand,
@@ -461,6 +480,153 @@ pub async fn handle_github(
     reply_in_chunks(ctx, command, body, "No GitHub activity.", "/team github").await;
 }
 
+/// `/team performance [start] [end]`: the per-member review report
+/// (`performance::performance`) as a `.md` attachment; no dates = this
+/// month. The "Expected" days come from the ticker's `missed_recorded`
+/// markers, so a range that includes today before the snapshot gets
+/// `pending_today_note`.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_performance(
+    ctx: &SerenityContext,
+    command: &CommandInteraction,
+    options: &[CommandDataOption],
+    db: &Arc<Mutex<Connection>>,
+    timezone: &TimeZone,
+    github_on: bool,
+    day_summary_time: Time,
+    run_on_weekends: bool,
+) {
+    let discord_user_id = command.user.id.to_string();
+    let today = entries::today_in(timezone);
+    let start = get_option_string(options, "start");
+    let end = get_option_string(options, "end");
+
+    let body = {
+        let conn = db.lock().expect("db mutex poisoned");
+        match members::is_lead(&conn, &discord_user_id) {
+            Ok(false) => Err("⛔ This command is restricted to the tech lead.".to_string()),
+            Ok(true) => {
+                match recap::resolve_month_or_range(start.as_deref(), end.as_deref(), &today, 366) {
+                    Err(msg) => Err(msg),
+                    Ok((start, end)) => build_performance(
+                        &conn,
+                        &today,
+                        &start,
+                        &end,
+                        github_on.then_some(timezone),
+                        day_summary_time,
+                        run_on_weekends,
+                    )
+                    .map_err(|e| {
+                        eprintln!("failed to build /team performance: {e:#}");
+                        "⚠️ Something went wrong building the report.".to_string()
+                    }),
+                }
+            }
+            Err(e) => {
+                eprintln!("failed to check is_lead: {e}");
+                Err("⚠️ Something went wrong checking permissions.".to_string())
+            }
+        }
+    };
+
+    let (content, file) = match body {
+        Ok(Some((content, file, name))) => (content, Some((file, name))),
+        Ok(None) => ("No team members to report on.".to_string(), None),
+        Err(message) => (message, None),
+    };
+    let mut reply = CreateInteractionResponseMessage::new()
+        .content(content)
+        .ephemeral(true);
+    if let Some((file, name)) = file {
+        reply = reply.add_file(CreateAttachment::bytes(file.into_bytes(), name));
+    }
+    if let Err(e) = command
+        .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+        .await
+    {
+        eprintln!("failed to respond to /team performance: {e}");
+    }
+}
+
+/// `(reply text, file content, file name)`, or `None` for an empty roster.
+fn build_performance(
+    conn: &Connection,
+    today: &str,
+    start: &str,
+    end: &str,
+    github: Option<&TimeZone>,
+    day_summary_time: Time,
+    run_on_weekends: bool,
+) -> anyhow::Result<Option<(String, String, String)>> {
+    let rows = performance::performance(conn, start, end, github)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let rules_since = cutoffs::rules_since(conn)?;
+    let file = performance::format_performance_file(
+        &rows,
+        start,
+        end,
+        github.is_some(),
+        rules_since.as_deref(),
+    );
+    // A DB error here only costs the note, not the report.
+    let recorded = reminders::already_sent(conn, today, "missed_recorded").unwrap_or_else(|e| {
+        eprintln!("failed to check missed_recorded status: {e}");
+        true
+    });
+    let includes_today = start <= today && today <= end;
+    let note = pending_today_note(
+        includes_today,
+        recorded,
+        is_ritual_day(today, run_on_weekends),
+        day_summary_time,
+    );
+    let mut content = format!(
+        "📈 **Team performance ({})** - see attached.",
+        range_label(start, end)
+    );
+    if let Some(note) = note {
+        content.push('\n');
+        content.push_str(&note);
+    }
+    Ok(Some((
+        content,
+        file,
+        attachment_name("performance", start, end),
+    )))
+}
+
+/// Whether the ticker records misses for `today` at all - it skips
+/// weekends unless `run_on_weekends`, so promising a snapshot "at 16:00"
+/// on a Saturday would be wrong.
+fn is_ritual_day(today: &str, run_on_weekends: bool) -> bool {
+    run_on_weekends
+        || Date::strptime("%Y-%m-%d", today)
+            .map(|d| !super::ticker::is_weekend(d.weekday()))
+            .unwrap_or(true)
+}
+
+/// Pure - the "today isn't in yet" caveat appended to a performance reply
+/// whose range includes today before the ticker has taken today's
+/// snapshot. `None` when today is out of range, already recorded, or a day
+/// the ritual doesn't run.
+fn pending_today_note(
+    includes_today: bool,
+    recorded: bool,
+    ritual_day: bool,
+    day_summary_time: Time,
+) -> Option<String> {
+    if !includes_today || recorded || !ritual_day {
+        return None;
+    }
+    Some(format!(
+        "ℹ️ Today's misses haven't been recorded yet - that happens at {}.",
+        day_summary_time.strftime("%H:%M")
+    ))
+}
+
 pub async fn handle_autocomplete(
     ctx: &SerenityContext,
     autocomplete: &AutocompleteInteraction,
@@ -752,6 +918,35 @@ pub async fn handle_skip_meeting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn t(s: &str) -> Time {
+        Time::strptime("%H:%M", s).unwrap()
+    }
+
+    #[test]
+    fn pending_today_note_explains_an_unrecorded_today() {
+        assert_eq!(
+            pending_today_note(true, false, true, t("16:00")),
+            Some(
+                "ℹ️ Today's misses haven't been recorded yet - that happens at 16:00.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn pending_today_note_is_none_once_recorded_or_out_of_range_or_off_day() {
+        assert_eq!(pending_today_note(true, true, true, t("16:00")), None);
+        assert_eq!(pending_today_note(false, false, true, t("16:00")), None);
+        assert_eq!(pending_today_note(true, false, false, t("16:00")), None);
+    }
+
+    #[test]
+    fn is_ritual_day_skips_weekends_unless_configured() {
+        // 2026-10-17 is a Saturday, 2026-10-15 a Thursday.
+        assert!(!is_ritual_day("2026-10-17", false));
+        assert!(is_ritual_day("2026-10-17", true));
+        assert!(is_ritual_day("2026-10-15", false));
+    }
 
     #[test]
     fn leave_replies() {

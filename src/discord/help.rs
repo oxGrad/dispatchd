@@ -23,7 +23,7 @@ const HELP_TEXT: &str = "\
 `/recap start:<date> end:<date>` - (tech lead only) recap table, one per day; no dates = today, one date = just that day
 `/recap-biweekly` - (tech lead only) recap of the 14 days ending yesterday
   with GitHub configured, both become a per-deliverable report with no names; add `include_member_detail:True` for the per-day tables
-`/missed start:<date> end:<date>` - (tech lead only) who missed a /todo or /progress submission; same dates as /recap
+`/team performance start:<date> end:<date>` - (tech lead only) per-member review for a period; no dates = this month
 `/admin status` - (admin only) systemd + Discord health and version check
 `/admin upgrade` - (admin only) upgrade dispatchd to the latest release
 `/admin help` - admin-specific help
@@ -70,7 +70,7 @@ mod tests {
             "include_member_detail",
             "/recap",
             "/recap-biweekly",
-            "/missed",
+            "/team performance",
             "/admin status",
             "/admin upgrade",
             "/admin help",

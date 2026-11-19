@@ -551,7 +551,7 @@ async fn maybe_fire_missing_submissions(http: &Arc<Http>, db: &Arc<Mutex<Connect
 }
 
 /// Records `date`'s miss snapshot into `missed_submissions`
-/// (`followups::record_missed`) so `/missed` can report on it later.
+/// (`followups::record_missed`) so `/team performance` can report on it later.
 /// Independent of - and gated separately from - the two posts above: a
 /// deleted standup thread (which stops both messages from ever sending)
 /// must never stop this from being recorded, since the record itself

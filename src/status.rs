@@ -380,7 +380,7 @@ pub fn split_into_messages(full: &str, limit: usize) -> Vec<String> {
 /// (header included) - meant for a `.md` file attachment, where the
 /// alignment can actually be seen, unlike a chat message which just shows
 /// the raw pipe characters. Shared by every table-shaped report
-/// (`recap::format_day_table_file`, `followups::format_missed_report_file`)
+/// (`recap::format_day_table_file`, `performance::format_performance_file`)
 /// so the padding logic lives in one place. Callers are responsible for
 /// sanitizing cell text (no pipes or newlines) - this only pads and joins.
 pub fn render_aligned_table(headers: &[&str], rows: &[Vec<String>]) -> String {

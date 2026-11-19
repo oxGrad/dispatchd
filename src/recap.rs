@@ -73,7 +73,7 @@ pub fn biweekly_range(today: &str) -> Result<(String, String), String> {
     Ok(format_range(start, end))
 }
 
-/// Resolves the `start`/`end` options shared by `/recap` and `/missed`:
+/// Resolves the `start`/`end` options shared by `/recap`:
 /// neither given = today, exactly one given = that single day, both given
 /// = the inclusive range (at most `MAX_RECAP_DAYS`). Returns a user-facing
 /// error string rather than `anyhow::Error`: every failure here is bad
@@ -271,7 +271,7 @@ pub fn day_recap(conn: &Connection, date: &str) -> Result<Option<DayRecap>> {
 /// a carried-over task worked on today. `day_rows(date)` misses these
 /// entirely: it only pulls todos whose own `date` matches, and such an
 /// update always carries a `todo_id`, so it's excluded from `day_rows`'s
-/// ad-hoc (`todo_id IS NULL`) query too. Not used by `/recap`/`/missed`,
+/// ad-hoc (`todo_id IS NULL`) query too. Not used by `/recap`,
 /// whose per-day tables are keyed by a todo's origin day on purpose (a
 /// long-lived todo already shows there with its latest-ever status - see
 /// `recap_range_uses_the_latest_update_for_a_todo_updated_more_than_once` -

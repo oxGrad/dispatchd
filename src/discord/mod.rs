@@ -1,6 +1,5 @@
 mod admin;
 mod help;
-mod missed;
 mod progress;
 mod recap;
 mod team;
@@ -48,7 +47,6 @@ impl EventHandler for Handler {
             admin::command(),
             recap::command(),
             recap::biweekly_command(),
-            missed::command(),
         ];
         if let Err(e) = self.guild_id.set_commands(&ctx.http, commands).await {
             eprintln!("failed to register guild commands: {e}");
@@ -174,6 +172,19 @@ impl EventHandler for Handler {
                     Some(("skip-meeting", _)) => {
                         team::handle_skip_meeting(&ctx, &command, &self.db, &self.timezone).await
                     }
+                    Some(("performance", opts)) => {
+                        team::handle_performance(
+                            &ctx,
+                            &command,
+                            opts,
+                            &self.db,
+                            &self.timezone,
+                            self.github.is_some(),
+                            self.day_summary_time,
+                            self.run_on_weekends,
+                        )
+                        .await
+                    }
                     Some(("github", opts)) => {
                         team::handle_github(
                             &ctx,
@@ -214,17 +225,6 @@ impl EventHandler for Handler {
                         &self.db,
                         &self.timezone,
                         self.github.is_some(),
-                    )
-                    .await
-                }
-                "missed" => {
-                    missed::handle(
-                        &ctx,
-                        &command,
-                        &self.db,
-                        &self.timezone,
-                        self.day_summary_time,
-                        self.run_on_weekends,
                     )
                     .await
                 }

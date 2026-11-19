@@ -8,14 +8,16 @@ const RETENTION_DAYS: u32 = 90;
 /// Prunes `reminders_sent`/`followups_sent` rows older than
 /// `RETENTION_DAYS` and reclaims the freed space with `VACUUM`.
 /// `entries` is never touched - it's the retained history the biweekly
-/// recap depends on - and neither is `missed_submissions`, the retained
-/// history `/missed` depends on the same way. Returns (reminders_sent
+/// recap depends on - and neither is `missed_submissions`, nor the
+/// `missed_recorded` markers in `reminders_sent`: `/team performance`
+/// counts a day as expected only if its marker exists, over ranges up to a
+/// year. Returns (reminders_sent
 /// rows deleted, followups_sent rows deleted).
 pub fn run(conn: &Connection) -> Result<(usize, usize)> {
     let cutoff = format!("-{RETENTION_DAYS} days");
 
     let reminders_deleted = conn.execute(
-        "DELETE FROM reminders_sent WHERE date < date('now', ?1)",
+        "DELETE FROM reminders_sent WHERE date < date('now', ?1) AND type != 'missed_recorded'",
         [&cutoff],
     )?;
     let followups_deleted = conn.execute(
@@ -39,6 +41,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.keep().join("d.sqlite3");
         crate::db::open(&path).unwrap()
+    }
+
+    #[test]
+    fn missed_recorded_markers_survive_pruning() {
+        let conn = open_test_db();
+        crate::reminders::mark_sent(&conn, "2000-01-03", "missed_recorded").unwrap();
+        crate::reminders::mark_sent(&conn, "2000-01-03", "todo_reminder").unwrap();
+        run(&conn).unwrap();
+        assert!(crate::reminders::already_sent(&conn, "2000-01-03", "missed_recorded").unwrap());
+        assert!(!crate::reminders::already_sent(&conn, "2000-01-03", "todo_reminder").unwrap());
     }
 
     fn seed_reminder(conn: &Connection, date: &str) {
