@@ -818,15 +818,20 @@ pub async fn handle_leave(
         };
 
         let result = (|| -> anyhow::Result<String> {
-            let text = match reason {
+            // Remove re-judges only the days it deleted: re-deriving an
+            // untouched day would apply today's roster and cut-offs to it.
+            let (text, rejudge) = match reason {
                 Some(reason) => {
                     leave::add(&conn, &member, &days, reason)?;
-                    leave_added_reply(&name, reason, &days)
+                    (leave_added_reply(&name, reason, &days), days.clone())
                 }
-                None => leave_removed_reply(&name, leave::remove(&conn, &member, &days)?),
+                None => {
+                    let removed = leave::remove(&conn, &member, &days)?;
+                    (leave_removed_reply(&name, removed.len()), removed)
+                }
             };
             let since = cutoffs::rules_since(&conn)?;
-            followups::rederive_member(&conn, &member, &days, rules, since.as_deref())?;
+            followups::rederive_member(&conn, &member, &rejudge, rules, since.as_deref())?;
             Ok(text)
         })();
         result.unwrap_or_else(failed)

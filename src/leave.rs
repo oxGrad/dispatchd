@@ -79,18 +79,22 @@ pub fn add(
     Ok(n)
 }
 
-/// Deletes the given dates for a member; returns rows removed.
-pub fn remove(conn: &Connection, discord_user_id: &str, dates: &[String]) -> Result<usize> {
+/// Deletes the given dates for a member; returns the dates that actually had
+/// a row, in `dates` order (ascending from `ritual_days`).
+pub fn remove(conn: &Connection, discord_user_id: &str, dates: &[String]) -> Result<Vec<String>> {
     let tx = conn.unchecked_transaction()?;
-    let mut n = 0;
+    let mut removed = Vec::new();
     for date in dates {
-        n += tx.execute(
+        if tx.execute(
             "DELETE FROM member_leave WHERE date = ?1 AND discord_user_id = ?2",
             params![date, discord_user_id],
-        )?;
+        )? > 0
+        {
+            removed.push(date.clone());
+        }
     }
     tx.commit()?;
-    Ok(n)
+    Ok(removed)
 }
 
 /// Leave rows in `[start, end]`, ordered by date then name.
@@ -159,7 +163,21 @@ mod tests {
             vec![("2026-11-20", Reason::Sick), ("2026-11-23", Reason::Leave)]
         );
         assert_eq!(rows[0].name, "Bima");
-        assert_eq!(remove(&conn, "1", &days).unwrap(), 2);
+        assert_eq!(remove(&conn, "1", &days).unwrap(), days);
         assert!(list(&conn, "2026-11-01", "2026-11-30").unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_returns_only_the_dates_it_deleted() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "Bima");
+        seed_member(&conn, "2", "Alya");
+        let had = vec!["2026-11-18".to_string(), "2026-11-20".to_string()];
+        add(&conn, "1", &had, Reason::Leave).unwrap();
+        add(&conn, "2", &["2026-11-19".to_string()], Reason::Sick).unwrap();
+        let range = ritual_days("2026-11-17", "2026-11-20", false).unwrap();
+        assert_eq!(remove(&conn, "1", &range).unwrap(), had);
+        assert!(remove(&conn, "1", &range).unwrap().is_empty());
+        assert_eq!(list(&conn, "2026-11-01", "2026-11-30").unwrap().len(), 1);
     }
 }

@@ -725,6 +725,46 @@ mod tests {
         assert!(missed_ids(&conn).is_empty());
     }
 
+    /// `(date, kind)` miss rows for one member, sorted.
+    fn misses_for(conn: &Connection, id: &str) -> Vec<(String, String)> {
+        conn.prepare(
+            "SELECT date, kind FROM missed_submissions WHERE discord_user_id = ?1 ORDER BY 1, 2",
+        )
+        .unwrap()
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    /// Reviewer probe: `/team leave remove` over a broad range for a member
+    /// who joined after it must not judge the days before they joined. The
+    /// handler re-derives only the dates `leave::remove` deleted.
+    #[test]
+    fn a_no_op_leave_remove_over_a_broad_range_records_nothing() {
+        let conn = open_test_db();
+        seed_member(&conn, "old", "Old");
+        cover(&conn, "2026-11-16", "2026-11-18");
+        crate::cutoffs::ensure_rules_since(&conn, "2026-11-16").unwrap();
+        for d in ["2026-11-16", "2026-11-17"] {
+            entries::insert_todo(&conn, "old", d, "t", None, None).unwrap();
+            let day = day_cutoffs(&conn, &utc_rules(), d).unwrap();
+            record_missed(&conn, d, &day).unwrap();
+        }
+        // "new" joins the roster on the 18th (members.toml edit + restart).
+        seed_member(&conn, "new", "New");
+        let days = vec!["2026-11-16".to_string(), "2026-11-17".to_string()];
+        let removed = leave::remove(&conn, "new", &days).unwrap();
+        assert!(removed.is_empty());
+        let since = crate::cutoffs::rules_since(&conn).unwrap();
+        rederive_member(&conn, "new", &removed, &utc_rules(), since.as_deref()).unwrap();
+        assert!(
+            misses_for(&conn, "new").is_empty(),
+            "{:?}",
+            misses_for(&conn, "new")
+        );
+    }
+
     #[test]
     fn rederive_member_ignores_unrecorded_days() {
         let conn = open_test_db();
