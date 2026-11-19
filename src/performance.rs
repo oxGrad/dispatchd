@@ -143,6 +143,12 @@ fn dates(ds: &[String]) -> String {
         .join(", ")
 }
 
+/// The member's GitHub activity, only when `github_user` is set and the sync
+/// has resolved it: an unresolved one has nothing attributed yet.
+fn github_of(r: &MemberPerformance) -> Option<&MemberActivity> {
+    r.github.as_ref().filter(|g| g.linked && !g.unresolved)
+}
+
 pub fn format_performance_file(
     rows: &[MemberPerformance],
     start: &str,
@@ -213,7 +219,7 @@ pub fn format_performance_file(
                 r.blocked_days.to_string(),
             ];
             if with_github {
-                match r.github.as_ref().filter(|g| g.linked) {
+                match github_of(r) {
                     Some(g) => cells.extend([
                         g.prs_merged.len().to_string(),
                         g.prs_opened.len().to_string(),
@@ -247,7 +253,7 @@ pub fn format_performance_file(
                 lines.push(format!("- {label}: {}\n", dates(ds)));
             }
         }
-        if with_github && let Some(g) = &r.github {
+        if with_github && let Some(g) = github_of(r) {
             if !g.prs_merged.is_empty() {
                 lines.push(format!("- PRs merged: {}\n", refs(&g.prs_merged)));
             }
@@ -470,6 +476,24 @@ mod tests {
         assert_eq!(row_cells(output, "Bima")[4..], ["1", "0", "1", "0"]);
         assert_eq!(row_cells(output, "Alya")[4..], ["—", "—", "—", "—"]);
         assert!(file.contains("- PRs merged: api#210\n"), "{file}");
+    }
+
+    #[test]
+    fn an_unresolved_github_user_shows_dashes_not_zeros() {
+        let conn = fixture();
+        conn.execute(
+            "UPDATE members SET github_user = 'alya-dev', github_id = NULL WHERE discord_user_id = '2'",
+            [],
+        )
+        .unwrap();
+        let rows = performance(&conn, "2026-11-01", "2026-11-30", Some(&TimeZone::UTC)).unwrap();
+        let file = format_performance_file(&rows, "2026-11-01", "2026-11-30", true, None);
+        let output = file.split("## Output").nth(1).unwrap();
+        assert_eq!(
+            row_cells(output, "Alya")[4..],
+            ["—", "—", "—", "—"],
+            "{file}"
+        );
     }
 
     #[test]
