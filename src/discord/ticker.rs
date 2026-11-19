@@ -292,13 +292,17 @@ fn cutoff_alert_message(
 
 /// The message to post for `kind`'s cut-off on `date`, or `None`. Each kind
 /// reads only its own waiver flag: crossing them would mention people for a
-/// window the bot wasn't up for.
+/// window the bot wasn't up for. `None` before the rules apply: nobody was
+/// told about a cut-off that day.
 fn cutoff_alert_for(
     conn: &Connection,
     rules: &crate::cutoffs::Rules,
     date: &str,
     kind: CutoffKind,
 ) -> anyhow::Result<Option<String>> {
+    if !crate::cutoffs::rules_apply(conn, date)? {
+        return Ok(None);
+    }
     let day = crate::cutoffs::day_cutoffs(conn, rules, date)?;
     let (cutoff_time, waived, missing) = match kind {
         CutoffKind::Todo => (
@@ -1371,9 +1375,10 @@ mod tests {
 
     const D: &str = "2026-09-29";
 
-    /// UTC rules (09:00/11:00/15:00/15:50), one uptime span `from`..`to` on D.
-    /// Member 1 has an early todo and no report; member 2 has nothing.
-    fn alert_db(from: &str, to: &str) -> (Connection, crate::cutoffs::Rules) {
+    /// UTC rules (09:00/11:00/15:00/15:50) in force from `rules_since`, one
+    /// uptime span `from`..`to` on D. Member 1 has an early todo and no
+    /// report; member 2 has nothing.
+    fn alert_db(from: &str, to: &str, rules_since: &str) -> (Connection, crate::cutoffs::Rules) {
         use jiff::civil::time;
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::db::open(&dir.keep().join("d.sqlite3")).unwrap();
@@ -1393,6 +1398,7 @@ mod tests {
         let id =
             crate::cutoffs::start_span(&conn, format!("{D}T{from}:00Z").parse().unwrap()).unwrap();
         crate::cutoffs::touch_span(&conn, id, format!("{D}T{to}:00Z").parse().unwrap()).unwrap();
+        crate::cutoffs::ensure_rules_since(&conn, rules_since).unwrap();
         let rules = crate::cutoffs::Rules {
             tz: jiff::tz::TimeZone::UTC,
             todo_time: time(9, 0, 0, 0),
@@ -1406,7 +1412,7 @@ mod tests {
 
     #[test]
     fn alerts_waive_only_the_window_the_bot_missed_progress_covered() {
-        let (conn, rules) = alert_db("14:00", "16:00");
+        let (conn, rules) = alert_db("14:00", "16:00", "2000-01-03");
         let todo = cutoff_alert_for(&conn, &rules, D, CutoffKind::Todo)
             .unwrap()
             .unwrap();
@@ -1419,7 +1425,7 @@ mod tests {
 
     #[test]
     fn alerts_waive_only_the_window_the_bot_missed_todo_covered() {
-        let (conn, rules) = alert_db("08:00", "12:00");
+        let (conn, rules) = alert_db("08:00", "12:00", "2000-01-03");
         let todo = cutoff_alert_for(&conn, &rules, D, CutoffKind::Todo)
             .unwrap()
             .unwrap();
@@ -1431,5 +1437,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(prog.starts_with("⚠️") && !prog.contains("<@"), "{prog}");
+    }
+
+    #[test]
+    fn no_cutoff_alert_before_the_rules_took_effect() {
+        // Fully covered day, member 2 has no todo - but the rules start tomorrow.
+        let (conn, rules) = alert_db("08:00", "17:00", "2026-09-30");
+        for kind in [CutoffKind::Todo, CutoffKind::Progress] {
+            assert_eq!(cutoff_alert_for(&conn, &rules, D, kind).unwrap(), None);
+        }
     }
 }

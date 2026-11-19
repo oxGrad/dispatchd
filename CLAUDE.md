@@ -484,9 +484,14 @@ src/
                  day_cutoffs (a cut-off is waived when the spans leave a
                  gap in its own window: todo_time -> todo_cutoff for
                  /todo, update_time -> progress_cutoff for /progress),
-                 ensure_rules_since / rules_since (app_meta
+                 ensure_rules_since / rules_since / rules_apply (app_meta
                  'cutoff_rules_since': the first day the cut-off rules
-                 apply, for the performance report's old-rule note)
+                 apply - set once, to today, or tomorrow if today's
+                 todo_reminder or missed_recorded already went out. Before
+                 it day_cutoffs returns the old end-of-day rule (no
+                 cut-off, nothing waived) for every caller, the ticker
+                 posts no cut-off alert, and the performance report adds
+                 its old-rule note)
   leave.rs       member_leave DB logic: per-member leave/sick days
                  (ritual days only; weekends skipped unless
                  run_on_weekends), add/remove/list - backs /team leave

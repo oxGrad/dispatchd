@@ -320,10 +320,16 @@ mod tests {
         let end: Timestamp = format!("{to}T23:59:00Z").parse().unwrap();
         crate::cutoffs::touch_span(conn, id, end).unwrap();
     }
-    /// UTC rules plus one uptime span covering all of `date`.
+    /// UTC rules in force since 2026-01-01 (what the re-derive tests pass
+    /// as `rules_since`), plus one uptime span covering all of `date`.
     fn covered_utc_rules(conn: &Connection, date: &str) -> Rules {
+        crate::cutoffs::ensure_rules_since(conn, "2026-01-01").unwrap();
         cover(conn, date, date);
         utc_rules()
+    }
+    /// Puts the cut-off rules in force for every test date.
+    fn rules_in_force(conn: &Connection) {
+        crate::cutoffs::ensure_rules_since(conn, "2000-01-03").unwrap();
     }
     /// Distinct `discord_user_id`s in `missed_submissions`, sorted.
     fn missed_ids(conn: &Connection) -> Vec<String> {
@@ -450,6 +456,7 @@ mod tests {
     fn backfill_missed_records_only_unrecorded_past_working_days_with_activity() {
         let conn = open_test_db();
         let rules = utc_rules();
+        rules_in_force(&conn);
         cover(&conn, "2026-09-10", "2026-10-02");
         seed_member(&conn, "1", "Alice");
         seed_member(&conn, "2", "Budi");
@@ -708,6 +715,7 @@ mod tests {
     #[test]
     fn backfill_records_nothing_for_a_day_the_bot_was_not_up() {
         let conn = open_test_db();
+        rules_in_force(&conn);
         seed_member(&conn, "1", "A");
         entries::insert_todo(&conn, "1", "2026-09-29", "x", None, None).unwrap();
         // No uptime coverage: both windows waived, but the day is still marked.
@@ -742,7 +750,8 @@ mod tests {
     fn rederive_member_before_rules_since_only_clears_for_leave() {
         let conn = open_test_db();
         seed_member(&conn, "1", "A");
-        let rules = covered_utc_rules(&conn, DATE);
+        crate::cutoffs::ensure_rules_since(&conn, "2026-09-01").unwrap();
+        let rules = utc_rules();
         record_missed(&conn, DATE, &open_day()).unwrap();
         // No leave: an old-rule miss is left alone.
         rederive_member(&conn, "1", &[DATE.into()], &rules, Some("2026-09-01")).unwrap();

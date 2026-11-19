@@ -89,7 +89,25 @@ pub fn touch_span(conn: &Connection, id: i64, now: Timestamp) -> Result<()> {
     Ok(())
 }
 
+/// Whether the cut-off rules apply on `date`: `rules_since` is set and
+/// `date` is on or after it.
+pub fn rules_apply(conn: &Connection, date: &str) -> Result<bool> {
+    Ok(rules_since(conn)?.is_some_and(|since| date >= since.as_str()))
+}
+
+/// `date`'s cut-off instants and downtime waivers. Before the rules apply
+/// (`rules_apply`), the old end-of-day rule: no cut-off, nothing waived -
+/// so the alert, recording, backfill and re-derivation all agree.
 pub fn day_cutoffs(conn: &Connection, rules: &Rules, date: &str) -> Result<DayCutoffs> {
+    if !rules_apply(conn, date)? {
+        const NO_CUTOFF: &str = "9999-12-31T00:00:00Z";
+        return Ok(DayCutoffs {
+            todo_cutoff: NO_CUTOFF.into(),
+            progress_cutoff: NO_CUTOFF.into(),
+            todo_waived: false,
+            progress_waived: false,
+        });
+    }
     let todo_lo = instant(date, rules.todo_time, &rules.tz)?;
     let todo_hi = instant(date, rules.todo_cutoff, &rules.tz)?;
     let prog_lo = instant(date, rules.update_time, &rules.tz)?;
@@ -119,9 +137,12 @@ pub fn day_cutoffs(conn: &Connection, rules: &Rules, date: &str) -> Result<DayCu
 const RULES_SINCE_KEY: &str = "cutoff_rules_since";
 
 /// Sets (once) the first day the cut-off rules apply: today, or tomorrow if
-/// today's misses were already recorded. Returns the stored value.
+/// today's morning ping already went out (an older binary sent it without
+/// the rules block) or today's misses were already recorded. Returns the
+/// stored value.
 pub fn ensure_rules_since(conn: &Connection, today: &str) -> Result<String> {
-    let start = if crate::reminders::already_sent(conn, today, "missed_recorded")? {
+    let sent = |kind| crate::reminders::already_sent(conn, today, kind);
+    let start = if sent("todo_reminder")? || sent("missed_recorded")? {
         Date::strptime("%Y-%m-%d", today)?.tomorrow()?.to_string()
     } else {
         today.to_string()
@@ -232,6 +253,7 @@ mod tests {
     fn day_cutoffs_waives_only_the_window_with_downtime() {
         // UTC rules: todo 09:00-11:00, progress 15:00-15:50; bot down 10:30-11:30.
         let conn = open_test_db();
+        ensure_rules_since(&conn, "2000-01-03").unwrap();
         let a = start_span(&conn, ts("2026-11-19T08:00:00Z")).unwrap();
         touch_span(&conn, a, ts("2026-11-19T10:30:00Z")).unwrap();
         let b = start_span(&conn, ts("2026-11-19T11:30:00Z")).unwrap();
@@ -246,6 +268,48 @@ mod tests {
                 progress_waived: false,
             }
         );
+    }
+
+    #[test]
+    fn rules_since_starts_tomorrow_if_todays_todo_ping_already_went_out() {
+        // An older binary sent today's ping without the rules block.
+        let conn = open_test_db();
+        crate::reminders::mark_sent(&conn, "2026-11-19", "todo_reminder").unwrap();
+        assert_eq!(
+            ensure_rules_since(&conn, "2026-11-19").unwrap(),
+            "2026-11-20"
+        );
+        // Nothing sent yet today: the rules start today.
+        let fresh = open_test_db();
+        assert_eq!(
+            ensure_rules_since(&fresh, "2026-11-19").unwrap(),
+            "2026-11-19"
+        );
+    }
+
+    #[test]
+    fn day_cutoffs_uses_the_old_end_of_day_rule_before_rules_since() {
+        // No uptime at all: under the rules both windows would be waived.
+        let conn = open_test_db();
+        let old_rule = DayCutoffs {
+            todo_cutoff: "9999-12-31T00:00:00Z".into(),
+            progress_cutoff: "9999-12-31T00:00:00Z".into(),
+            todo_waived: false,
+            progress_waived: false,
+        };
+        assert_eq!(
+            day_cutoffs(&conn, &utc_rules(), "2026-11-19").unwrap(),
+            old_rule,
+            "rules_since unset"
+        );
+        ensure_rules_since(&conn, "2026-11-20").unwrap();
+        assert_eq!(
+            day_cutoffs(&conn, &utc_rules(), "2026-11-19").unwrap(),
+            old_rule
+        );
+        let d = day_cutoffs(&conn, &utc_rules(), "2026-11-20").unwrap();
+        assert_eq!(d.todo_cutoff, "2026-11-20T11:00:00Z");
+        assert!(d.todo_waived && d.progress_waived);
     }
 
     #[test]
