@@ -145,7 +145,7 @@ pub fn team_report(
             // date-scoped to match team_status's matched_update_count filter, so
             // /team status and /team report agree for a given day. This section
             // still excludes a cross-midnight update (todo dated D, its update
-            // dated D+1); the `Carried over:` block (carryover_report) now
+            // dated D+1); the `Not carried over yet:` block (carryover_report) now
             // surfaces exactly that case instead.
             let mut upd_stmt = conn.prepare(
                 "SELECT task, status, progress, blocker FROM entries
@@ -205,16 +205,16 @@ fn row_to_update_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateDetai
 /// matched none of them is treated the same as "no todo posted" - both
 /// are the "needs attention" case. A member with no SOW refs set gets no
 /// trailing parens (a `todo_count == 0` member structurally can't have
-/// any either, since the column only exists on todo rows). Carried-over
-/// todos add a ` +N carried` suffix when the member also posted today;
-/// a member with none posted today but carrying some shows
-/// `⚠️ Name - no new todo (N carried)` instead of the plain
-/// `❌ ... - no todo posted`.
+/// any either, since the column only exists on todo rows). Unfinished
+/// todos from earlier days not yet carried over add a ` +N to carry`
+/// suffix when the member also posted today; a member with none posted
+/// today but some to carry shows `❌ Name - no todo posted (N to carry)` -
+/// still ❌, since an uncarried todo doesn't count as today's `/todo`.
 pub fn format_status_line(status: &MemberStatus) -> String {
     let base = if status.todo_count == 0 {
         if status.carried_count > 0 {
             format!(
-                "⚠️ {} - no new todo ({} carried)",
+                "❌ {} - no todo posted ({} to carry)",
                 status.name, status.carried_count
             )
         } else {
@@ -239,7 +239,7 @@ pub fn format_status_line(status: &MemberStatus) -> String {
         format!("{base} ({})", status.sow_refs.join(", "))
     };
     if status.todo_count > 0 && status.carried_count > 0 {
-        format!("{base} +{} carried", status.carried_count)
+        format!("{base} +{} to carry", status.carried_count)
     } else {
         base
     }
@@ -296,7 +296,7 @@ pub fn format_report(report: &MemberReport) -> String {
         push_update_line(&mut out, update);
     }
     if !report.carried.is_empty() {
-        out.push_str("\nCarried over:");
+        out.push_str("\nNot carried over yet:");
         for c in &report.carried {
             out.push('\n');
             let sow = c
@@ -380,7 +380,7 @@ pub fn split_into_messages(full: &str, limit: usize) -> Vec<String> {
 /// (header included) - meant for a `.md` file attachment, where the
 /// alignment can actually be seen, unlike a chat message which just shows
 /// the raw pipe characters. Shared by every table-shaped report
-/// (`recap::format_day_table_file`, `followups::format_missed_report_file`)
+/// (`recap::format_day_table_file`, `performance::format_performance_file`)
 /// so the padding logic lives in one place. Callers are responsible for
 /// sanitizing cell text (no pipes or newlines) - this only pads and joins.
 pub fn render_aligned_table(headers: &[&str], rows: &[Vec<String>]) -> String {
@@ -616,7 +616,7 @@ mod tests {
         assert_eq!(statuses[0].carried_count, 1);
         assert_eq!(
             format_status_line(&statuses[0]),
-            "❌ Alice - 0/1 updated +1 carried"
+            "❌ Alice - 0/1 updated +1 to carry"
         );
     }
 
@@ -629,7 +629,7 @@ mod tests {
         let statuses = team_status(&conn, DATE, 7).unwrap();
         assert_eq!(
             format_status_line(&statuses[0]),
-            "⚠️ Alice - no new todo (1 carried)"
+            "❌ Alice - no todo posted (1 to carry)"
         );
     }
 
@@ -898,7 +898,7 @@ mod tests {
         assert_eq!(
             format_report(&report),
             "**Alice**\n\
-             Carried over:\n\
+             Not carried over yet:\n\
              • Refactor auth [M2] — from Aug 27 · ⏳ in progress · updated today\n\
              \u{20}\u{20}traced the leak\n\
              • Write migration — from Aug 25 · no report yet"
@@ -924,7 +924,7 @@ mod tests {
         assert_eq!(
             format_report(&report),
             "**Budi**\n\
-             Carried over:\n\
+             Not carried over yet:\n\
              • Ship it — from Aug 26 · ⛔ blocked\n\
              \u{20}\u{20}waiting\n\
              \u{20}\u{20}(blocker: DBA review)"
@@ -941,7 +941,7 @@ mod tests {
         assert_eq!(reports[0].carried.len(), 1);
         assert_eq!(reports[0].carried[0].task, "old task");
         // still renders even though nothing was posted *today*
-        assert!(format_report(&reports[0]).contains("Carried over:"));
+        assert!(format_report(&reports[0]).contains("Not carried over yet:"));
     }
 
     #[test]

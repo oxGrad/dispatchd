@@ -14,6 +14,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("migrations/0006_missed_submissions.sql")),
         M::up(include_str!("migrations/0007_entries_indexes.sql")),
         M::up(include_str!("migrations/0008_github.sql")),
+        M::up(include_str!("migrations/0009_cutoffs_leave_carryover.sql")),
     ])
 }
 
@@ -69,6 +70,7 @@ mod tests {
         assert_eq!(
             table_names(&conn),
             vec![
+                "app_meta",
                 "daily_threads",
                 "entries",
                 "followups_sent",
@@ -78,9 +80,11 @@ mod tests {
                 "github_prs",
                 "github_reviews",
                 "github_sync_state",
+                "member_leave",
                 "members",
                 "missed_submissions",
-                "reminders_sent"
+                "reminders_sent",
+                "uptime_spans"
             ]
         );
     }
@@ -132,6 +136,7 @@ mod tests {
         assert_eq!(
             table_names(&conn2),
             vec![
+                "app_meta",
                 "daily_threads",
                 "entries",
                 "followups_sent",
@@ -141,9 +146,11 @@ mod tests {
                 "github_prs",
                 "github_reviews",
                 "github_sync_state",
+                "member_leave",
                 "members",
                 "missed_submissions",
-                "reminders_sent"
+                "reminders_sent",
+                "uptime_spans"
             ]
         );
     }

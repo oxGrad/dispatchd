@@ -1,7 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use jiff::civil::Time;
 use jiff::tz::TimeZone;
 use serde::Deserialize;
@@ -17,6 +17,8 @@ const DB_PATH_OVERRIDE_ENV: &str = "DISPATCHD_DB_PATH";
 const DEFAULT_THREAD_CREATION_TIME: &str = "07:00";
 const DEFAULT_TODO_TIME: &str = "09:00";
 const DEFAULT_UPDATE_TIME: &str = "15:00";
+const DEFAULT_TODO_CUTOFF_TIME: &str = "11:00";
+const DEFAULT_PROGRESS_CUTOFF_TIME: &str = "15:50";
 const DEFAULT_MEETING_TIME: &str = "16:00";
 const DEFAULT_DAY_SUMMARY_TIME: &str = "16:00";
 const DEFAULT_MEETING_REMINDER_LEAD_MINUTES: u32 = 5;
@@ -36,6 +38,12 @@ pub struct Config {
     pub thread_creation_time: Time,
     pub todo_time: Time,
     pub update_time: Time,
+    /// Deadline for the day's /todo: one submitted after this counts as
+    /// missed, and members still missing one are @mentioned in the thread.
+    pub todo_cutoff_time: Time,
+    /// Deadline for /progress: every todo submitted before this needs at
+    /// least one report submitted before this.
+    pub progress_cutoff_time: Time,
     /// When the daily meeting actually starts.
     pub meeting_time: Time,
     /// When the full-detail day progress summary is posted into today's
@@ -78,6 +86,10 @@ impl Default for Config {
                 .expect("default thread_creation_time is valid"),
             todo_time: parse_time(DEFAULT_TODO_TIME).expect("default todo_time is valid"),
             update_time: parse_time(DEFAULT_UPDATE_TIME).expect("default update_time is valid"),
+            todo_cutoff_time: parse_time(DEFAULT_TODO_CUTOFF_TIME)
+                .expect("default todo_cutoff_time is valid"),
+            progress_cutoff_time: parse_time(DEFAULT_PROGRESS_CUTOFF_TIME)
+                .expect("default progress_cutoff_time is valid"),
             meeting_time: parse_time(DEFAULT_MEETING_TIME).expect("default meeting_time is valid"),
             day_summary_time: parse_time(DEFAULT_DAY_SUMMARY_TIME)
                 .expect("default day_summary_time is valid"),
@@ -124,6 +136,8 @@ struct RawSchedule {
     thread_creation_time: Option<String>,
     todo_time: Option<String>,
     update_time: Option<String>,
+    todo_cutoff_time: Option<String>,
+    progress_cutoff_time: Option<String>,
     meeting_time: Option<String>,
     day_summary_time: Option<String>,
     meeting_reminder_lead_minutes: Option<u32>,
@@ -250,6 +264,19 @@ impl Config {
                 .with_context(|| format!("invalid schedule.day_summary_time: {s:?}"))?,
             None => defaults.day_summary_time,
         };
+        // An unset cut-off is its default moved to fit the times around it,
+        // so a config written before the cut-offs existed (e.g.
+        // day_summary_time = "15:30") still loads after an upgrade.
+        let progress_cutoff_time = match raw.schedule.progress_cutoff_time {
+            Some(s) => parse_time(&s)
+                .with_context(|| format!("invalid schedule.progress_cutoff_time: {s:?}"))?,
+            None => fit(defaults.progress_cutoff_time, update_time, day_summary_time),
+        };
+        let todo_cutoff_time = match raw.schedule.todo_cutoff_time {
+            Some(s) => parse_time(&s)
+                .with_context(|| format!("invalid schedule.todo_cutoff_time: {s:?}"))?,
+            None => fit(defaults.todo_cutoff_time, todo_time, progress_cutoff_time),
+        };
         let timezone = match raw.timezone {
             Some(s) => parse_timezone(&s).with_context(|| format!("invalid timezone: {s:?}"))?,
             None => defaults.timezone,
@@ -260,10 +287,12 @@ impl Config {
         };
         let github = github_from_raw(raw.github)?;
 
-        Ok(Config {
+        let config = Config {
             thread_creation_time,
             todo_time,
             update_time,
+            todo_cutoff_time,
+            progress_cutoff_time,
             meeting_time,
             day_summary_time,
             meeting_reminder_lead_minutes: raw
@@ -295,8 +324,64 @@ impl Config {
             discord_guild_id: raw.discord_guild_id,
             discord_standup_channel_id: raw.discord_standup_channel_id,
             github,
-        })
+        };
+        check_schedule_order(&config)?;
+        Ok(config)
     }
+}
+
+/// An unset cut-off: `default` capped at `hi` (the next time it must not
+/// pass), or `hi` itself when that cap isn't after `lo` (the reminder it
+/// must follow).
+fn fit(default: Time, lo: Time, hi: Time) -> Time {
+    let t = default.min(hi);
+    if t > lo { t } else { hi }
+}
+
+/// `todo_time < todo_cutoff_time <= progress_cutoff_time <= day_summary_time`
+/// and `update_time < progress_cutoff_time`.
+fn check_schedule_order(c: &Config) -> Result<()> {
+    let rules = [
+        (
+            "todo_time",
+            c.todo_time,
+            "todo_cutoff_time",
+            c.todo_cutoff_time,
+            false,
+        ),
+        (
+            "update_time",
+            c.update_time,
+            "progress_cutoff_time",
+            c.progress_cutoff_time,
+            false,
+        ),
+        (
+            "todo_cutoff_time",
+            c.todo_cutoff_time,
+            "progress_cutoff_time",
+            c.progress_cutoff_time,
+            true,
+        ),
+        (
+            "progress_cutoff_time",
+            c.progress_cutoff_time,
+            "day_summary_time",
+            c.day_summary_time,
+            true,
+        ),
+    ];
+    for (a, av, b, bv, or_equal) in rules {
+        if av > bv || (!or_equal && av == bv) {
+            let rel = if or_equal { "on or before" } else { "before" };
+            bail!(
+                "schedule.{a} ({}) must be {rel} schedule.{b} ({})",
+                av.strftime("%H:%M"),
+                bv.strftime("%H:%M")
+            );
+        }
+    }
+    Ok(())
 }
 
 fn parse_time(s: &str) -> Result<Time> {
@@ -422,13 +507,85 @@ mod tests {
     }
 
     #[test]
+    fn cutoffs_default_to_11_and_15_50_and_are_overridable() {
+        let d = Config::default();
+        assert_eq!(d.todo_cutoff_time, jiff::civil::time(11, 0, 0, 0));
+        assert_eq!(d.progress_cutoff_time, jiff::civil::time(15, 50, 0, 0));
+        let (_dir, path) = write_config(
+            "[schedule]\ntodo_cutoff_time = \"10:30\"\nprogress_cutoff_time = \"15:45\"\n",
+        );
+        let c = Config::from_raw(read_raw_config(&path).unwrap()).unwrap();
+        assert_eq!(c.todo_cutoff_time, jiff::civil::time(10, 30, 0, 0));
+        assert_eq!(c.progress_cutoff_time, jiff::civil::time(15, 45, 0, 0));
+    }
+
+    #[test]
+    fn unset_cutoffs_fit_an_older_schedule() {
+        use jiff::civil::time;
+        let load = |toml: &str| {
+            let (_dir, path) = write_config(toml);
+            Config::from_raw(read_raw_config(&path).unwrap()).unwrap()
+        };
+        // Summary before 15:50: the /progress cut-off moves up to it.
+        let c = load("[schedule]\nday_summary_time = \"15:30\"\n");
+        assert_eq!(c.progress_cutoff_time, time(15, 30, 0, 0));
+        assert_eq!(c.todo_cutoff_time, time(11, 0, 0, 0));
+        // Reminders at or after the default cut-offs: each falls back to
+        // the next time it must not pass.
+        let c = load("[schedule]\ntodo_time = \"11:30\"\nupdate_time = \"15:55\"\n");
+        assert_eq!(c.progress_cutoff_time, time(16, 0, 0, 0));
+        assert_eq!(c.todo_cutoff_time, time(16, 0, 0, 0));
+    }
+
+    #[test]
+    fn ordering_error_names_both_keys() {
+        let (_dir, path) = write_config("[schedule]\nprogress_cutoff_time = \"14:00\"\n");
+        let err = format!(
+            "{:#}",
+            Config::from_raw(read_raw_config(&path).unwrap()).unwrap_err()
+        );
+        assert!(
+            err.contains("update_time") && err.contains("progress_cutoff_time"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn every_ordering_rule_is_enforced() {
+        for (toml, a, b) in [
+            (
+                "todo_cutoff_time = \"09:00\"",
+                "todo_time",
+                "todo_cutoff_time",
+            ),
+            (
+                "todo_cutoff_time = \"16:00\"",
+                "todo_cutoff_time",
+                "progress_cutoff_time",
+            ),
+            (
+                "progress_cutoff_time = \"16:30\"",
+                "progress_cutoff_time",
+                "day_summary_time",
+            ),
+        ] {
+            let (_dir, path) = write_config(&format!("[schedule]\n{toml}\n"));
+            let err = format!(
+                "{:#}",
+                Config::from_raw(read_raw_config(&path).unwrap()).unwrap_err()
+            );
+            assert!(err.contains(a) && err.contains(b), "{toml}: {err}");
+        }
+    }
+
+    #[test]
     fn partial_schedule_override_changes_only_that_field() {
-        let (_dir, path) = write_config("[schedule]\nupdate_time = \"18:30\"\n");
+        let (_dir, path) = write_config("[schedule]\nupdate_time = \"15:30\"\n");
         let raw = read_raw_config(&path).unwrap();
         let config = Config::from_raw(raw).unwrap();
 
         let defaults = Config::default();
-        assert_eq!(config.update_time, jiff::civil::time(18, 30, 0, 0));
+        assert_eq!(config.update_time, jiff::civil::time(15, 30, 0, 0));
         assert_eq!(config.thread_creation_time, defaults.thread_creation_time);
         assert_eq!(config.todo_time, defaults.todo_time);
         assert_eq!(config.meeting_time, defaults.meeting_time);
@@ -581,6 +738,8 @@ mod tests {
             thread_creation_time = "08:00"
             todo_time = "08:15"
             update_time = "14:45"
+            todo_cutoff_time = "10:00"
+            progress_cutoff_time = "16:30"
             meeting_time = "17:00"
             day_summary_time = "18:00"
             meeting_reminder_lead_minutes = 10
@@ -601,6 +760,8 @@ mod tests {
         assert_eq!(config.thread_creation_time, jiff::civil::time(8, 0, 0, 0));
         assert_eq!(config.todo_time, jiff::civil::time(8, 15, 0, 0));
         assert_eq!(config.update_time, jiff::civil::time(14, 45, 0, 0));
+        assert_eq!(config.todo_cutoff_time, jiff::civil::time(10, 0, 0, 0));
+        assert_eq!(config.progress_cutoff_time, jiff::civil::time(16, 30, 0, 0));
         assert_eq!(config.meeting_time, jiff::civil::time(17, 0, 0, 0));
         assert_eq!(config.day_summary_time, jiff::civil::time(18, 0, 0, 0));
         assert_eq!(config.meeting_reminder_lead_minutes, 10);

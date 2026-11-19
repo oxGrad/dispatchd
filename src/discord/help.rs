@@ -18,11 +18,12 @@ const HELP_TEXT: &str = "\
 `/team report` - (tech lead only) full detail of everyone's todos + progress today
 `/team remind member:<name> kind:<todo|progress>` - (tech lead only) nudge a member in today's thread
 `/team skip-meeting` - (tech lead only) cancel today's meeting and tell the team
+`/team leave add|remove|list` - (tech lead only) mark a member on leave or sick (no nags, no recorded miss); `list` defaults to this month
 `/team github start:<date> end:<date>` - (tech lead only, GitHub configured) each member's PRs, sub-issues and reviews; same dates as /recap
 `/recap start:<date> end:<date>` - (tech lead only) recap table, one per day; no dates = today, one date = just that day
 `/recap-biweekly` - (tech lead only) recap of the 14 days ending yesterday
   with GitHub configured, both become a per-deliverable report with no names; add `include_member_detail:True` for the per-day tables
-`/missed start:<date> end:<date>` - (tech lead only) who missed a /todo or /progress submission; same dates as /recap
+`/team performance start:<date> end:<date>` - (tech lead only) per-member review for a period; no dates = this month
 `/admin status` - (admin only) systemd + Discord health and version check
 `/admin upgrade` - (admin only) upgrade dispatchd to the latest release
 `/admin help` - admin-specific help
@@ -65,10 +66,11 @@ mod tests {
             "/team remind",
             "/team skip-meeting",
             "/team github",
+            "/team leave",
             "include_member_detail",
             "/recap",
             "/recap-biweekly",
-            "/missed",
+            "/team performance",
             "/admin status",
             "/admin upgrade",
             "/admin help",

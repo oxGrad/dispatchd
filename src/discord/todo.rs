@@ -16,6 +16,7 @@ use super::{get_option_string, modal_value};
 
 pub const ADD_MODAL_ID: &str = "todo_modal";
 pub const EDIT_MODAL_PREFIX: &str = "todo_edit_modal:";
+pub const CARRY_MODAL_PREFIX: &str = "todo_carry_modal:";
 const TASK_INPUT_ID: &str = "task";
 const NOTES_INPUT_ID: &str = "notes";
 const SOW_REF_INPUT_ID: &str = "sow_ref";
@@ -23,7 +24,7 @@ const SOW_REF_MAX_LEN: u16 = 30;
 
 const TODO_HELP_TEXT: &str = "\
 **/todo subcommands**
-`/todo add` - submit a new todo for today (optionally tag it with an SOW ref like M1D2)
+`/todo add [carryover:<...>]` - submit a new todo for today (optionally tag it with an SOW ref like M1D2), or carry over an unfinished one (prefilled)
 `/todo edit id:<...>` - edit one of today's todos, SOW ref included (autocomplete over today's)
 `/todo delete id:<...>` - delete one of today's todos
 `/todo list` - list today's todos with their ids
@@ -32,11 +33,22 @@ const TODO_HELP_TEXT: &str = "\
 pub fn command() -> CreateCommand {
     CreateCommand::new("todo")
         .description("Manage your todos")
-        .add_option(CreateCommandOption::new(
-            CommandOptionType::SubCommand,
-            "add",
-            "Submit a new todo for today",
-        ))
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "add",
+                "Submit a new todo for today",
+            )
+            .add_sub_option(
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "carryover",
+                    "Unfinished todo from an earlier day to carry over",
+                )
+                .required(false)
+                .set_autocomplete(true),
+            ),
+        )
         .add_option(
             CreateCommandOption::new(
                 CommandOptionType::SubCommand,
@@ -101,20 +113,32 @@ async fn reply_ephemeral(
     }
 }
 
-pub async fn handle_add(ctx: &SerenityContext, command: &CommandInteraction) {
-    let modal = CreateModal::new(ADD_MODAL_ID, "Submit today's todo").components(vec![
-        CreateActionRow::InputText(
+/// The add/carry modal: same three inputs as `/todo edit`, optionally prefilled.
+fn todo_modal(custom_id: String, title: &str, prefill: Option<TodoForEdit>) -> CreateModal {
+    let TodoForEdit {
+        task,
+        notes,
+        sow_ref,
+    } = prefill.unwrap_or(TodoForEdit {
+        task: String::new(),
+        notes: None,
+        sow_ref: None,
+    });
+    CreateModal::new(custom_id, title).components(vec![
+        CreateActionRow::InputText(with_value(
             CreateInputText::new(InputTextStyle::Short, "Task", TASK_INPUT_ID).required(true),
-        ),
-        CreateActionRow::InputText(
+            task,
+        )),
+        CreateActionRow::InputText(with_value(
             CreateInputText::new(
                 InputTextStyle::Paragraph,
                 "Notes (optional)",
                 NOTES_INPUT_ID,
             )
             .required(false),
-        ),
-        CreateActionRow::InputText(
+            notes.unwrap_or_default(),
+        )),
+        CreateActionRow::InputText(with_value(
             CreateInputText::new(
                 InputTextStyle::Short,
                 "SOW Ref (optional)",
@@ -122,13 +146,140 @@ pub async fn handle_add(ctx: &SerenityContext, command: &CommandInteraction) {
             )
             .required(false)
             .max_length(SOW_REF_MAX_LEN),
-        ),
-    ]);
+            sow_ref.unwrap_or_default(),
+        )),
+    ])
+}
+
+/// Sets `value` only when there is one: a blank `/todo add` modal sends no
+/// `value` at all (as it did before the add/edit/carry modals were shared)
+/// rather than `""`.
+fn with_value(input: CreateInputText, value: String) -> CreateInputText {
+    if value.is_empty() {
+        input
+    } else {
+        input.value(value)
+    }
+}
+
+pub async fn handle_add(
+    ctx: &SerenityContext,
+    command: &CommandInteraction,
+    options: &[CommandDataOption],
+    db: &Arc<Mutex<Connection>>,
+    timezone: &TimeZone,
+    carryover_lookback_days: u32,
+) {
+    let modal = match get_option_string(options, "carryover") {
+        None => todo_modal(ADD_MODAL_ID.to_string(), "Submit today's todo", None),
+        Some(raw) => {
+            let origin = match raw.parse::<i64>() {
+                Ok(id) => {
+                    let conn = db.lock().expect("db mutex poisoned");
+                    entries::carryover_origin(
+                        &conn,
+                        &command.user.id.to_string(),
+                        &entries::today_in(timezone),
+                        carryover_lookback_days as i64,
+                        id,
+                    )
+                    .map(|o| o.map(|o| (id, o)))
+                }
+                Err(_) => Ok(None),
+            };
+            match origin {
+                Ok(Some((id, prefill))) => todo_modal(
+                    format!("{CARRY_MODAL_PREFIX}{id}"),
+                    "Carry over todo",
+                    Some(prefill),
+                ),
+                Ok(None) => {
+                    reply_ephemeral(
+                        ctx,
+                        command,
+                        "⚠️ Please pick an unfinished todo from the suggestions.",
+                        "/todo add",
+                    )
+                    .await;
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("failed to look up carry-over origin: {e}");
+                    reply_ephemeral(
+                        ctx,
+                        command,
+                        "⚠️ Something went wrong - please try again.",
+                        "/todo add",
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    };
     if let Err(e) = command
         .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
         .await
     {
         eprintln!("failed to open /todo add modal: {e}");
+    }
+}
+
+pub async fn handle_carry_modal_submission(
+    ctx: &SerenityContext,
+    modal: &ModalInteraction,
+    db: &Arc<Mutex<Connection>>,
+    timezone: &TimeZone,
+    carryover_lookback_days: u32,
+) {
+    let Some(origin_id) = modal
+        .data
+        .custom_id
+        .strip_prefix(CARRY_MODAL_PREFIX)
+        .and_then(|s| s.parse::<i64>().ok())
+    else {
+        eprintln!(
+            "malformed /todo carry modal custom_id: {}",
+            modal.data.custom_id
+        );
+        return;
+    };
+    let task = modal_value(modal, TASK_INPUT_ID).unwrap_or_default();
+    let notes = modal_value(modal, NOTES_INPUT_ID).filter(|s| !s.trim().is_empty());
+    let sow_ref = normalize_sow_ref(modal_value(modal, SOW_REF_INPUT_ID));
+
+    let result = {
+        let conn = db.lock().expect("db mutex poisoned");
+        entries::carry_over_todo(
+            &conn,
+            &modal.user.id.to_string(),
+            &entries::today_in(timezone),
+            carryover_lookback_days as i64,
+            origin_id,
+            &task,
+            notes.as_deref(),
+            sow_ref.as_deref(),
+        )
+    };
+    let reply_text = match result {
+        Ok(Some(_)) => format!("✅ Todo carried over: {task}"),
+        Ok(None) => {
+            "⚠️ That todo can't be carried over anymore (already carried, finished, or too old)."
+                .to_string()
+        }
+        Err(e) => {
+            eprintln!("failed to carry over todo: {e}");
+            "⚠️ Something went wrong - please try again.".to_string()
+        }
+    };
+    let reply = CreateInteractionResponseMessage::new()
+        .content(reply_text)
+        .ephemeral(true);
+    if let Err(e) = modal
+        .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+        .await
+    {
+        eprintln!("failed to respond to /todo carry modal submission: {e}");
     }
 }
 
@@ -244,32 +395,15 @@ pub async fn handle_edit(
         }
     };
 
-    let modal = CreateModal::new(format!("{EDIT_MODAL_PREFIX}{id}"), "Edit todo").components(vec![
-        CreateActionRow::InputText(
-            CreateInputText::new(InputTextStyle::Short, "Task", TASK_INPUT_ID)
-                .required(true)
-                .value(task),
-        ),
-        CreateActionRow::InputText(
-            CreateInputText::new(
-                InputTextStyle::Paragraph,
-                "Notes (optional)",
-                NOTES_INPUT_ID,
-            )
-            .required(false)
-            .value(notes.unwrap_or_default()),
-        ),
-        CreateActionRow::InputText(
-            CreateInputText::new(
-                InputTextStyle::Short,
-                "SOW Ref (optional)",
-                SOW_REF_INPUT_ID,
-            )
-            .required(false)
-            .max_length(SOW_REF_MAX_LEN)
-            .value(sow_ref.unwrap_or_default()),
-        ),
-    ]);
+    let modal = todo_modal(
+        format!("{EDIT_MODAL_PREFIX}{id}"),
+        "Edit todo",
+        Some(TodoForEdit {
+            task,
+            notes,
+            sow_ref,
+        }),
+    );
     if let Err(e) = command
         .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
         .await
@@ -379,8 +513,8 @@ pub async fn handle_delete(
 }
 
 /// Builds the `/todo list` reply: today's todos with ids, then a
-/// read-only "Carried over" section for still-open todos from recent
-/// past days. Pure.
+/// read-only "Not carried over yet" section for still-open todos from
+/// recent past days that haven't been carried forward. Pure.
 fn format_todo_list(
     today: &[(i64, String, Option<String>)],
     carried: &[entries::CarryoverTodo],
@@ -411,7 +545,7 @@ fn format_todo_list(
             })
             .collect();
         sections.push(format!(
-            "**Carried over (still open):**\n{}",
+            "**Not carried over yet** (use `/todo add carryover:`):\n{}",
             lines.join("\n")
         ));
     }
@@ -497,6 +631,15 @@ fn format_todo_choice_label(id: i64, task: &str, sow_ref: &Option<String>) -> St
     format!("{prefix}{}{suffix}", truncate_chars(task, task_budget))
 }
 
+/// Autocomplete label for a carry-over candidate: `"{task} · from Aug 27"`,
+/// capped at Discord's 100-char choice-name limit.
+fn carryover_choice_label(task: &str, origin_date: &str) -> String {
+    truncate_chars(
+        &format!("{task} · from {}", entries::short_date(origin_date)),
+        100,
+    )
+}
+
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
@@ -510,13 +653,51 @@ pub async fn handle_autocomplete(
     autocomplete: &AutocompleteInteraction,
     db: &Arc<Mutex<Connection>>,
     timezone: &TimeZone,
+    carryover_lookback_days: u32,
 ) {
-    let Some((_, options)) = subcommand(&autocomplete.data.options) else {
+    let Some((sub, options)) = subcommand(&autocomplete.data.options) else {
         return;
     };
-    let partial = get_option_string(options, "id").unwrap_or_default();
     let discord_user_id = autocomplete.user.id.to_string();
     let date = entries::today_in(timezone);
+
+    if sub == "add" {
+        let partial = get_option_string(options, "carryover").unwrap_or_default();
+        let rows = {
+            let conn = db.lock().expect("db mutex poisoned");
+            entries::carryover_todos(
+                &conn,
+                &discord_user_id,
+                &date,
+                carryover_lookback_days as i64,
+                &partial,
+            )
+        };
+        let response = match rows {
+            Ok(rows) => CreateAutocompleteResponse::new().set_choices(
+                rows.into_iter()
+                    .map(|c| {
+                        AutocompleteChoice::new(
+                            carryover_choice_label(&c.task, &c.origin_date),
+                            c.id.to_string(),
+                        )
+                    })
+                    .collect(),
+            ),
+            Err(e) => {
+                eprintln!("failed to list carry-over todos for autocomplete: {e}");
+                CreateAutocompleteResponse::new()
+            }
+        };
+        if let Err(e) = autocomplete
+            .create_response(&ctx.http, CreateInteractionResponse::Autocomplete(response))
+            .await
+        {
+            eprintln!("failed to respond to /todo add autocomplete: {e}");
+        }
+        return;
+    }
+    let partial = get_option_string(options, "id").unwrap_or_default();
 
     let choices = {
         let conn = db.lock().expect("db mutex poisoned");
@@ -558,6 +739,7 @@ mod tests {
     fn todo_help_text_mentions_every_subcommand() {
         for needle in [
             "/todo add",
+            "carryover:",
             "/todo edit",
             "/todo delete",
             "/todo list",
@@ -565,6 +747,17 @@ mod tests {
         ] {
             assert!(TODO_HELP_TEXT.contains(needle), "missing {needle}");
         }
+    }
+
+    #[test]
+    fn carryover_choice_label_shows_origin_date_and_fits_discord() {
+        assert_eq!(
+            carryover_choice_label("Fix login", "2026-08-27"),
+            "Fix login · from Aug 27"
+        );
+        let long = carryover_choice_label(&"x".repeat(300), "2026-08-27");
+        assert_eq!(long.chars().count(), 100);
+        assert!(long.ends_with('…'));
     }
 
     #[test]
@@ -642,7 +835,7 @@ mod tests {
         assert_eq!(
             format_todo_list(&today, &carried),
             "**Today's todos:**\n`13` Ship the release\n\n\
-             **Carried over (still open):**\n\
+             **Not carried over yet** (use `/todo add carryover:`):\n\
              Refactor auth [M2] — from Aug 27\n\
              Write migration — from Aug 25"
         );
@@ -659,7 +852,7 @@ mod tests {
         assert_eq!(
             format_todo_list(&[], &carried),
             "You haven't submitted a todo today yet - use `/todo add`.\n\n\
-             **Carried over (still open):**\n\
+             **Not carried over yet** (use `/todo add carryover:`):\n\
              Refactor auth — from Aug 27"
         );
     }

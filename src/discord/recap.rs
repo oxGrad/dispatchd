@@ -189,7 +189,7 @@ async fn respond(
 }
 
 /// "2026-10-01" for a single day, "2026-10-01 to 2026-10-14" for a range -
-/// now that a bare `/recap` (or `/missed`) is a single day, "X to X" would
+/// now that a bare `/recap` is a single day, "X to X" would
 /// read oddly.
 pub(super) fn range_label(start: &str, end: &str) -> String {
     if start == end {

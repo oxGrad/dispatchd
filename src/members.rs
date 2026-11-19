@@ -220,6 +220,17 @@ pub fn is_member(conn: &Connection, discord_user_id: &str) -> Result<bool> {
         .is_some())
 }
 
+/// The member's role string, or `None` when not on the roster.
+pub fn role_of(conn: &Connection, discord_user_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT role FROM members WHERE discord_user_id = ?1",
+            [discord_user_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// `true` when the member has tech-lead privileges - role `lead` or
 /// `viewer` (view-only: sees `/team status`/`report` but isn't nagged to
 /// submit `/todo`/`/progress`, see `all_member_ids`). `false` for an
@@ -304,6 +315,19 @@ mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
     use std::io::Write;
+
+    #[test]
+    fn role_of_returns_the_role_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.path().join("d.sqlite3")).unwrap();
+        conn.execute(
+            "INSERT INTO members (discord_user_id, name, role, is_lead) VALUES ('1', 'V', 'viewer', 1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(role_of(&conn, "1").unwrap().as_deref(), Some("viewer"));
+        assert_eq!(role_of(&conn, "2").unwrap(), None);
+    }
 
     fn write_members(contents: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();

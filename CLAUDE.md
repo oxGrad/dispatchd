@@ -139,7 +139,7 @@ dispatchd service install   # Linux only: writes/enables a systemd unit at
                      # runs `dispatchd maintenance run` weekly.
 dispatchd maintenance run   # the handover doc's weekly cron: prunes
                      # reminders_sent/followups_sent rows older than 90 days
-                     # and VACUUMs. entries is never pruned - it's the
+                     # (except missed_recorded markers) and VACUUMs. entries is never pruned - it's the
                      # retained history the biweekly recap depends on.
 dispatchd status     # reports the systemd side (version, unit
                      # installed/enabled/active, upgrade helper installed,
@@ -259,18 +259,27 @@ src/
   main.rs        CLI entry point, Config/DB/seed wiring, Discord gating
   config.rs      Config struct, XDG lookup + env-var overrides, TOML merge;
                  carryover_lookback_days ([carryover] lookback_days,
-                 default 7, 0 disables) - how far back /progress add +
-                 /team look for unfinished todos; github
+                 default 7, 0 disables) - how far back /todo add
+                 carryover:, /todo list and /team look for unfinished
+                 todos; github
                  (Option<GithubConfig> from [github] app_id + org +
                  sync_interval_minutes - both app_id and org or neither,
-                 one alone is an error; None = integration off)
+                 one alone is an error; None = integration off);
+                 [schedule] todo_cutoff_time (11:00) / progress_cutoff_time
+                 (15:50), validated at load: todo_time < todo_cutoff_time
+                 <= progress_cutoff_time <= day_summary_time and
+                 update_time < progress_cutoff_time. An unset cut-off is
+                 fitted to the times around it (fit), so a pre-cut-off
+                 config still loads
   db/            SQLite connection + embedded migrations (0005 adds
                  members.is_admin, 0006 adds missed_submissions - never
                  pruned by maintenance.rs, same as entries; 0007 indexes
                  entries by (date, discord_user_id) and todo_id; 0008 adds
                  members.github_user/github_id, entries.github_issue_id/
                  github_pr_id, and the github_* activity tables - also
-                 never pruned)
+                 never pruned; 0009 adds member_leave, uptime_spans and
+                 app_meta - all never pruned - plus entries.carried_from
+                 with a unique partial index)
   entries.rs     todo/update row DB logic, incl. entries.sow_ref - a
                  purely informational, unvalidated cross-reference into
                  an external scope-of-work doc (e.g. "M1D2"), todo-only.
@@ -280,9 +289,13 @@ src/
                  leaving task + the todo_id link alone).
                  Carry-over query helpers: carryover_todos /
                  carryover_count / carryover_report - `type='todo'` rows
-                 from the last N days with no `done` update, feeding
-                 /progress add autocomplete, /team status ("+N carried"),
-                 /team report ("Carried over" block) and /todo list.
+                 from the last N days with no `done` update that haven't
+                 been carried forward yet (no entries.carried_from row
+                 points at them), feeding /todo add carryover:
+                 autocomplete, /todo list's "Not carried over yet"
+                 section, /team status ("+N to carry") and /team report
+                 ("Not carried over yet" block). Carry-over is explicit:
+                 /progress add only offers today's todos.
                  short_date formats an origin date ("2026-08-27" ->
                  "Aug 27")
   members.rs     roster seeding (seed replaces the whole table in one
@@ -318,7 +331,8 @@ src/
                  meant for a `.md` file attachment (alignment only reads
                  right in a fixed-width viewer, not a chat message);
                  used by recap::format_day_table_file and
-                 followups::format_missed_report_file. team_status / team_report take
+                 performance::format_performance_file. team_status /
+                 team_report take
                  carryover_lookback_days; MemberStatus gains
                  carried_count, MemberReport gains carried
                  (Vec<CarryoverDetail>); matched_update_count is now
@@ -342,21 +356,25 @@ src/
                  startup: records past unrecorded days within 14 days
                  that had any entry - covers the bot being down at
                  day_summary_time until after midnight)
-                 + missed_detail/
-                 format_missed_report_file (the report /missed renders
-                 as `.md` file content, `None` when there's nothing
-                 missed - the command falls back to a plain "nothing
-                 missed" message with no attachment then), MissedDetail
-                 { member, missed_todo_dates,
-                 missed_update_dates } - per-member exact dates, folded
-                 in Rust from rows ordered member/date rather than a SQL
-                 GROUP BY, since the report needs every date, not just a
-                 count; format_missed_report_file renders that detail
-                 first, then a summary table (status::render_aligned_table)
-                 separately ranked by total missed days, most first)
-  recap.rs       resolve_day_or_range (shared `/recap`+`/missed` start/end
-                 validation: none = today, one = that day, both = range,
-                 capped at 60 days) + biweekly_range (`/recap-biweekly`'s
+                 + rederive_member (re-judges one member's recorded days
+                 after a leave change). Backfill and rederive judge a past
+                 day with today's roster, so both skip a member whose
+                 first_seen (earliest entries / missed_submissions /
+                 member_leave row; shared with performance.rs) is after
+                 that day; the live record_missed judges everyone. Misses are judged against cut-off
+                 instants, not end of day: members_missing_todo /
+                 members_missing_update compare entries.created_at
+                 (RFC3339 text) with the day's cut-off, skip members on
+                 leave (member_leave), and record_missed takes the day's
+                 DayCutoffs so a kind waived for bot downtime writes no
+                 row)
+  recap.rs       resolve_day_or_range (`/recap` start/end validation:
+                 none = today, one = that day, both = range, capped at
+                 60 days) + resolve_month_or_range (same, but none = the
+                 1st of the month to today; `/team performance`, capped at
+                 366 days) + month_bounds (the whole current month,
+                 `/team leave list`'s no-dates default) +
+                 biweekly_range (`/recap-biweekly`'s
                  fixed 14 days ending yesterday) + recap_range/day_rows
                  (per-day todo+latest-update rows, bucketed
                  blocked/no-report/in-progress/done, plus ad-hoc updates
@@ -469,7 +487,43 @@ src/
                  (`<config>.lock`), and `service install`
                  (`/etc/dispatchd/service-install.lock`) - each guards only
                  against a second instance of that same subcommand
-  maintenance.rs `dispatchd maintenance run` DB logic (weekly prune + VACUUM)
+  maintenance.rs `dispatchd maintenance run` DB logic (weekly prune + VACUUM);
+                 keeps reminders_sent rows of type missed_recorded, since
+                 /team performance's "Expected" days depend on them
+  cutoffs.rs     Rules (from Config: tz, the four times, uptime tolerance
+                 of 2 x ticker_interval_seconds), instant (local time ->
+                 UTC Timestamp), uptime spans (start_span at ticker
+                 startup, touch_span from its own heartbeat task every
+                 ticker interval - not the tick, so a slow tick never
+                 reads as downtime; never pruned) + covered /
+                 day_cutoffs (a cut-off is waived when the spans leave a
+                 gap in its own window: todo_time -> todo_cutoff for
+                 /todo, update_time -> progress_cutoff for /progress),
+                 ensure_rules_since / rules_since / rules_apply (app_meta
+                 'cutoff_rules_since': the first day the cut-off rules
+                 apply - set once, to today, or tomorrow if today's
+                 todo_reminder or missed_recorded already went out. Before
+                 it day_cutoffs returns the old end-of-day rule (no
+                 cut-off, nothing waived) for every caller, the ticker
+                 posts no cut-off alert, and the performance report adds
+                 its old-rule note)
+  leave.rs       member_leave DB logic: per-member leave/sick days
+                 (ritual days only; weekends skipped unless
+                 run_on_weekends), add/remove/list - backs /team leave;
+                 remove returns the dates it actually deleted
+  performance.rs /team performance data + rendering, serenity-free:
+                 performance(conn, start, end, github) -> one
+                 MemberPerformance per non-viewer member, ordered by name
+                 COLLATE NOCASE then id (expected days = missed_recorded
+                 days from the member's first_seen minus leave/sick;
+                 on-time, never above 99% with a miss; missed todo/progress
+                 dates on expected days only, by discord_user_id;
+                 tasks/done/blocked days; optional GitHub activity via
+                 github::report::team_activity, "—" unless github_user is
+                 set and resolved) and
+                 format_performance_file (aligned discipline + output
+                 tables, per-member date lists, an old-rule note when the
+                 range starts before rules_since)
   upgrade.rs     self-upgrade. Pure helpers (`Version` compare, `sha256_for`
                  / `verify_sha256`, `parse_latest_tag`, `Request` /
                  `StatusLine` serde, `parse_status`) + reqwest/flate2/tar
@@ -511,8 +565,8 @@ src/
                     ticker + team), spawns the ticker alongside the client;
                     calls admin::post_upgrade_confirmation on `ready`.
                     Handler carries carryover_lookback_days, passed to
-                    /team status/report, /progress autocomplete, and
-                    /todo list
+                    /team status/report, /todo add carryover: autocomplete,
+                    and /todo list
     help.rs        /help - static overview of every command
     admin.rs       the `/admin` command group (members with role=admin):
                     `status` - `dispatchd status`'s systemd + Discord health
@@ -536,10 +590,14 @@ src/
                     entries.todo_id's FOREIGN KEY (surfaced as a friendly
                     reply, not a raw DB error) if a /progress report
                     already references the todo. list also appends a
-                    read-only "Carried over (still open)" section
+                    read-only "Not carried over yet" section
                     (format_todo_list) and chunks its reply past 2000
                     chars like /team report (status::split_into_messages);
-                    edit/delete ignore carried-over todos
+                    edit/delete ignore carried-over todos. `add` takes an
+                    optional `carryover:` (autocomplete over
+                    entries::carryover_todos) that opens the modal
+                    prefilled and inserts the todo with carried_from set
+                    (entries::carry_over_todo - one carry per origin todo)
     progress.rs    /progress add|edit|list|help - `add` (was the flat
                     /progress command) opens the report modal and always
                     inserts a new 'update' row; `edit` (report autocomplete
@@ -553,8 +611,9 @@ src/
                     "progress" is the command name, not the 'update' DB row
                     type - entries.type/reminders_sent.type/etc. keep that
                     name, it's the data concept not the command surface.
-                    add's autocomplete unions today's open todos with
-                    carryover_todos (merge_task_choices, deduped, cap 25)
+                    add's autocomplete offers today's open todos only
+                    (entries::list_open_todos); an older todo has to be
+                    carried over first with /todo add carryover:
     team.rs        the `/team` command group (was team_status.rs):
                     `status` - the old standalone summary command moved
                     here verbatim, one line per member showing who's
@@ -575,7 +634,20 @@ src/
                     (via mod.rs). `github` (handle_github) - per-member
                     GitHub activity via github::report::team_github, same
                     dates as /recap, is_lead-gated, ephemeral + chunked;
-                    replies "not configured" when [github] is off
+                    replies "not configured" when [github] is off;
+                    `leave add|remove|list` (leave.rs; add re-derives every
+                    recorded day in range via followups::rederive_member,
+                    remove only the days leave::remove actually deleted;
+                    list defaults to the whole month, recap::month_bounds,
+                    and is chunked); `performance` (handle_performance ->
+                    build_performance) - is_lead-gated, ephemeral reply
+                    with a `performance-<start>_<end>.md` attachment from
+                    performance::format_performance_file, no dates = this
+                    month (resolve_month_or_range, 366 days), "No team
+                    members to report on." for an empty roster, and
+                    pending_today_note (is_ritual_day) when the range
+                    includes a today whose missed_recorded marker isn't
+                    written yet
     ticker.rs      creates today's thread early (thread_creation_time,
                     default 08:30) ahead of the todo/progress reminders
                     and the pre-meeting ping (fires at meeting_time minus
@@ -627,17 +699,28 @@ src/
                     missed_recorded, and no dependency on the standup
                     thread existing at all): maybe_record_missed calls
                     followups::record_missed to persist the day's misses
-                    into missed_submissions, feeding /missed
+                    into missed_submissions, feeding /team performance.
+                    The morning ping opens with the standing rules block
+                    (standup_message: both cut-offs, leave, carry-over);
+                    at todo_cutoff_time and progress_cutoff_time
+                    (maybe_fire_cutoff_alert, own reminders_sent kinds
+                    todo_cutoff / progress_cutoff) the thread gets an
+                    alert @-mentioning whoever is still missing it
+                    (cutoff_alert_message), or a no-mention waiver notice
+                    when the bot's uptime had a gap before that cut-off.
+                    Startup records an uptime span, touched by its own
+                    heartbeat task
     recap.rs       /recap start:<date> end:<date> (none = today, one =
                     that day, both = range - recap::resolve_day_or_range)
                     and /recap-biweekly (no options, recap::biweekly_range
                     - what a bare /recap meant before) - tech-lead-only,
-                    both share `respond`. Same reply shape as /missed: a
+                    both share `respond`. Reply shape: a
                     short header (range_label / range_phrase collapse a
                     single day to just the date; "No activity on/between
                     ..." when empty) plus, when there's anything to show, a
                     `recap-<start>_<end>.md` attachment (`recap-<date>.md`
-                    for a single day - attachment_name, shared with /missed)
+                    for a single day - attachment_name, shared with
+                    /team performance)
                     (recap::format_recap_file - one column-aligned day
                     table per day, recap::recap_range) - no chunking, an
                     attachment isn't bound by Discord's 2000-char cap.
@@ -645,17 +728,4 @@ src/
                     github::report::recap_file instead - per-deliverable,
                     no names - and both commands' include_member_detail
                     bool appends the per-day tables
-    missed.rs      /missed start:<date> end:<date> - tech-lead-only,
-                    reads missed_submissions (the ticker's daily snapshot
-                    above, not a live query) via followups::missed_detail
-                    + format_missed_report_file - per-member dates first,
-                    a ranked summary table after, as a `missed-<start>_
-                    <end>.md` file attachment (same short-header-plus-file
-                    reply shape as /recap, no chunking needed); same
-                    date handling as /recap (recap::resolve_day_or_range,
-                    reused directly). When the range includes today and
-                    today's snapshot hasn't run yet (no missed_recorded
-                    marker, on a day the ritual runs), appends a
-                    pending_today_note naming day_summary_time instead of
-                    letting today read as clean
 ```

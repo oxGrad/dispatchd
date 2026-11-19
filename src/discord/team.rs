@@ -1,22 +1,28 @@
 use std::sync::{Arc, Mutex};
 
+use jiff::civil::{Date, Time};
 use jiff::tz::TimeZone;
 use rusqlite::Connection;
 use serenity::all::{
     AutocompleteChoice, ChannelId, CommandDataOption, CommandDataOptionValue, CommandInteraction,
     CommandInteraction as AutocompleteInteraction, CommandOptionType, Context as SerenityContext,
-    CreateAutocompleteResponse, CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage, Http,
-    Permissions,
+    CreateAttachment, CreateAutocompleteResponse, CreateCommand, CreateCommandOption,
+    CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage,
+    CreateMessage, Http, Permissions,
 };
 
-use crate::{entries, members, status};
+use crate::cutoffs::{self, Rules};
+use crate::leave::{self, LeaveDay, Reason};
+use crate::{entries, followups, members, performance, recap, reminders, status};
 
 use super::get_option_string;
+use super::recap::{attachment_name, range_label};
 
 pub fn command() -> CreateCommand {
     CreateCommand::new("team")
-        .description("Tech-lead tools: status, full report, reminders, GitHub activity")
+        .description(
+            "Tech-lead tools: status, report, reminders, leave, GitHub activity, performance",
+        )
         .default_member_permissions(Permissions::MANAGE_GUILD)
         .add_option(CreateCommandOption::new(
             CommandOptionType::SubCommand,
@@ -55,6 +61,22 @@ pub fn command() -> CreateCommand {
             "skip-meeting",
             "Cancel today's meeting and tell the team you're all caught up",
         ))
+        .add_option(leave_group())
+        .add_option(
+            CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "performance",
+                "Per-member review: standup discipline and output for a period",
+            )
+            .add_sub_option(date_option(
+                "start",
+                "Start date YYYY-MM-DD (default: this month)",
+            ))
+            .add_sub_option(date_option(
+                "end",
+                "End date YYYY-MM-DD (default: this month)",
+            )),
+        )
         .add_option(
             CreateCommandOption::new(
                 CommandOptionType::SubCommand,
@@ -78,6 +100,102 @@ pub fn command() -> CreateCommand {
                 .required(false),
             ),
         )
+}
+
+fn date_option(name: &str, desc: &str) -> CreateCommandOption {
+    CreateCommandOption::new(CommandOptionType::String, name, desc).required(false)
+}
+
+fn member_option(desc: &str) -> CreateCommandOption {
+    CreateCommandOption::new(CommandOptionType::String, "member", desc)
+        .required(true)
+        .set_autocomplete(true)
+}
+
+fn leave_group() -> CreateCommandOption {
+    let start = "Start date YYYY-MM-DD (alone: just that day; default: today)";
+    let end = "End date YYYY-MM-DD (alone: just that day; default: today)";
+    CreateCommandOption::new(
+        CommandOptionType::SubCommandGroup,
+        "leave",
+        "Mark members on leave or sick",
+    )
+    .add_sub_option(
+        CreateCommandOption::new(CommandOptionType::SubCommand, "add", "Mark a member away")
+            .add_sub_option(member_option("Who is away"))
+            .add_sub_option(
+                CreateCommandOption::new(CommandOptionType::String, "reason", "Why")
+                    .required(true)
+                    .add_string_choice("Leave", "leave")
+                    .add_string_choice("Sick", "sick"),
+            )
+            .add_sub_option(date_option("start", start))
+            .add_sub_option(date_option("end", end)),
+    )
+    .add_sub_option(
+        CreateCommandOption::new(
+            CommandOptionType::SubCommand,
+            "remove",
+            "Clear a member's leave days",
+        )
+        .add_sub_option(member_option("Whose leave to clear"))
+        .add_sub_option(date_option("start", start))
+        .add_sub_option(date_option("end", end)),
+    )
+    .add_sub_option(
+        CreateCommandOption::new(CommandOptionType::SubCommand, "list", "List leave days")
+            .add_sub_option(date_option(
+                "start",
+                "Start date YYYY-MM-DD (default: this month)",
+            ))
+            .add_sub_option(date_option(
+                "end",
+                "End date YYYY-MM-DD (default: this month)",
+            )),
+    )
+}
+
+/// `Some((sub, options))` when the top option is the `leave` group.
+pub fn leave_subcommand(options: &[CommandDataOption]) -> Option<(&str, &[CommandDataOption])> {
+    let top = options.first()?;
+    match &top.value {
+        CommandDataOptionValue::SubCommandGroup(nested) if top.name == "leave" => {
+            subcommand(nested)
+        }
+        _ => None,
+    }
+}
+
+fn leave_added_reply(name: &str, reason: Reason, days: &[String]) -> String {
+    if days.is_empty() {
+        return "⚠️ No working days in that range - nothing recorded.".to_string();
+    }
+    let dates: Vec<String> = days.iter().map(|d| entries::short_date(d)).collect();
+    format!(
+        "✅ {name} marked {} for {}.",
+        reason.label(),
+        dates.join(", ")
+    )
+}
+
+fn leave_removed_reply(name: &str, removed: usize) -> String {
+    format!("✅ Removed {removed} leave day(s) for {name}.")
+}
+
+fn format_leave_list(rows: &[LeaveDay], start: &str, end: &str) -> String {
+    if rows.is_empty() {
+        return format!("No leave between {start} and {end}.");
+    }
+    let mut out = format!("🏖️ **Leave {start} to {end}**");
+    for r in rows {
+        out.push_str(&format!(
+            "\n• {} · {} · {}",
+            entries::short_date(&r.date),
+            r.name,
+            r.reason.label()
+        ));
+    }
+    out
 }
 
 /// The fixed announcement `/team skip-meeting` posts into the standup
@@ -362,12 +480,161 @@ pub async fn handle_github(
     reply_in_chunks(ctx, command, body, "No GitHub activity.", "/team github").await;
 }
 
+/// `/team performance [start] [end]`: the per-member review report
+/// (`performance::performance`) as a `.md` attachment; no dates = this
+/// month. The "Expected" days come from the ticker's `missed_recorded`
+/// markers, so a range that includes today before the snapshot gets
+/// `pending_today_note`.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_performance(
+    ctx: &SerenityContext,
+    command: &CommandInteraction,
+    options: &[CommandDataOption],
+    db: &Arc<Mutex<Connection>>,
+    timezone: &TimeZone,
+    github_on: bool,
+    day_summary_time: Time,
+    run_on_weekends: bool,
+) {
+    let discord_user_id = command.user.id.to_string();
+    let today = entries::today_in(timezone);
+    let start = get_option_string(options, "start");
+    let end = get_option_string(options, "end");
+
+    let body = {
+        let conn = db.lock().expect("db mutex poisoned");
+        match members::is_lead(&conn, &discord_user_id) {
+            Ok(false) => Err("⛔ This command is restricted to the tech lead.".to_string()),
+            Ok(true) => {
+                match recap::resolve_month_or_range(start.as_deref(), end.as_deref(), &today, 366) {
+                    Err(msg) => Err(msg),
+                    Ok((start, end)) => build_performance(
+                        &conn,
+                        &today,
+                        &start,
+                        &end,
+                        github_on.then_some(timezone),
+                        day_summary_time,
+                        run_on_weekends,
+                    )
+                    .map_err(|e| {
+                        eprintln!("failed to build /team performance: {e:#}");
+                        "⚠️ Something went wrong building the report.".to_string()
+                    }),
+                }
+            }
+            Err(e) => {
+                eprintln!("failed to check is_lead: {e}");
+                Err("⚠️ Something went wrong checking permissions.".to_string())
+            }
+        }
+    };
+
+    let (content, file) = match body {
+        Ok(Some((content, file, name))) => (content, Some((file, name))),
+        Ok(None) => ("No team members to report on.".to_string(), None),
+        Err(message) => (message, None),
+    };
+    let mut reply = CreateInteractionResponseMessage::new()
+        .content(content)
+        .ephemeral(true);
+    if let Some((file, name)) = file {
+        reply = reply.add_file(CreateAttachment::bytes(file.into_bytes(), name));
+    }
+    if let Err(e) = command
+        .create_response(&ctx.http, CreateInteractionResponse::Message(reply))
+        .await
+    {
+        eprintln!("failed to respond to /team performance: {e}");
+    }
+}
+
+/// `(reply text, file content, file name)`, or `None` for an empty roster.
+fn build_performance(
+    conn: &Connection,
+    today: &str,
+    start: &str,
+    end: &str,
+    github: Option<&TimeZone>,
+    day_summary_time: Time,
+    run_on_weekends: bool,
+) -> anyhow::Result<Option<(String, String, String)>> {
+    let rows = performance::performance(conn, start, end, github)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let rules_since = cutoffs::rules_since(conn)?;
+    let file = performance::format_performance_file(
+        &rows,
+        start,
+        end,
+        github.is_some(),
+        rules_since.as_deref(),
+    );
+    // A DB error here only costs the note, not the report.
+    let recorded = reminders::already_sent(conn, today, "missed_recorded").unwrap_or_else(|e| {
+        eprintln!("failed to check missed_recorded status: {e}");
+        true
+    });
+    let includes_today = start <= today && today <= end;
+    let note = pending_today_note(
+        includes_today,
+        recorded,
+        is_ritual_day(today, run_on_weekends),
+        day_summary_time,
+    );
+    let mut content = format!(
+        "📈 **Team performance ({})** - see attached.",
+        range_label(start, end)
+    );
+    if let Some(note) = note {
+        content.push('\n');
+        content.push_str(&note);
+    }
+    Ok(Some((
+        content,
+        file,
+        attachment_name("performance", start, end),
+    )))
+}
+
+/// Whether the ticker records misses for `today` at all - it skips
+/// weekends unless `run_on_weekends`, so promising a snapshot "at 16:00"
+/// on a Saturday would be wrong.
+fn is_ritual_day(today: &str, run_on_weekends: bool) -> bool {
+    run_on_weekends
+        || Date::strptime("%Y-%m-%d", today)
+            .map(|d| !super::ticker::is_weekend(d.weekday()))
+            .unwrap_or(true)
+}
+
+/// Pure - the "today isn't in yet" caveat appended to a performance reply
+/// whose range includes today before the ticker has taken today's
+/// snapshot. `None` when today is out of range, already recorded, or a day
+/// the ritual doesn't run.
+fn pending_today_note(
+    includes_today: bool,
+    recorded: bool,
+    ritual_day: bool,
+    day_summary_time: Time,
+) -> Option<String> {
+    if !includes_today || recorded || !ritual_day {
+        return None;
+    }
+    Some(format!(
+        "ℹ️ Today's misses haven't been recorded yet - that happens at {}.",
+        day_summary_time.strftime("%H:%M")
+    ))
+}
+
 pub async fn handle_autocomplete(
     ctx: &SerenityContext,
     autocomplete: &AutocompleteInteraction,
     db: &Arc<Mutex<Connection>>,
 ) {
-    let partial = subcommand(&autocomplete.data.options)
+    let opts = &autocomplete.data.options;
+    let partial = leave_subcommand(opts)
+        .or_else(|| subcommand(opts))
         .and_then(|(_, opts)| get_option_string(opts, "member"))
         .unwrap_or_default()
         .to_lowercase();
@@ -467,6 +734,101 @@ pub async fn handle_remind(
     }
 }
 
+/// `/team leave add|remove|list`. Lead-only, ephemeral.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_leave(
+    ctx: &SerenityContext,
+    command: &CommandInteraction,
+    sub: &str,
+    options: &[CommandDataOption],
+    db: &Arc<Mutex<Connection>>,
+    timezone: &TimeZone,
+    rules: &Rules,
+    run_on_weekends: bool,
+) {
+    let user_id = command.user.id.to_string();
+    let today = entries::today_in(timezone);
+    let start = get_option_string(options, "start");
+    let end = get_option_string(options, "end");
+
+    let reply_text = 'reply: {
+        let conn = db.lock().expect("db mutex poisoned");
+        match members::is_active_lead(&conn, &user_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                break 'reply "⛔ This command is restricted to the tech lead.".to_string();
+            }
+            Err(e) => {
+                eprintln!("failed to check is_active_lead: {e}");
+                break 'reply "⚠️ Something went wrong checking permissions.".to_string();
+            }
+        }
+        let failed = |e: anyhow::Error| {
+            eprintln!("/team leave {sub} failed: {e:#}");
+            "⚠️ Something went wrong - please try again.".to_string()
+        };
+
+        if sub == "list" {
+            let range = match (start.as_deref(), end.as_deref()) {
+                (None, None) => crate::recap::month_bounds(&today),
+                (s, e) => crate::recap::resolve_month_or_range(s, e, &today, 366),
+            };
+            let (s, e) = match range {
+                Ok(r) => r,
+                Err(msg) => break 'reply msg,
+            };
+            break 'reply match leave::list(&conn, &s, &e) {
+                Ok(rows) => format_leave_list(&rows, &s, &e),
+                Err(e) => failed(e),
+            };
+        }
+
+        let Some(member) = get_option_string(options, "member") else {
+            break 'reply "⚠️ Provide a member.".to_string();
+        };
+        let reason = match sub {
+            "add" => match get_option_string(options, "reason").and_then(|r| Reason::parse(&r)) {
+                Some(r) => Some(r),
+                None => break 'reply "⚠️ Provide a reason (leave or sick).".to_string(),
+            },
+            _ => None,
+        };
+        match members::role_of(&conn, &member) {
+            Ok(Some(role)) if role != "viewer" => {}
+            Ok(_) => {
+                break 'reply "⚠️ That member isn't tracked (not on the roster, or a viewer)."
+                    .to_string();
+            }
+            Err(e) => break 'reply failed(e),
+        }
+        let name = match members::name_of(&conn, &member) {
+            Ok(Some(n)) => n,
+            Ok(None) => member.clone(),
+            Err(e) => break 'reply failed(e),
+        };
+        let (s, e) =
+            match crate::recap::resolve_day_or_range(start.as_deref(), end.as_deref(), &today) {
+                Ok(r) => r,
+                Err(msg) => break 'reply msg,
+            };
+        let days = match leave::ritual_days(&s, &e, run_on_weekends) {
+            Ok(d) => d,
+            Err(e) => break 'reply failed(e),
+        };
+
+        match followups::change_leave(&conn, &member, &days, reason, rules) {
+            Ok(changed) => match reason {
+                Some(reason) => leave_added_reply(&name, reason, &days),
+                None => leave_removed_reply(&name, changed.len()),
+            },
+            Err(e) => failed(e),
+        }
+    };
+
+    let chunks = status::split_into_messages(&reply_text, 1900);
+    reply_in_chunks(ctx, command, Ok(chunks), "No leave.", "/team leave").await;
+}
+
 pub async fn handle_skip_meeting(
     ctx: &SerenityContext,
     command: &CommandInteraction,
@@ -549,6 +911,96 @@ pub async fn handle_skip_meeting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn t(s: &str) -> Time {
+        Time::strptime("%H:%M", s).unwrap()
+    }
+
+    #[test]
+    fn pending_today_note_explains_an_unrecorded_today() {
+        assert_eq!(
+            pending_today_note(true, false, true, t("16:00")),
+            Some(
+                "ℹ️ Today's misses haven't been recorded yet - that happens at 16:00.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn pending_today_note_is_none_once_recorded_or_out_of_range_or_off_day() {
+        assert_eq!(pending_today_note(true, true, true, t("16:00")), None);
+        assert_eq!(pending_today_note(false, false, true, t("16:00")), None);
+        assert_eq!(pending_today_note(true, false, false, t("16:00")), None);
+    }
+
+    #[test]
+    fn is_ritual_day_skips_weekends_unless_configured() {
+        // 2026-10-17 is a Saturday, 2026-10-15 a Thursday.
+        assert!(!is_ritual_day("2026-10-17", false));
+        assert!(is_ritual_day("2026-10-17", true));
+        assert!(is_ritual_day("2026-10-15", false));
+    }
+
+    #[test]
+    fn leave_replies() {
+        assert_eq!(
+            leave_added_reply(
+                "Bima",
+                Reason::Sick,
+                &["2026-11-20".into(), "2026-11-23".into()]
+            ),
+            "✅ Bima marked Sick for Nov 20, Nov 23."
+        );
+        assert_eq!(
+            leave_added_reply("Bima", Reason::Leave, &[]),
+            "⚠️ No working days in that range - nothing recorded."
+        );
+        assert_eq!(
+            leave_removed_reply("Bima", 2),
+            "✅ Removed 2 leave day(s) for Bima."
+        );
+    }
+
+    #[test]
+    fn long_leave_list_splits_within_discord_limit() {
+        let rows: Vec<LeaveDay> = (1..=28)
+            .flat_map(|d| {
+                (0..4).map(move |m| LeaveDay {
+                    date: format!("2026-11-{d:02}"),
+                    discord_user_id: m.to_string(),
+                    name: format!("Member{m}"),
+                    reason: Reason::Leave,
+                })
+            })
+            .collect();
+        let text = format_leave_list(&rows, "2026-11-01", "2026-11-30");
+        assert!(text.len() > 2000);
+        let chunks = status::split_into_messages(&text, 2000);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 2000));
+        let joined = chunks.join("\n");
+        for line in text.lines() {
+            assert!(joined.contains(line), "missing {line}");
+        }
+    }
+
+    #[test]
+    fn leave_list_formats_one_line_per_day() {
+        let rows = vec![LeaveDay {
+            date: "2026-11-20".into(),
+            discord_user_id: "1".into(),
+            name: "Bima".into(),
+            reason: Reason::Sick,
+        }];
+        assert_eq!(
+            format_leave_list(&rows, "2026-11-01", "2026-11-30"),
+            "🏖️ **Leave 2026-11-01 to 2026-11-30**\n• Nov 20 · Bima · Sick"
+        );
+        assert_eq!(
+            format_leave_list(&[], "2026-11-01", "2026-11-30"),
+            "No leave between 2026-11-01 and 2026-11-30."
+        );
+    }
 
     #[test]
     fn remind_kind_parses_known_values_only() {

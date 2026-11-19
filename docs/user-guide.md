@@ -32,7 +32,7 @@ posts into a "Standup: YYYY-MM-DD" thread in the team's standup channel:
    todo nor a progress update today at all - skipped entirely if nobody
    qualifies. Either way, today's misses (per-member, `/todo` and
    `/progress` tracked independently) are recorded permanently, so the
-   tech lead can review any date range later with `/missed` (see below).
+   tech lead can review any date range later with `/team performance` (see below).
    With the [GitHub integration](github-setup.md) on, the message also
    gets a one-line team total (`GitHub: 3 PRs merged · 1 sub-issue closed
    (D.P.1.2) · 4 reviews`, no names), and the attachment gains a `SOW` and
@@ -44,6 +44,35 @@ If you miss a step, dispatchd nags you with an `@mention` in the thread a
 while after each of the two prompts above (default 30 minutes) - once per
 person per day, not on every tick. The exact times and delays are
 configurable per team, so treat the above as defaults, not guarantees.
+
+### Cut-offs, alerts and the downtime waiver
+
+Submitting late counts as missing. The morning ping opens with the standing
+rules, including two deadlines (defaults shown, both configurable):
+
+- **`/todo` cut-off, 11:00** - a todo submitted after this counts as a
+  missed `/todo`.
+- **`/progress` cut-off, 15:50** - every todo submitted before this needs
+  at least one `/progress` report submitted before it, or it counts as a
+  missed `/progress`.
+
+`/todo` and `/progress` are tracked independently; one doesn't cover the
+other. When a cut-off passes, dispatchd posts an alert in the thread that
+`@mentions` everyone still missing it, and says the miss has been recorded.
+Submitting afterwards doesn't undo the miss, but the work still shows up
+as normal.
+
+Each cut-off has its own downtime window. If the bot was offline at any
+point between the morning ping and the `/todo` cut-off (09:00 to 11:00 by
+default), the `/todo` cut-off is **waived** for the day; if it was offline
+between the afternoon reminder and the `/progress` cut-off (15:00 to 15:50
+by default), the `/progress` cut-off is waived. Morning downtime doesn't
+waive `/progress`. A waived cut-off marks nobody as missing, and the thread
+gets a notice with no mentions asking everyone to submit anyway. A short
+restart doesn't trigger this: only a gap longer than about two ticker
+intervals does. The tech lead can mark a member on leave or sick for a
+day with `/team leave` (see below), which stops the nags and records no
+miss for those days.
 
 All of this happens automatically - you don't run any command to make the
 thread or reminders appear. You only need the commands below to actually
@@ -96,7 +125,7 @@ doesn't change or remove that post.
   ```
   Use this when you need an id for `edit`/`delete` below.
   Still-open todos from earlier days appear below this in a read-only
-  **Carried over** section - see "Carrying work over" below.
+  **Not carried over yet** section - see "Carrying work over" below.
 - **`/todo edit id:<...>`** - the `id` field autocompletes over today's
   todos as you type (pick from the suggestions rather than typing a
   number by hand). Opens the same form as `add`, pre-filled with the
@@ -115,8 +144,8 @@ doesn't change or remove that post.
   - **`task`** - autocompletes over today's todos that don't have a
     progress report yet. Pick one, or ignore the suggestions and type
     something else entirely for unplanned/ad-hoc work that wasn't on your
-    todo list (e.g. "Fixed a prod outage"). Todos carried over from
-    earlier days show up here too, marked `· carried from <date>`.
+    todo list (e.g. "Fixed a prod outage"). Only today's todos are
+    offered - carry an older one over first with `/todo add carryover:`.
   - **`status`** - Done / In Progress / Blocked, pick from the dropdown.
 
   That opens a form with **Progress** (required - what actually happened)
@@ -172,27 +201,26 @@ Example - unplanned work, nothing on your todo list matched:
 
 ## Carrying work over
 
-A todo you don't finish doesn't vanish at midnight. As long as no
-**Done** progress report has been filed against it, a todo from the last
-7 days keeps showing up as "still open" (the tech lead can change the
-window in `config.toml`, or set it to `0` to switch this off):
+A todo you don't finish doesn't vanish at midnight, but it doesn't move
+to the next day by itself either: you carry it over explicitly. A todo
+from the last 7 days with no **Done** report and not yet carried is a
+candidate (the tech lead can change the window in `config.toml`, or set
+it to `0` to switch this off):
 
-- **`/progress add`** lists it in the `task` autocomplete, marked
-  `· carried from <date>`. Picking it attaches your report to the
-  original todo - and its SOW ref - instead of logging it as unplanned
-  work.
-- **`/todo list`** shows it in a read-only **Carried over (still open)**
-  block below today's todos. You can't `edit` or `delete` a carried-over
-  todo - close it out by filing a Done report, or leave it to age past
-  the window.
-- The tech lead sees it in **`/team status`** (a `+N carried` marker on
-  your line) and **`/team report`** (a **Carried over** block per
-  person, showing each todo's latest status and whether it moved today).
-
-Note the day-boundary asymmetry: filing an *In Progress* or *Blocked*
-(not Done) report on a todo drops it from `/progress add`'s suggestions
-for the rest of that day, but it comes back as a carried-over item the
-next day and stays there until you file a Done report.
+- **`/todo add carryover:<...>`** autocompletes over your candidates,
+  marked `· from <date>`. Picking one opens the add form prefilled with
+  its task, notes and SOW ref - edit if you like and submit, and today's
+  todo is created, linked to the original. A todo can be carried over
+  only once; deleting the carried copy makes the original a candidate
+  again.
+- **`/progress add`** lists today's todos only, so carry an older todo
+  over first, then report against today's copy.
+- **`/todo list`** shows candidates in a read-only **Not carried over
+  yet** block below today's todos. You can't `edit` or `delete` them.
+- The tech lead sees them in **`/team status`** (a `+N to carry` marker on
+  your line) and **`/team report`** (a **Not carried over yet** block per
+  person, showing each todo's latest status). Once you carry a todo it
+  leaves these lists and counts as one of today's todos.
 
 Carry-over is per-person and only ever looks at your own todos.
 
@@ -205,8 +233,9 @@ with an SOW ref, the unique refs are appended, e.g. `✅ Alice - 3/3
 updated (M1D1, M1D2, M2)` - handy for the tech lead to see which
 milestones/deliverables got touched today without opening `/todo list`
 for each person. If a member has unfinished todos carried over from the
-last few days, their line ends with `+N carried` (or reads `no new todo
-(N carried)` when they haven't posted anything today). Everyone else gets
+last few days that they haven't carried over yet, their line ends with
+`+N to carry` (or reads `❌ ... - no todo posted (N to carry)` when they
+haven't posted anything today - an uncarried todo isn't today's `/todo`). Everyone else gets
 an "restricted to the tech lead" reply if they try it - it's not meant as
 a general team overview. A member with `role = "viewer"` also passes this
 check (see below), so `/team status` and `/team report` aren't strictly
@@ -219,9 +248,9 @@ its notes, SOW ref, and the progress report(s) filed against it, plus any
 unplanned work. Long reports are split across follow-up messages (Discord
 caps a message at 2000 characters). Ephemeral - only you see it.
 
-Any todos carried over from earlier days (still open, no Done report)
-appear in a **Carried over** block at the end of each member's section,
-with the latest status and whether it was updated today.
+Any unfinished todos from earlier days that haven't been carried over yet
+(still open, no Done report) appear in a **Not carried over yet** block at
+the end of each member's section, with their latest status.
 
 ## `/team github` - tech lead only
 
@@ -248,6 +277,18 @@ one, and vice versa. If today's thread hasn't been created yet, the bot
 tells you so and posts nothing. Unlike `/team status`/`report`, this one
 stays strictly `role = "lead"` - a `viewer` gets "restricted to the tech
 lead" here, since nudging a member isn't a view-only action.
+
+## `/team leave` - tech lead only
+
+`/team leave add member:<name> reason:<leave|sick> [start] [end]` marks
+working days as leave or sick: the member isn't reminded or nagged and the
+day isn't recorded as a miss (changing leave for an already-recorded day
+re-derives that member's misses). Dates work like `/recap` (none = today,
+one = that day); weekends are skipped unless the ritual runs on weekends.
+`/team leave remove member:<name> [start] [end]` clears them, and
+`/team leave list [start] [end]` shows leave days (default: this month,
+up to 366 days). Viewers and non-roster users can't be marked. Replies are
+ephemeral.
 
 ## `/team skip-meeting` - tech lead only
 
@@ -295,24 +336,28 @@ it can go to stakeholders as is. Both commands take an optional
 tables (standup, GitHub work not on a todo, code reviews) with names, for
 your own use.
 
-## `/missed` - tech lead only
+## `/team performance` - tech lead only
 
-`/missed start:<date> end:<date>` reports who missed a `/todo`, a
-`/progress` update, or both, on each day in the range. "Missed
-`/progress`" means a todo that day with no report filed against it, not
-just an entirely quiet day - if you had nothing planned, that's a missed
-`/todo` instead, not double-counted as a missed update too. Like
-`/recap`, the reply is a short message with a `.md` file attached: a
-section per member listing the exact dates they missed each one, then a
-column-aligned summary table ranking everyone by total missed days.
-Same date handling as `/recap` (no dates = today, one date = just that
-day, both = the range); there's no biweekly shortcut, pass both dates for
-a two-week view. This reads from a daily snapshot the bot takes at
-`day_summary_time` (see "The daily ritual" above), not a live query, so a
-day only shows up here once that snapshot has run - if your range
-includes today and the snapshot hasn't run yet, the reply says so. Members with a clean record
-for the whole range aren't listed at all, and if nobody missed anything
-you just get a plain "nothing missed" message with no attachment.
+`/team performance start:<date> end:<date>` is the per-member review for a
+period: no dates = this month, one date = just that day, both = the range
+(up to a year). The reply is a short message with a `.md` file attached,
+holding:
+
+- **Standup discipline** - per member: days expected (working days the bot
+  recorded, minus leave and sick days), leave and sick day counts, missed
+  `/todo` and missed `/progress` counts, and the share of expected days
+  submitted on time. Misses follow the cut-off rules above, and a day whose
+  cut-off was waived for downtime is not counted against anyone.
+- **Output** - tasks, how many were done, and days spent blocked; with the
+  [GitHub integration](github-setup.md) on, also PRs merged and open,
+  reviews and sub-issues closed.
+- A per-member list of the exact dates behind each count.
+
+A day only counts as expected once the bot has taken its end-of-day
+snapshot (at `day_summary_time`), so if the range includes today and that
+hasn't happened yet, the reply says so. If the range starts before the
+cut-offs were introduced, the file notes that earlier misses were judged by
+the old end-of-day rule.
 
 ## View-only access - the `viewer` role
 

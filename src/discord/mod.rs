@@ -1,6 +1,5 @@
 mod admin;
 mod help;
-mod missed;
 mod progress;
 mod recap;
 mod team;
@@ -31,6 +30,7 @@ pub struct Handler {
     carryover_lookback_days: u32,
     day_summary_time: Time,
     run_on_weekends: bool,
+    rules: crate::cutoffs::Rules,
     github: Option<GithubConfig>,
 }
 
@@ -47,7 +47,6 @@ impl EventHandler for Handler {
             admin::command(),
             recap::command(),
             recap::biweekly_command(),
-            missed::command(),
         ];
         if let Err(e) = self.guild_id.set_commands(&ctx.http, commands).await {
             eprintln!("failed to register guild commands: {e}");
@@ -89,7 +88,17 @@ impl EventHandler for Handler {
                     }
                 }
                 "todo" => match todo::subcommand(&command.data.options) {
-                    Some(("add", _)) => todo::handle_add(&ctx, &command).await,
+                    Some(("add", opts)) => {
+                        todo::handle_add(
+                            &ctx,
+                            &command,
+                            opts,
+                            &self.db,
+                            &self.timezone,
+                            self.carryover_lookback_days,
+                        )
+                        .await
+                    }
                     Some(("edit", opts)) => {
                         todo::handle_edit(&ctx, &command, opts, &self.db, &self.timezone).await
                     }
@@ -120,7 +129,22 @@ impl EventHandler for Handler {
                     Some(("help", _)) => progress::handle_help(&ctx, &command).await,
                     _ => {}
                 },
-                // Three subcommands, so `match` rather than `if let`.
+                // The `leave` subcommand group, ahead of the plain subcommands.
+                "team" if team::leave_subcommand(&command.data.options).is_some() => {
+                    if let Some((sub, opts)) = team::leave_subcommand(&command.data.options) {
+                        team::handle_leave(
+                            &ctx,
+                            &command,
+                            sub,
+                            opts,
+                            &self.db,
+                            &self.timezone,
+                            &self.rules,
+                            self.run_on_weekends,
+                        )
+                        .await
+                    }
+                }
                 "team" => match team::subcommand(&command.data.options) {
                     Some(("status", _)) => {
                         team::handle_status(
@@ -147,6 +171,19 @@ impl EventHandler for Handler {
                     }
                     Some(("skip-meeting", _)) => {
                         team::handle_skip_meeting(&ctx, &command, &self.db, &self.timezone).await
+                    }
+                    Some(("performance", opts)) => {
+                        team::handle_performance(
+                            &ctx,
+                            &command,
+                            opts,
+                            &self.db,
+                            &self.timezone,
+                            self.github.is_some(),
+                            self.day_summary_time,
+                            self.run_on_weekends,
+                        )
+                        .await
                     }
                     Some(("github", opts)) => {
                         team::handle_github(
@@ -191,25 +228,11 @@ impl EventHandler for Handler {
                     )
                     .await
                 }
-                "missed" => {
-                    missed::handle(
-                        &ctx,
-                        &command,
-                        &self.db,
-                        &self.timezone,
-                        self.day_summary_time,
-                        self.run_on_weekends,
-                    )
-                    .await
-                }
                 _ => {}
             },
             Interaction::Autocomplete(autocomplete) => match autocomplete.data.name.as_str() {
                 "todo" => {
-                    todo::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone).await
-                }
-                "progress" => {
-                    progress::handle_autocomplete(
+                    todo::handle_autocomplete(
                         &ctx,
                         &autocomplete,
                         &self.db,
@@ -218,11 +241,27 @@ impl EventHandler for Handler {
                     )
                     .await
                 }
+                "progress" => {
+                    progress::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone)
+                        .await
+                }
                 "team" => team::handle_autocomplete(&ctx, &autocomplete, &self.db).await,
                 _ => {}
             },
             Interaction::Modal(modal) if modal.data.custom_id == todo::ADD_MODAL_ID => {
                 todo::handle_modal_submission(&ctx, &modal, &self.db, &self.timezone).await;
+            }
+            Interaction::Modal(modal)
+                if modal.data.custom_id.starts_with(todo::CARRY_MODAL_PREFIX) =>
+            {
+                todo::handle_carry_modal_submission(
+                    &ctx,
+                    &modal,
+                    &self.db,
+                    &self.timezone,
+                    self.carryover_lookback_days,
+                )
+                .await;
             }
             Interaction::Modal(modal)
                 if modal.data.custom_id.starts_with(todo::EDIT_MODAL_PREFIX) =>
@@ -336,6 +375,7 @@ pub async fn run(
             carryover_lookback_days: config.carryover_lookback_days,
             day_summary_time: config.day_summary_time,
             run_on_weekends: config.run_on_weekends,
+            rules: crate::cutoffs::Rules::from_config(&config),
             github: config.github.clone(),
         })
         .await

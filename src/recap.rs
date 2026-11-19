@@ -73,9 +73,8 @@ pub fn biweekly_range(today: &str) -> Result<(String, String), String> {
     Ok(format_range(start, end))
 }
 
-/// Resolves the `start`/`end` options shared by `/recap` and `/missed`:
-/// neither given = today, exactly one given = that single day, both given
-/// = the inclusive range (at most `MAX_RECAP_DAYS`). Returns a user-facing
+/// Resolves `/recap`'s `start`/`end` options: neither given = today, exactly one
+/// given = that single day, both given = the inclusive range (at most `MAX_RECAP_DAYS`). Returns a user-facing
 /// error string rather than `anyhow::Error`: every failure here is bad
 /// caller input (unparsable date, inverted or oversized range), not an
 /// internal fault.
@@ -84,10 +83,45 @@ pub fn resolve_day_or_range(
     end: Option<&str>,
     today: &str,
 ) -> Result<(String, String), String> {
+    resolve_range(start, end, today, false, MAX_RECAP_DAYS)
+}
+
+/// Like `resolve_day_or_range`, but neither date = the 1st of `today`'s
+/// month through `today`, and the span cap is `max_days`.
+pub fn resolve_month_or_range(
+    start: Option<&str>,
+    end: Option<&str>,
+    today: &str,
+    max_days: i64,
+) -> Result<(String, String), String> {
+    resolve_range(start, end, today, true, max_days)
+}
+
+/// The 1st through the last day of `today`'s month - `/team leave list`'s
+/// default, so upcoming leave this month shows too.
+pub fn month_bounds(today: &str) -> Result<(String, String), String> {
+    let today = parse_today(today)?;
+    Ok(format_range(today.first_of_month(), today.last_of_month()))
+}
+
+fn resolve_range(
+    start: Option<&str>,
+    end: Option<&str>,
+    today: &str,
+    month_default: bool,
+    max_days: i64,
+) -> Result<(String, String), String> {
     let (start_date, end_date) = match (start, end) {
         (None, None) => {
             let today = parse_today(today)?;
-            (today, today)
+            (
+                if month_default {
+                    today.first_of_month()
+                } else {
+                    today
+                },
+                today,
+            )
         }
         (Some(s), None) => {
             let day = parse_option_date(s, "start")?;
@@ -104,9 +138,9 @@ pub fn resolve_day_or_range(
         return Err("⚠️ start must be on or before end.".to_string());
     }
     let span_days = i64::from((end_date - start_date).get_days()) + 1;
-    if span_days > MAX_RECAP_DAYS {
+    if span_days > max_days {
         return Err(format!(
-            "⚠️ That's {span_days} days - a range covers at most {MAX_RECAP_DAYS}. Pick a narrower range."
+            "⚠️ That's {span_days} days - a range covers at most {max_days}. Pick a narrower range."
         ));
     }
 
@@ -243,7 +277,7 @@ pub fn day_recap(conn: &Connection, date: &str) -> Result<Option<DayRecap>> {
 /// a carried-over task worked on today. `day_rows(date)` misses these
 /// entirely: it only pulls todos whose own `date` matches, and such an
 /// update always carries a `todo_id`, so it's excluded from `day_rows`'s
-/// ad-hoc (`todo_id IS NULL`) query too. Not used by `/recap`/`/missed`,
+/// ad-hoc (`todo_id IS NULL`) query too. Not used by `/recap`,
 /// whose per-day tables are keyed by a todo's origin day on purpose (a
 /// long-lived todo already shows there with its latest-ever status - see
 /// `recap_range_uses_the_latest_update_for_a_todo_updated_more_than_once` -
@@ -414,6 +448,31 @@ mod tests {
     fn biweekly_range_is_the_14_days_ending_yesterday() {
         let got = biweekly_range("2026-10-01").unwrap();
         assert_eq!(got, ("2026-09-17".to_string(), "2026-09-30".to_string()));
+    }
+
+    #[test]
+    fn month_or_range_defaults_to_the_month_so_far() {
+        assert_eq!(
+            resolve_month_or_range(None, None, "2026-11-19", 366).unwrap(),
+            ("2026-11-01".into(), "2026-11-19".into())
+        );
+        assert_eq!(
+            resolve_month_or_range(Some("2026-11-05"), None, "2026-11-19", 366).unwrap(),
+            ("2026-11-05".into(), "2026-11-05".into())
+        );
+        assert!(
+            resolve_month_or_range(Some("2025-01-01"), Some("2026-11-19"), "2026-11-19", 366)
+                .unwrap_err()
+                .contains("366")
+        );
+    }
+
+    #[test]
+    fn month_bounds_is_the_whole_current_month() {
+        assert_eq!(
+            month_bounds("2026-11-19").unwrap(),
+            ("2026-11-01".into(), "2026-11-30".into())
+        );
     }
 
     // --- resolve_day_or_range ---
