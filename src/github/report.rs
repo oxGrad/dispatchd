@@ -98,6 +98,7 @@ impl fmt::Display for ItemRef {
 
 #[derive(Debug, Clone)]
 struct RosterMember {
+    discord_user_id: String,
     name: String,
     github_user: Option<String>,
     github_id: Option<i64>,
@@ -108,16 +109,17 @@ struct RosterMember {
 /// volume.
 fn roster(conn: &Connection) -> Result<Vec<RosterMember>> {
     let mut stmt = conn.prepare(
-        "SELECT name, github_user, github_id FROM members
+        "SELECT discord_user_id, name, github_user, github_id FROM members
          WHERE role != 'viewer'
          ORDER BY name COLLATE NOCASE, discord_user_id",
     )?;
     let rows = stmt
         .query_map([], |row| {
             Ok(RosterMember {
-                name: row.get(0)?,
-                github_user: row.get(1)?,
-                github_id: row.get(2)?,
+                discord_user_id: row.get(0)?,
+                name: row.get(1)?,
+                github_user: row.get(2)?,
+                github_id: row.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -200,6 +202,7 @@ pub struct SubIssueClosed {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MemberActivity {
+    pub discord_user_id: String,
     pub name: String,
     /// `github_user` set in members.toml.
     pub linked: bool,
@@ -251,6 +254,7 @@ pub fn team_activity(conn: &Connection, w: &Window) -> Result<TeamActivity> {
     let mut members: Vec<MemberActivity> = roster
         .iter()
         .map(|m| MemberActivity {
+            discord_user_id: m.discord_user_id.clone(),
             name: m.name.clone(),
             linked: m.github_user.is_some(),
             unresolved: m.github_user.is_some() && m.github_id.is_none(),

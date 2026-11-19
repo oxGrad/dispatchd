@@ -3,7 +3,6 @@
 #![allow(dead_code)] // the `/team performance` command uses this; removed with it
 
 use crate::entries::short_date;
-use crate::followups::missed_detail;
 use crate::github::report::{MemberActivity, team_activity, window};
 use anyhow::Result;
 use jiff::tz::TimeZone;
@@ -45,7 +44,6 @@ pub fn performance(
          AND date >= ?1 AND date <= ?2 ORDER BY date",
         params![start, end],
     )?;
-    let missed = missed_detail(conn, start, end)?;
     let activity = match github {
         Some(tz) => Some(team_activity(conn, &window(start, end, tz)?)?),
         None => None,
@@ -93,7 +91,14 @@ pub fn performance(
             .filter(|d| !missed_any.contains(**d))
             .count();
 
-        let detail = missed.iter().find(|d| d.member == name);
+        let missed_of = |kind: &str| {
+            strings(
+                conn,
+                "SELECT date FROM missed_submissions WHERE discord_user_id = ?1 AND kind = ?2
+                 AND date >= ?3 AND date <= ?4 ORDER BY date",
+                params![id, kind, start, end],
+            )
+        };
         let (tasks, done): (usize, usize) = {
             let rows: Vec<bool> = conn
                 .prepare(
@@ -123,18 +128,14 @@ pub fn performance(
         out.push(MemberPerformance {
             github: activity
                 .as_ref()
-                .and_then(|a| a.members.iter().find(|m| m.name == name).cloned()),
+                .and_then(|a| a.members.iter().find(|m| m.discord_user_id == id).cloned()),
             name,
             expected: expected_days.len(),
             on_time,
             leave_dates,
             sick_dates,
-            missed_todo: detail
-                .map(|d| d.missed_todo_dates.clone())
-                .unwrap_or_default(),
-            missed_progress: detail
-                .map(|d| d.missed_update_dates.clone())
-                .unwrap_or_default(),
+            missed_todo: missed_of("todo")?,
+            missed_progress: missed_of("update")?,
             tasks,
             done,
             blocked_days: blocked_days as usize,
@@ -458,5 +459,35 @@ mod tests {
         assert_eq!(row_cells(output, "Bima")[4..], ["1", "0", "1", "0"]);
         assert_eq!(row_cells(output, "Alya")[4..], ["—", "—", "—", "—"]);
         assert!(file.contains("- PRs merged: api#210\n"), "{file}");
+    }
+
+    #[test]
+    fn members_with_the_same_name_keep_their_own_numbers() {
+        let conn = fixture();
+        member(&conn, "3", "Andi", "senior", Some(("a3", 33)));
+        member(&conn, "4", "Andi", "senior", Some(("a4", 44)));
+        conn.execute(
+            "INSERT INTO missed_submissions (date, discord_user_id, kind) VALUES ('2026-11-05', '3', 'todo')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO github_prs (node_id, repo, number, title, state, is_draft, author_id,
+                 author_login, created_at, merged_at, closed_at, updated_at)
+             VALUES ('P', 'api', 1, 't', 'merged', 0, 44, 'x', '2026-11-03T00:00:00Z',
+                 '2026-11-04T00:00:00Z', '2026-11-04T00:00:00Z', '2026-11-04T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let rows = performance(&conn, "2026-11-01", "2026-11-30", Some(&TimeZone::UTC)).unwrap();
+        let andi = |id: &str| {
+            rows.iter()
+                .find(|r| r.github.as_ref().is_some_and(|g| g.discord_user_id == id))
+                .unwrap()
+        };
+        assert_eq!(andi("3").missed_todo, vec!["2026-11-05"]);
+        assert!(andi("4").missed_todo.is_empty());
+        assert_eq!(andi("3").github.as_ref().unwrap().prs_merged.len(), 0);
+        assert_eq!(andi("4").github.as_ref().unwrap().prs_merged.len(), 1);
     }
 }
