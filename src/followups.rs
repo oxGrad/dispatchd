@@ -192,7 +192,8 @@ fn insert_misses(
 /// `rules_since`) the old end-of-day verdicts stand: rows are deleted only
 /// if the member is on leave that date now, never inserted - so removing
 /// leave can't re-judge an old day, and a leave removal on a day that
-/// never had leave can't erase an old miss.
+/// never had leave can't erase an old miss. Not a transaction of its own:
+/// `change_leave` wraps it with the leave change.
 pub fn rederive_member(
     conn: &Connection,
     discord_user_id: &str,
@@ -200,28 +201,52 @@ pub fn rederive_member(
     rules: &Rules,
     rules_since: Option<&str>,
 ) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
     for date in dates {
-        if !crate::reminders::already_sent(&tx, date, "missed_recorded")? {
+        if !crate::reminders::already_sent(conn, date, "missed_recorded")? {
             continue;
         }
         if rules_since.is_some_and(|since| date.as_str() >= since) {
-            tx.execute(
+            conn.execute(
                 "DELETE FROM missed_submissions WHERE date = ?1 AND discord_user_id = ?2",
                 params![date, discord_user_id],
             )?;
-            let day = day_cutoffs(&tx, rules, date)?;
-            insert_misses(&tx, date, &day, Some(discord_user_id), true)?;
+            let day = day_cutoffs(conn, rules, date)?;
+            insert_misses(conn, date, &day, Some(discord_user_id), true)?;
         } else {
-            tx.execute(
+            conn.execute(
                 "DELETE FROM missed_submissions WHERE date = ?1 AND discord_user_id = ?2
                  AND discord_user_id IN (SELECT discord_user_id FROM member_leave WHERE date = ?1)",
                 params![date, discord_user_id],
             )?;
         }
     }
-    tx.commit()?;
     Ok(())
+}
+
+/// Adds (`Some(reason)`) or removes (`None`) a member's leave on `dates` and
+/// re-judges the affected recorded days in one transaction, so a failed
+/// re-judge rolls the leave change back and a retry starts clean. Remove
+/// re-judges only the dates it deleted: re-deriving an untouched day would
+/// apply today's roster and cut-offs to it. Returns the dates changed.
+pub fn change_leave(
+    conn: &Connection,
+    discord_user_id: &str,
+    dates: &[String],
+    reason: Option<crate::leave::Reason>,
+    rules: &Rules,
+) -> Result<Vec<String>> {
+    let tx = conn.unchecked_transaction()?;
+    let changed = match reason {
+        Some(reason) => {
+            crate::leave::add(&tx, discord_user_id, dates, reason)?;
+            dates.to_vec()
+        }
+        None => crate::leave::remove(&tx, discord_user_id, dates)?,
+    };
+    let since = crate::cutoffs::rules_since(&tx)?;
+    rederive_member(&tx, discord_user_id, &changed, rules, since.as_deref())?;
+    tx.commit()?;
+    Ok(changed)
 }
 
 /// How far back `backfill_missed` looks. (`maintenance` never prunes the
@@ -743,6 +768,28 @@ mod tests {
         leave::remove(&conn, "1", &[DATE.into()]).unwrap();
         rederive_member(&conn, "1", &[DATE.into()], &rules, Some("2026-01-01")).unwrap();
         assert_eq!(missed_ids(&conn), vec!["1", "2"]);
+    }
+
+    #[test]
+    fn change_leave_rolls_back_when_the_rejudge_fails() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        crate::reminders::mark_sent(&conn, DATE, "missed_recorded").unwrap();
+        seed_leave(&conn, "1", DATE);
+        // Any re-judge of a recorded day now errors.
+        conn.execute_batch("DROP TABLE missed_submissions").unwrap();
+        let rules = utc_rules();
+        let days = || vec![DATE.to_string(), "2026-08-31".to_string()];
+        let reason = Some(leave::Reason::Leave);
+        assert!(change_leave(&conn, "1", &days(), reason, &rules).is_err());
+        assert!(change_leave(&conn, "1", &days(), None, &rules).is_err());
+        // Neither the Leave upsert nor the 08-31 row nor the removal stuck.
+        let left: Vec<_> = leave::list(&conn, "2026-08-01", "2026-09-30")
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.date, r.reason))
+            .collect();
+        assert_eq!(left, vec![(DATE.to_string(), leave::Reason::Sick)]);
     }
 
     #[test]

@@ -59,33 +59,32 @@ pub fn ritual_days(start: &str, end: &str, include_weekends: bool) -> Result<Vec
     Ok(out)
 }
 
-/// Upserts one row per date; returns rows written.
+/// Upserts one row per date; returns rows written. Not a transaction of its
+/// own: `followups::change_leave` wraps it with the re-judge.
 pub fn add(
     conn: &Connection,
     discord_user_id: &str,
     dates: &[String],
     reason: Reason,
 ) -> Result<usize> {
-    let tx = conn.unchecked_transaction()?;
     let mut n = 0;
     for date in dates {
-        n += tx.execute(
+        n += conn.execute(
             "INSERT INTO member_leave (date, discord_user_id, reason) VALUES (?1, ?2, ?3)
              ON CONFLICT(date, discord_user_id) DO UPDATE SET reason = excluded.reason",
             params![date, discord_user_id, reason.as_str()],
         )?;
     }
-    tx.commit()?;
     Ok(n)
 }
 
 /// Deletes the given dates for a member; returns the dates that actually had
-/// a row, in `dates` order (ascending from `ritual_days`).
+/// a row, in `dates` order (ascending from `ritual_days`). Not a transaction
+/// of its own, same as `add`.
 pub fn remove(conn: &Connection, discord_user_id: &str, dates: &[String]) -> Result<Vec<String>> {
-    let tx = conn.unchecked_transaction()?;
     let mut removed = Vec::new();
     for date in dates {
-        if tx.execute(
+        if conn.execute(
             "DELETE FROM member_leave WHERE date = ?1 AND discord_user_id = ?2",
             params![date, discord_user_id],
         )? > 0
@@ -93,7 +92,6 @@ pub fn remove(conn: &Connection, discord_user_id: &str, dates: &[String]) -> Res
             removed.push(date.clone());
         }
     }
-    tx.commit()?;
     Ok(removed)
 }
 
