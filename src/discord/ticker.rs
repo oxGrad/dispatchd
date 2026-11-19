@@ -234,13 +234,25 @@ async fn maybe_fire_todo_reminder(
         &mentions,
         config.todo_cutoff_time,
         config.progress_cutoff_time,
+        config.carryover_lookback_days > 0,
     );
     maybe_fire_simple_reminder(http, db, date, "todo_reminder", &message).await;
 }
 
 /// The morning ping: mentions, the standing rules (cut-offs included), then
-/// the prompt. Pure so the exact copy is unit-tested.
-fn standup_message(mentions: &str, todo_cutoff: Time, progress_cutoff: Time) -> String {
+/// the prompt. Pure so the exact copy is unit-tested. The carry-over rule
+/// is left out when carry-over is off (`lookback_days = 0`).
+fn standup_message(
+    mentions: &str,
+    todo_cutoff: Time,
+    progress_cutoff: Time,
+    carryover: bool,
+) -> String {
+    let carryover = if carryover {
+        "• Unfinished from yesterday? Carry it over with `/todo add carryover:`.\n"
+    } else {
+        ""
+    };
     format!(
         "{mentions}\n📌 **Standup rules**\n\
          • `/todo` and `/progress` are both required every day. Submitting one doesn't cover the other.\n\
@@ -249,8 +261,7 @@ fn standup_message(mentions: &str, todo_cutoff: Time, progress_cutoff: Time) -> 
          • `/progress` cut-off: {}\n\
          • Anything not submitted by its cut-off is recorded and reflected in your performance review.\n\
          • On leave or sick? Tell your lead before {}.\n\
-         • Unfinished from yesterday? Carry it over with `/todo add carryover:`.\n\
-         📋 Time for today's standup! Submit your todo with `/todo add`.",
+         {carryover}📋 Time for today's standup! Submit your todo with `/todo add`.",
         todo_cutoff.strftime("%H:%M"),
         progress_cutoff.strftime("%H:%M"),
         todo_cutoff.strftime("%H:%M"),
@@ -1313,7 +1324,8 @@ mod tests {
             standup_message(
                 "<@1> <@2>",
                 jiff::civil::time(11, 0, 0, 0),
-                jiff::civil::time(15, 50, 0, 0)
+                jiff::civil::time(15, 50, 0, 0),
+                true
             ),
             "<@1> <@2>\n📌 **Standup rules**\n\
              • `/todo` and `/progress` are both required every day. Submitting one doesn't cover the other.\n\
@@ -1376,10 +1388,22 @@ mod tests {
             "<@1>",
             jiff::civil::time(10, 30, 0, 0),
             jiff::civil::time(15, 50, 0, 0),
+            true,
         );
         assert!(m.contains("• `/todo` cut-off: 10:30\n"), "{m}");
         assert!(m.contains("Tell your lead before 10:30."), "{m}");
         assert!(!m.contains("11:00"), "{m}");
+    }
+
+    #[test]
+    fn standup_message_drops_the_carryover_rule_when_carryover_is_off() {
+        let t = jiff::civil::time(11, 0, 0, 0);
+        let m = standup_message("<@1>", t, jiff::civil::time(15, 50, 0, 0), false);
+        assert!(!m.contains("carryover"), "{m}");
+        assert!(
+            m.contains("Tell your lead before 11:00.\n📋 Time for today's standup!"),
+            "{m}"
+        );
     }
 
     const D: &str = "2026-09-29";
