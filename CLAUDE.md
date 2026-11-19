@@ -259,8 +259,9 @@ src/
   main.rs        CLI entry point, Config/DB/seed wiring, Discord gating
   config.rs      Config struct, XDG lookup + env-var overrides, TOML merge;
                  carryover_lookback_days ([carryover] lookback_days,
-                 default 7, 0 disables) - how far back /progress add +
-                 /team look for unfinished todos; github
+                 default 7, 0 disables) - how far back /todo add
+                 carryover:, /todo list and /team look for unfinished
+                 todos; github
                  (Option<GithubConfig> from [github] app_id + org +
                  sync_interval_minutes - both app_id and org or neither,
                  one alone is an error; None = integration off);
@@ -286,9 +287,13 @@ src/
                  leaving task + the todo_id link alone).
                  Carry-over query helpers: carryover_todos /
                  carryover_count / carryover_report - `type='todo'` rows
-                 from the last N days with no `done` update, feeding
-                 /progress add autocomplete, /team status ("+N carried"),
-                 /team report ("Carried over" block) and /todo list.
+                 from the last N days with no `done` update that haven't
+                 been carried forward yet (no entries.carried_from row
+                 points at them), feeding /todo add carryover:
+                 autocomplete, /todo list's "Not carried over yet"
+                 section, /team status ("+N carried") and /team report
+                 ("Carried over" block). Carry-over is explicit:
+                 /progress add only offers today's todos.
                  short_date formats an origin date ("2026-08-27" ->
                  "Aug 27")
   members.rs     roster seeding (seed replaces the whole table in one
@@ -350,7 +355,11 @@ src/
                  that had any entry - covers the bot being down at
                  day_summary_time until after midnight)
                  + rederive_member (re-judges one member's recorded days
-                 after a leave change). Misses are judged against cut-off
+                 after a leave change). Backfill and rederive judge a past
+                 day with today's roster, so both skip a member whose
+                 first_seen (earliest entries / missed_submissions /
+                 member_leave row; shared with performance.rs) is after
+                 that day; the live record_missed judges everyone. Misses are judged against cut-off
                  instants, not end of day: members_missing_todo /
                  members_missing_update compare entries.created_at
                  (RFC3339 text) with the day's cut-off, skip members on
@@ -496,14 +505,18 @@ src/
                  its old-rule note)
   leave.rs       member_leave DB logic: per-member leave/sick days
                  (ritual days only; weekends skipped unless
-                 run_on_weekends), add/remove/list - backs /team leave
+                 run_on_weekends), add/remove/list - backs /team leave;
+                 remove returns the dates it actually deleted
   performance.rs /team performance data + rendering, serenity-free:
                  performance(conn, start, end, github) -> one
-                 MemberPerformance per non-viewer member (expected days =
-                 missed_recorded days from the member's first activity
-                 minus leave/sick; on-time; missed todo/progress dates by
-                 discord_user_id; tasks/done/blocked days; optional GitHub
-                 activity via github::report::team_activity) and
+                 MemberPerformance per non-viewer member, ordered by name
+                 COLLATE NOCASE then id (expected days = missed_recorded
+                 days from the member's first_seen minus leave/sick;
+                 on-time, never above 99% with a miss; missed todo/progress
+                 dates on expected days only, by discord_user_id;
+                 tasks/done/blocked days; optional GitHub activity via
+                 github::report::team_activity, "—" unless github_user is
+                 set and resolved) and
                  format_performance_file (aligned discipline + output
                  tables, per-member date lists, an old-rule note when the
                  range starts before rules_since)
@@ -548,8 +561,8 @@ src/
                     ticker + team), spawns the ticker alongside the client;
                     calls admin::post_upgrade_confirmation on `ready`.
                     Handler carries carryover_lookback_days, passed to
-                    /team status/report, /progress autocomplete, and
-                    /todo list
+                    /team status/report, /todo add carryover: autocomplete,
+                    and /todo list
     help.rs        /help - static overview of every command
     admin.rs       the `/admin` command group (members with role=admin):
                     `status` - `dispatchd status`'s systemd + Discord health
@@ -573,7 +586,7 @@ src/
                     entries.todo_id's FOREIGN KEY (surfaced as a friendly
                     reply, not a raw DB error) if a /progress report
                     already references the todo. list also appends a
-                    read-only "Carried over (still open)" section
+                    read-only "Not carried over yet" section
                     (format_todo_list) and chunks its reply past 2000
                     chars like /team report (status::split_into_messages);
                     edit/delete ignore carried-over todos. `add` takes an
@@ -594,10 +607,9 @@ src/
                     "progress" is the command name, not the 'update' DB row
                     type - entries.type/reminders_sent.type/etc. keep that
                     name, it's the data concept not the command surface.
-                    add's autocomplete unions today's open todos with
-                    carryover_todos (merge_task_choices, deduped, cap 25).
-                    A todo is a carry-over candidate only until it has
-                    been carried (entries.carried_from)
+                    add's autocomplete offers today's open todos only
+                    (entries::list_open_todos); an older todo has to be
+                    carried over first with /todo add carryover:
     team.rs        the `/team` command group (was team_status.rs):
                     `status` - the old standalone summary command moved
                     here verbatim, one line per member showing who's
@@ -619,8 +631,9 @@ src/
                     GitHub activity via github::report::team_github, same
                     dates as /recap, is_lead-gated, ephemeral + chunked;
                     replies "not configured" when [github] is off;
-                    `leave add|remove|list` (leave.rs; remove/add
-                    re-derive recorded days via followups::rederive_member;
+                    `leave add|remove|list` (leave.rs; add re-derives every
+                    recorded day in range via followups::rederive_member,
+                    remove only the days leave::remove actually deleted;
                     list defaults to the whole month, recap::month_bounds,
                     and is chunked); `performance` (handle_performance ->
                     build_performance) - is_lead-gated, ephemeral reply

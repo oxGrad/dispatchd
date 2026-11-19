@@ -503,8 +503,8 @@ pub async fn handle_delete(
 }
 
 /// Builds the `/todo list` reply: today's todos with ids, then a
-/// read-only "Carried over" section for still-open todos from recent
-/// past days. Pure.
+/// read-only "Not carried over yet" section for still-open todos from
+/// recent past days that haven't been carried forward. Pure.
 fn format_todo_list(
     today: &[(i64, String, Option<String>)],
     carried: &[entries::CarryoverTodo],

@@ -142,16 +142,19 @@ pub fn list_todos(
 }
 
 /// `"2026-08-27"` -> `"Aug 27"`. Input that doesn't parse as `YYYY-MM-DD`
-/// is returned unchanged. Used to label carried-over todos in the
-/// `/progress add` autocomplete, `/todo list`, and `/team report`.
+/// is returned unchanged. Used to label carry-over candidates in the
+/// `/todo add carryover:` autocomplete, `/todo list`'s "Not carried over
+/// yet" section, and `/team report`.
 pub fn short_date(ymd: &str) -> String {
     Date::strptime("%Y-%m-%d", ymd)
         .map(|d| d.strftime("%b %-d").to_string())
         .unwrap_or_else(|_| ymd.to_string())
 }
 
-/// A still-open todo from a recent past day, carried forward into today's
-/// `/progress add` autocomplete and `/todo list`.
+/// A still-open todo from a recent past day that hasn't been carried
+/// forward yet: a `/todo add carryover:` candidate, also listed under
+/// `/todo list`'s "Not carried over yet". `/progress add` offers today's
+/// todos only, so an older one has to be carried over first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CarryoverTodo {
     pub id: i64,
@@ -164,7 +167,9 @@ pub struct CarryoverTodo {
 /// This user's still-open todos from the `lookback_days` calendar days
 /// before `today` (window `[today - lookback_days, today - 1]`) -
 /// `type = 'todo'` rows with no `status = 'done'` update against them
-/// (matched via `todo_id`), optionally filtered by a `task` substring.
+/// (matched via `todo_id`) and not yet carried forward (no row's
+/// `carried_from` points at them), optionally filtered by a `task`
+/// substring.
 /// Ordered oldest-first, capped at 25 (Discord's autocomplete limit).
 /// Empty when `lookback_days <= 0` (carry-over disabled).
 pub fn carryover_todos(
