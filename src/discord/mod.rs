@@ -31,6 +31,7 @@ pub struct Handler {
     carryover_lookback_days: u32,
     day_summary_time: Time,
     run_on_weekends: bool,
+    rules: crate::cutoffs::Rules,
     github: Option<GithubConfig>,
 }
 
@@ -131,6 +132,21 @@ impl EventHandler for Handler {
                     _ => {}
                 },
                 // Three subcommands, so `match` rather than `if let`.
+                "team" if team::leave_subcommand(&command.data.options).is_some() => {
+                    if let Some((sub, opts)) = team::leave_subcommand(&command.data.options) {
+                        team::handle_leave(
+                            &ctx,
+                            &command,
+                            sub,
+                            opts,
+                            &self.db,
+                            &self.timezone,
+                            &self.rules,
+                            self.run_on_weekends,
+                        )
+                        .await
+                    }
+                }
                 "team" => match team::subcommand(&command.data.options) {
                     Some(("status", _)) => {
                         team::handle_status(
@@ -359,6 +375,7 @@ pub async fn run(
             carryover_lookback_days: config.carryover_lookback_days,
             day_summary_time: config.day_summary_time,
             run_on_weekends: config.run_on_weekends,
+            rules: crate::cutoffs::Rules::from_config(&config),
             github: config.github.clone(),
         })
         .await

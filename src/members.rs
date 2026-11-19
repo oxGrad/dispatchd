@@ -221,8 +221,6 @@ pub fn is_member(conn: &Connection, discord_user_id: &str) -> Result<bool> {
 }
 
 /// The member's role string, or `None` when not on the roster.
-// Remove once /team leave uses it (Task 7).
-#[allow(dead_code)]
 pub fn role_of(conn: &Connection, discord_user_id: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row(

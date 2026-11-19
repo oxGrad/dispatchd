@@ -188,8 +188,6 @@ fn insert_misses(
 /// if the member is on leave that date now, never inserted - so removing
 /// leave can't re-judge an old day, and a leave removal on a day that
 /// never had leave can't erase an old miss.
-// Used by `/team leave` (Task 7).
-#[allow(dead_code)]
 pub fn rederive_member(
     conn: &Connection,
     discord_user_id: &str,

@@ -1,6 +1,4 @@
 //! Per-member leave/sick days (`member_leave`), serenity-free.
-// Remove once /team leave uses this module (Task 7).
-#![allow(dead_code)]
 
 use anyhow::{Context, Result};
 use jiff::civil::{Date, Weekday};

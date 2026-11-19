@@ -84,10 +84,38 @@ pub fn resolve_day_or_range(
     end: Option<&str>,
     today: &str,
 ) -> Result<(String, String), String> {
+    resolve_range(start, end, today, false, MAX_RECAP_DAYS)
+}
+
+/// Like `resolve_day_or_range`, but neither date = the 1st of `today`'s
+/// month through `today`, and the span cap is `max_days`.
+pub fn resolve_month_or_range(
+    start: Option<&str>,
+    end: Option<&str>,
+    today: &str,
+    max_days: i64,
+) -> Result<(String, String), String> {
+    resolve_range(start, end, today, true, max_days)
+}
+
+fn resolve_range(
+    start: Option<&str>,
+    end: Option<&str>,
+    today: &str,
+    month_default: bool,
+    max_days: i64,
+) -> Result<(String, String), String> {
     let (start_date, end_date) = match (start, end) {
         (None, None) => {
             let today = parse_today(today)?;
-            (today, today)
+            (
+                if month_default {
+                    today.first_of_month()
+                } else {
+                    today
+                },
+                today,
+            )
         }
         (Some(s), None) => {
             let day = parse_option_date(s, "start")?;
@@ -104,9 +132,9 @@ pub fn resolve_day_or_range(
         return Err("⚠️ start must be on or before end.".to_string());
     }
     let span_days = i64::from((end_date - start_date).get_days()) + 1;
-    if span_days > MAX_RECAP_DAYS {
+    if span_days > max_days {
         return Err(format!(
-            "⚠️ That's {span_days} days - a range covers at most {MAX_RECAP_DAYS}. Pick a narrower range."
+            "⚠️ That's {span_days} days - a range covers at most {max_days}. Pick a narrower range."
         ));
     }
 
@@ -414,6 +442,23 @@ mod tests {
     fn biweekly_range_is_the_14_days_ending_yesterday() {
         let got = biweekly_range("2026-10-01").unwrap();
         assert_eq!(got, ("2026-09-17".to_string(), "2026-09-30".to_string()));
+    }
+
+    #[test]
+    fn month_or_range_defaults_to_the_month_so_far() {
+        assert_eq!(
+            resolve_month_or_range(None, None, "2026-11-19", 366).unwrap(),
+            ("2026-11-01".into(), "2026-11-19".into())
+        );
+        assert_eq!(
+            resolve_month_or_range(Some("2026-11-05"), None, "2026-11-19", 366).unwrap(),
+            ("2026-11-05".into(), "2026-11-05".into())
+        );
+        assert!(
+            resolve_month_or_range(Some("2025-01-01"), Some("2026-11-19"), "2026-11-19", 366)
+                .unwrap_err()
+                .contains("366")
+        );
     }
 
     // --- resolve_day_or_range ---

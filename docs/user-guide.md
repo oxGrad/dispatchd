@@ -247,6 +247,18 @@ tells you so and posts nothing. Unlike `/team status`/`report`, this one
 stays strictly `role = "lead"` - a `viewer` gets "restricted to the tech
 lead" here, since nudging a member isn't a view-only action.
 
+## `/team leave` - tech lead only
+
+`/team leave add member:<name> reason:<leave|sick> [start] [end]` marks
+working days as leave or sick: the member isn't reminded or nagged and the
+day isn't recorded as a miss (changing leave for an already-recorded day
+re-derives that member's misses). Dates work like `/recap` (none = today,
+one = that day); weekends are skipped unless the ritual runs on weekends.
+`/team leave remove member:<name> [start] [end]` clears them, and
+`/team leave list [start] [end]` shows leave days (default: this month,
+up to 366 days). Viewers and non-roster users can't be marked. Replies are
+ephemeral.
+
 ## `/team skip-meeting` - tech lead only
 
 Cancels today's meeting. Posts a fixed note into the standup thread -
