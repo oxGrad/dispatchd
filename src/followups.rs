@@ -113,10 +113,16 @@ pub fn members_with_no_activity(conn: &Connection, date: &str) -> Result<Vec<Str
 /// `INSERT OR IGNORE` throughout makes this idempotent - safe to call more
 /// than once for the same date. Unlike `followups_sent`/`reminders_sent`,
 /// nothing prunes `missed_submissions` - it's retained history, same as
-/// `entries`.
+/// `entries`. This is the ticker's live recording: today's roster is the
+/// day's roster, so everyone on it is judged.
 pub fn record_missed(conn: &Connection, date: &str, day: &DayCutoffs) -> Result<()> {
+    record(conn, date, day, false)
+}
+
+/// `record_missed`, optionally skipping members `first_seen` after `date`.
+fn record(conn: &Connection, date: &str, day: &DayCutoffs, seen_only: bool) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    insert_misses(&tx, date, day, None)?;
+    insert_misses(&tx, date, day, None, seen_only)?;
     tx.execute(
         "INSERT OR IGNORE INTO reminders_sent (date, type) VALUES (?1, 'missed_recorded')",
         params![date],
@@ -125,13 +131,29 @@ pub fn record_missed(conn: &Connection, date: &str, day: &DayCutoffs) -> Result<
     Ok(())
 }
 
+/// The member's first-seen date: their earliest `entries`,
+/// `missed_submissions` or `member_leave` row. Before it they weren't on the
+/// team yet: `/team performance` doesn't expect them, and backfill and
+/// re-derivation (which judge a past day with today's roster) skip them.
+pub fn first_seen(conn: &Connection, discord_user_id: &str) -> Result<Option<String>> {
+    Ok(conn.query_row(
+        "SELECT MIN(d) FROM (
+             SELECT date AS d FROM entries WHERE discord_user_id = ?1
+             UNION ALL SELECT date FROM missed_submissions WHERE discord_user_id = ?1
+             UNION ALL SELECT date FROM member_leave WHERE discord_user_id = ?1)",
+        [discord_user_id],
+        |r| r.get(0),
+    )?)
+}
+
 /// Inserts `date`'s miss rows, skipping a waived kind, for everyone or
-/// just `only`.
+/// just `only`, and (with `seen_only`) anyone `first_seen` after `date`.
 fn insert_misses(
     conn: &Connection,
     date: &str,
     day: &DayCutoffs,
     only: Option<&str>,
+    seen_only: bool,
 ) -> Result<()> {
     let kinds = [
         (
@@ -150,6 +172,9 @@ fn insert_misses(
             continue;
         }
         for id in ids.iter().filter(|i| only.is_none_or(|o| o == i.as_str())) {
+            if seen_only && first_seen(conn, id)?.is_none_or(|f| f.as_str() > date) {
+                continue;
+            }
             conn.execute(
                 "INSERT OR IGNORE INTO missed_submissions (date, discord_user_id, kind) VALUES (?1, ?2, ?3)",
                 params![date, id, kind],
@@ -162,7 +187,8 @@ fn insert_misses(
 /// Re-judges one member's recorded days after their leave changed. Only
 /// days with a `missed_recorded` marker are touched. On or after
 /// `rules_since` the member's rows are deleted and re-derived under the
-/// cut-off rules (waived kinds skipped). Before it (or with no
+/// cut-off rules (waived kinds skipped; nothing if the member was
+/// `first_seen` after that date). Before it (or with no
 /// `rules_since`) the old end-of-day verdicts stand: rows are deleted only
 /// if the member is on leave that date now, never inserted - so removing
 /// leave can't re-judge an old day, and a leave removal on a day that
@@ -185,7 +211,7 @@ pub fn rederive_member(
                 params![date, discord_user_id],
             )?;
             let day = day_cutoffs(&tx, rules, date)?;
-            insert_misses(&tx, date, &day, Some(discord_user_id))?;
+            insert_misses(&tx, date, &day, Some(discord_user_id), true)?;
         } else {
             tx.execute(
                 "DELETE FROM missed_submissions WHERE date = ?1 AND discord_user_id = ?2
@@ -211,8 +237,8 @@ const MISSED_BACKFILL_DAYS: i64 = 14;
 /// far more likely a holiday (or the bot, and with it the ritual, being
 /// off) than the whole team missing it, and recording it would blame
 /// everyone. Weekends are skipped unless `include_weekends`. Uses today's
-/// roster, not the roster as it was on that day. Returns the dates
-/// recorded.
+/// roster minus anyone `first_seen` after that day (added since). Returns the
+/// dates recorded.
 pub fn backfill_missed(
     conn: &Connection,
     today: &str,
@@ -241,7 +267,7 @@ pub fn backfill_missed(
             continue;
         }
         let day = day_cutoffs(conn, rules, &date)?;
-        record_missed(conn, &date, &day)?;
+        record(conn, &date, &day, true)?;
         recorded.push(date);
     }
     Ok(recorded)
@@ -436,6 +462,9 @@ mod tests {
         ] {
             entries::insert_todo(&conn, "1", date, "a", None, None).unwrap();
         }
+        // Budi was on the team before the window (backfill skips anyone
+        // first seen after the day it judges).
+        entries::insert_todo(&conn, "2", "2026-09-10", "b", None, None).unwrap();
         // 2026-09-28 (Monday) has no entries at all - skipped as a likely holiday.
         record_missed(&conn, "2026-09-30", &open_day()).unwrap();
         // Alice posted her 09-29 todo and report before the cut-offs (the
@@ -692,6 +721,8 @@ mod tests {
         let conn = open_test_db();
         seed_member(&conn, "1", "A");
         seed_member(&conn, "2", "B");
+        // "1" was on the team before DATE, so re-derivation judges them.
+        entries::insert_todo(&conn, "1", "2026-08-28", "earlier", None, None).unwrap();
         let rules = covered_utc_rules(&conn, DATE);
         record_missed(
             &conn,
@@ -758,6 +789,45 @@ mod tests {
         assert!(removed.is_empty());
         let since = crate::cutoffs::rules_since(&conn).unwrap();
         rederive_member(&conn, "new", &removed, &utc_rules(), since.as_deref()).unwrap();
+        assert!(
+            misses_for(&conn, "new").is_empty(),
+            "{:?}",
+            misses_for(&conn, "new")
+        );
+    }
+
+    /// Reviewer probe: a member added in the restart that backfills a past
+    /// day wasn't on the team that day.
+    #[test]
+    fn backfill_skips_a_member_first_seen_after_the_day() {
+        let conn = open_test_db();
+        seed_member(&conn, "old", "Old");
+        cover(&conn, "2026-11-17", "2026-11-17");
+        entries::insert_todo(&conn, "old", "2026-11-17", "t", None, None).unwrap();
+        // Bot down at 16:00 on the 17th; restarted on the 18th with "new" added.
+        seed_member(&conn, "new", "New");
+        backfill_missed(&conn, "2026-11-18", false, &utc_rules()).unwrap();
+        assert!(
+            misses_for(&conn, "new").is_empty(),
+            "{:?}",
+            misses_for(&conn, "new")
+        );
+    }
+
+    /// Leave added by mistake for a member who joined later, then removed:
+    /// re-deriving the removed day doesn't judge them for it.
+    #[test]
+    fn rederive_skips_a_member_first_seen_after_the_day() {
+        let conn = open_test_db();
+        seed_member(&conn, "old", "Old");
+        let rules = covered_utc_rules(&conn, DATE);
+        record_missed(&conn, DATE, &day_cutoffs(&conn, &rules, DATE).unwrap()).unwrap();
+        seed_member(&conn, "new", "New");
+        let days = vec![DATE.to_string()];
+        leave::add(&conn, "new", &days, leave::Reason::Leave).unwrap();
+        rederive_member(&conn, "new", &days, &rules, Some("2026-01-01")).unwrap();
+        let removed = leave::remove(&conn, "new", &days).unwrap();
+        rederive_member(&conn, "new", &removed, &rules, Some("2026-01-01")).unwrap();
         assert!(
             misses_for(&conn, "new").is_empty(),
             "{:?}",

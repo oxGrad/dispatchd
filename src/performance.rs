@@ -54,14 +54,7 @@ pub fn performance(
 
     let mut out = Vec::new();
     for (id, name) in members {
-        let first_seen: Option<String> = conn.query_row(
-            "SELECT MIN(d) FROM (
-                 SELECT date AS d FROM entries WHERE discord_user_id = ?1
-                 UNION ALL SELECT date FROM missed_submissions WHERE discord_user_id = ?1
-                 UNION ALL SELECT date FROM member_leave WHERE discord_user_id = ?1)",
-            [&id],
-            |r| r.get(0),
-        )?;
+        let first_seen = crate::followups::first_seen(conn, &id)?;
         let leave_in = |reason: &str| {
             strings(
                 conn,
