@@ -32,9 +32,19 @@ pub async fn run(
     config: Config,
 ) {
     let rules = crate::cutoffs::Rules::from_config(&config);
-    {
+    let span_id = {
         let today = entries::today_in(&config.timezone);
         let conn = db.lock().expect("db mutex poisoned");
+        let span_id = match crate::cutoffs::start_span(&conn, jiff::Timestamp::now()) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                eprintln!("failed to start uptime span: {e}");
+                None
+            }
+        };
+        if let Err(e) = crate::cutoffs::ensure_rules_since(&conn, &today) {
+            eprintln!("failed to record cut-off rules start date: {e}");
+        }
         match followups::backfill_missed(&conn, &today, config.run_on_weekends, &rules) {
             Ok(dates) if !dates.is_empty() => {
                 println!("backfilled missed submissions for {}", dates.join(", "))
@@ -42,12 +52,13 @@ pub async fn run(
             Ok(_) => {}
             Err(e) => eprintln!("failed to backfill missed submissions: {e}"),
         }
-    }
+        span_id
+    };
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.ticker_interval_seconds));
     loop {
         interval.tick().await;
-        tick(&http, &db, channel_id, &config, &rules).await;
+        tick(&http, &db, channel_id, &config, &rules, span_id).await;
     }
 }
 
@@ -57,8 +68,18 @@ async fn tick(
     channel_id: ChannelId,
     config: &Config,
     rules: &crate::cutoffs::Rules,
+    span_id: Option<i64>,
 ) {
-    let now = jiff::Timestamp::now().to_zoned_datetime(config.timezone.clone());
+    let ts = jiff::Timestamp::now();
+    // Uptime is tracked every day, so this precedes the weekend return.
+    // day_cutoffs treats a window as waived unless this has been bumped.
+    if let Some(id) = span_id {
+        let conn = db.lock().expect("db mutex poisoned");
+        if let Err(e) = crate::cutoffs::touch_span(&conn, id, ts) {
+            eprintln!("failed to touch uptime span: {e}");
+        }
+    }
+    let now = ts.to_zoned_datetime(config.timezone.clone());
     if !config.run_on_weekends && is_weekend(now.weekday()) {
         return;
     }
@@ -69,7 +90,7 @@ async fn tick(
         maybe_create_thread(http, db, channel_id, &date).await;
     }
     if is_due(now_time, config.todo_time) {
-        maybe_fire_todo_reminder(http, db, &date).await;
+        maybe_fire_todo_reminder(http, db, &date, config).await;
     }
     if is_due(now_time, config.update_time) {
         maybe_fire_simple_reminder(
@@ -86,6 +107,12 @@ async fn tick(
     if is_due(now_time, meeting_reminder_trigger) {
         maybe_fire_meeting_reminder(http, db, &date, config.meeting_reminder_lead_minutes).await;
     }
+    if is_due(now_time, config.todo_cutoff_time) {
+        maybe_fire_cutoff_alert(http, db, &date, CutoffKind::Todo, rules).await;
+    }
+    if is_due(now_time, config.progress_cutoff_time) {
+        maybe_fire_cutoff_alert(http, db, &date, CutoffKind::Progress, rules).await;
+    }
     if is_due(now_time, config.day_summary_time) {
         maybe_fire_day_summary(http, db, &date, config).await;
         maybe_fire_missing_submissions(http, db, &date).await;
@@ -97,26 +124,30 @@ async fn tick(
     let update_followup_trigger = config.update_time
         + jiff::SignedDuration::from_mins(config.update_followup_delay_minutes.into());
 
-    if is_due(now_time, todo_followup_trigger) {
+    if is_due(now_time, todo_followup_trigger)
+        && let Some(cutoff) = cutoff_str(&date, rules.todo_cutoff, &rules.tz)
+    {
         maybe_fire_followups(
             http,
             db,
             &date,
             "todo_followup",
             followups::members_missing_todo,
-            &cutoff_str(&date, config.todo_cutoff_time, &config.timezone),
+            &cutoff,
             "📋 don't forget to submit your `/todo` for today!",
         )
         .await;
     }
-    if is_due(now_time, update_followup_trigger) {
+    if is_due(now_time, update_followup_trigger)
+        && let Some(cutoff) = cutoff_str(&date, rules.progress_cutoff, &rules.tz)
+    {
         maybe_fire_followups(
             http,
             db,
             &date,
             "update_followup",
             followups::members_missing_update,
-            &cutoff_str(&date, config.progress_cutoff_time, &config.timezone),
+            &cutoff,
             "⏰ don't forget to submit a `/progress add` report for today's todo(s)!",
         )
         .await;
@@ -174,7 +205,12 @@ async fn maybe_create_thread(
 /// only looks one up, skipping with a log line if none exists yet (bot was
 /// down at both trigger times, or the channel was only just configured),
 /// same as the 3pm/4pm reminders below.
-async fn maybe_fire_todo_reminder(http: &Arc<Http>, db: &Arc<Mutex<Connection>>, date: &str) {
+async fn maybe_fire_todo_reminder(
+    http: &Arc<Http>,
+    db: &Arc<Mutex<Connection>>,
+    date: &str,
+    config: &Config,
+) {
     match already_sent(db, date, "todo_reminder") {
         Ok(true) => return,
         Ok(false) => {}
@@ -185,9 +221,128 @@ async fn maybe_fire_todo_reminder(http: &Arc<Http>, db: &Arc<Mutex<Connection>>,
     }
 
     let mentions = all_member_mentions(db);
-    let message =
-        format!("{mentions}\n📋 Time for today's standup! Submit your todo with `/todo add`.");
+    let message = standup_message(
+        &mentions,
+        config.todo_cutoff_time,
+        config.progress_cutoff_time,
+    );
     maybe_fire_simple_reminder(http, db, date, "todo_reminder", &message).await;
+}
+
+/// The morning ping: mentions, the standing rules (cut-offs included), then
+/// the prompt. Pure so the exact copy is unit-tested.
+fn standup_message(mentions: &str, todo_cutoff: Time, progress_cutoff: Time) -> String {
+    format!(
+        "{mentions}\n📌 **Standup rules**\n\
+         • `/todo` and `/progress` are both required every day. Submitting one doesn't cover the other.\n\
+         • Every todo needs its own `/progress` report.\n\
+         • `/todo` cut-off: {}\n\
+         • `/progress` cut-off: {}\n\
+         • Anything not submitted by its cut-off is recorded and reflected in your performance review.\n\
+         • On leave or sick? Tell your lead before 11:00.\n\
+         • Unfinished from yesterday? Carry it over with `/todo add carryover:`.\n\
+         📋 Time for today's standup! Submit your todo with `/todo add`.",
+        todo_cutoff.strftime("%H:%M"),
+        progress_cutoff.strftime("%H:%M"),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum CutoffKind {
+    Todo,
+    Progress,
+}
+
+/// Pure - the in-thread alert for a passed cut-off. `None` when nobody is
+/// missing. A waived cut-off (bot was offline) posts a notice with no
+/// mentions instead, since nothing was recorded against anyone.
+fn cutoff_alert_message(
+    kind: CutoffKind,
+    cutoff: Time,
+    missing: &[String],
+    waived: bool,
+) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    let at = cutoff.strftime("%H:%M");
+    let (name, cmd) = match kind {
+        CutoffKind::Todo => ("/todo", "/todo add"),
+        CutoffKind::Progress => ("/progress", "/progress add"),
+    };
+    if waived {
+        return Some(format!(
+            "⚠️ The bot was offline before the `{name}` cut-off ({at}), so today's `{name}` cut-off is waived. Please still submit with `{cmd}`."
+        ));
+    }
+    let mentions = missing
+        .iter()
+        .map(|id| format!("<@{id}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let what = match kind {
+        CutoffKind::Todo => "no `/todo` submitted before the cut-off",
+        CutoffKind::Progress => "you have a todo with no `/progress` report",
+    };
+    Some(format!(
+        "⛔ **{name} cut-off passed ({at}):** {mentions} - {what}. This has been recorded. Submit it now with `{cmd}`."
+    ))
+}
+
+/// Posts the one-per-day cut-off alert once `kind`'s cut-off has passed.
+/// Marked sent even when there's nothing to post, like the day summary's
+/// "no submissions" message, so it isn't re-queried every tick.
+async fn maybe_fire_cutoff_alert(
+    http: &Arc<Http>,
+    db: &Arc<Mutex<Connection>>,
+    date: &str,
+    kind: CutoffKind,
+    rules: &crate::cutoffs::Rules,
+) {
+    let (sent_kind, cutoff_time) = match kind {
+        CutoffKind::Todo => ("todo_cutoff", rules.todo_cutoff),
+        CutoffKind::Progress => ("progress_cutoff", rules.progress_cutoff),
+    };
+    match already_sent(db, date, sent_kind) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("failed to check {sent_kind} status: {e}");
+            return;
+        }
+    }
+
+    let message = {
+        let conn = db.lock().expect("db mutex poisoned");
+        crate::cutoffs::day_cutoffs(&conn, rules, date).and_then(|day| {
+            let (waived, missing) = match kind {
+                CutoffKind::Todo => (
+                    day.todo_waived,
+                    followups::members_missing_todo(&conn, date, &day.todo_cutoff)?,
+                ),
+                CutoffKind::Progress => (
+                    day.progress_waived,
+                    followups::members_missing_update(&conn, date, &day.progress_cutoff)?,
+                ),
+            };
+            Ok(cutoff_alert_message(kind, cutoff_time, &missing, waived))
+        })
+    };
+    let message = match message {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("failed to build {sent_kind} alert for {date}: {e}");
+            return;
+        }
+    };
+    let Some(message) = message else {
+        let conn = db.lock().expect("db mutex poisoned");
+        if let Err(e) = reminders::mark_sent(&conn, date, sent_kind) {
+            eprintln!("failed to mark {sent_kind} sent: {e}");
+        }
+        return;
+    };
+    maybe_fire_simple_reminder(http, db, date, sent_kind, &message).await;
 }
 
 /// Space-joined `<@id>` mentions for every roster member, for the reminders
@@ -689,13 +844,17 @@ fn quote_block(text: &str) -> String {
 
 /// UTC instant of local `time` on `date`, as the text `created_at` is
 /// compared against. The live nags ignore uptime waivers, so this is all
-/// they need. On a conversion failure falls back to a far-future instant,
-/// so every entry counts and nobody is nagged (nags aren't records, and a
-/// false nag is worse than a missed one).
-fn cutoff_str(date: &str, time: jiff::civil::Time, tz: &jiff::tz::TimeZone) -> String {
-    crate::cutoffs::instant(date, time, tz)
-        .map(|t| t.to_string())
-        .unwrap_or_else(|_| "9999-12-31T00:00:00Z".into())
+/// they need. On a conversion failure it logs and returns `None`, and the
+/// caller skips that nag for the tick (a false nag is worse than a missed
+/// one).
+fn cutoff_str(date: &str, time: jiff::civil::Time, tz: &jiff::tz::TimeZone) -> Option<String> {
+    match crate::cutoffs::instant(date, time, tz) {
+        Ok(t) => Some(t.to_string()),
+        Err(e) => {
+            eprintln!("failed to compute cut-off instant for {date}: {e}");
+            None
+        }
+    }
 }
 
 /// Nags each member `query` returns as missing something for `date`, one
@@ -1118,6 +1277,69 @@ mod tests {
         assert_eq!(
             format_sync_message(&entry),
             "⛔ <@42> progress on **Fix bug**: Blocked"
+        );
+    }
+
+    #[test]
+    fn standup_message_leads_with_the_rules() {
+        assert_eq!(
+            standup_message(
+                "<@1> <@2>",
+                jiff::civil::time(11, 0, 0, 0),
+                jiff::civil::time(15, 50, 0, 0)
+            ),
+            "<@1> <@2>\n📌 **Standup rules**\n\
+             • `/todo` and `/progress` are both required every day. Submitting one doesn't cover the other.\n\
+             • Every todo needs its own `/progress` report.\n\
+             • `/todo` cut-off: 11:00\n\
+             • `/progress` cut-off: 15:50\n\
+             • Anything not submitted by its cut-off is recorded and reflected in your performance review.\n\
+             • On leave or sick? Tell your lead before 11:00.\n\
+             • Unfinished from yesterday? Carry it over with `/todo add carryover:`.\n\
+             📋 Time for today's standup! Submit your todo with `/todo add`."
+        );
+    }
+
+    #[test]
+    fn cutoff_alerts_mention_the_missing() {
+        let t = jiff::civil::time(11, 0, 0, 0);
+        assert_eq!(
+            cutoff_alert_message(CutoffKind::Todo, t, &["1".into(), "2".into()], false).unwrap(),
+            "⛔ **/todo cut-off passed (11:00):** <@1> <@2> - no `/todo` submitted before the cut-off. This has been recorded. Submit it now with `/todo add`."
+        );
+        let p = jiff::civil::time(15, 50, 0, 0);
+        assert_eq!(
+            cutoff_alert_message(CutoffKind::Progress, p, &["3".into()], false).unwrap(),
+            "⛔ **/progress cut-off passed (15:50):** <@3> - you have a todo with no `/progress` report. This has been recorded. Submit it now with `/progress add`."
+        );
+        assert_eq!(cutoff_alert_message(CutoffKind::Todo, t, &[], false), None);
+    }
+
+    #[test]
+    fn a_waived_cutoff_posts_a_notice_without_mentions() {
+        assert_eq!(
+            cutoff_alert_message(
+                CutoffKind::Progress,
+                jiff::civil::time(15, 50, 0, 0),
+                &["1".into()],
+                true
+            )
+            .unwrap(),
+            "⚠️ The bot was offline before the `/progress` cut-off (15:50), so today's `/progress` cut-off is waived. Please still submit with `/progress add`."
+        );
+        assert_eq!(
+            cutoff_alert_message(
+                CutoffKind::Todo,
+                jiff::civil::time(11, 0, 0, 0),
+                &["1".into()],
+                true
+            )
+            .unwrap(),
+            "⚠️ The bot was offline before the `/todo` cut-off (11:00), so today's `/todo` cut-off is waived. Please still submit with `/todo add`."
+        );
+        assert_eq!(
+            cutoff_alert_message(CutoffKind::Todo, jiff::civil::time(11, 0, 0, 0), &[], true),
+            None
         );
     }
 }

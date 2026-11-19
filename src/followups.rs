@@ -188,7 +188,7 @@ fn insert_misses(
 /// if the member is on leave that date now, never inserted - so removing
 /// leave can't re-judge an old day, and a leave removal on a day that
 /// never had leave can't erase an old miss.
-// Called by the leave commands in Task 5.
+// Used by `/team leave` (Task 7).
 #[allow(dead_code)]
 pub fn rederive_member(
     conn: &Connection,
@@ -572,19 +572,43 @@ mod tests {
         }
         // 2026-09-28 (Monday) has no entries at all - skipped as a likely holiday.
         record_missed(&conn, "2026-09-30", &open_day()).unwrap();
+        // Alice posted her 09-29 todo and report before the cut-offs (the
+        // inserts above stamp the real clock); Budi posted nothing.
+        let alice_todo: i64 = conn
+            .query_row(
+                "SELECT id FROM entries WHERE discord_user_id = '1' AND date = '2026-09-29'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        set_created_at(&conn, alice_todo, "2026-09-29T08:00:00Z");
+        let report = entries::insert_update(
+            &conn,
+            "1",
+            "2026-09-29",
+            "a",
+            Some(alice_todo),
+            "done",
+            "x",
+            None,
+        )
+        .unwrap();
+        set_created_at(&conn, report, "2026-09-29T12:00:00Z");
 
         let recorded = backfill_missed(&conn, "2026-10-01", false, &rules).unwrap();
         assert_eq!(recorded, vec!["2026-09-29".to_string()]);
         assert!(crate::reminders::already_sent(&conn, "2026-09-29", "missed_recorded").unwrap());
-        let budi_missed: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM missed_submissions
-                 WHERE date = '2026-09-29' AND discord_user_id = '2' AND kind = 'todo'",
-                [],
-                |row| row.get(0),
+        let missed: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT discord_user_id, kind FROM missed_submissions
+                 WHERE date = '2026-09-29' ORDER BY 1, 2",
             )
-            .unwrap();
-        assert_eq!(budi_missed, 1);
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(missed, vec![("2".to_string(), "todo".to_string())]);
 
         // Idempotent: nothing left to backfill. Weekends opt in.
         assert!(
@@ -868,6 +892,29 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert!(kinds.is_empty(), "{kinds:?}");
+        assert!(crate::reminders::already_sent(&conn, DATE, "missed_recorded").unwrap());
+    }
+
+    #[test]
+    fn record_missed_skips_a_waived_progress_kind() {
+        let conn = open_test_db();
+        seed_member(&conn, "1", "A");
+        let todo = entries::insert_todo(&conn, "1", DATE, "x", None, None).unwrap();
+        set_created_at(&conn, todo, &format!("{DATE}T08:00:00Z"));
+        let day = DayCutoffs {
+            progress_cutoff: format!("{DATE}T15:50:00Z"),
+            progress_waived: true,
+            ..open_day()
+        };
+        record_missed(&conn, DATE, &day).unwrap();
+        let updates: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM missed_submissions WHERE kind = 'update'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(updates, 0);
         assert!(crate::reminders::already_sent(&conn, DATE, "missed_recorded").unwrap());
     }
 

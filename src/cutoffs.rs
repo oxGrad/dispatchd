@@ -1,7 +1,5 @@
 //! Todo/progress cut-off instants, bot uptime spans, and the downtime
 //! waiver derived from them.
-// Removed once the ticker uses this module (Task 5).
-#![allow(dead_code)]
 
 use anyhow::Result;
 use jiff::civil::{Date, Time};
@@ -135,6 +133,8 @@ pub fn ensure_rules_since(conn: &Connection, today: &str) -> Result<String> {
     Ok(rules_since(conn)?.expect("just inserted"))
 }
 
+// Caller arrives with `/team leave` (Task 7).
+#[allow(dead_code)]
 pub fn rules_since(conn: &Connection) -> Result<Option<String>> {
     Ok(conn
         .query_row(
