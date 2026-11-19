@@ -169,10 +169,10 @@ pub fn format_performance_file(
             let on_time = if r.expected == 0 {
                 "—".to_string()
             } else {
-                format!(
-                    "{}%",
-                    (100.0 * r.on_time as f64 / r.expected as f64).round()
-                )
+                let pct = (100.0 * r.on_time as f64 / r.expected as f64).round();
+                // A recorded miss must never read as 100%.
+                let cap = if r.on_time < r.expected { 99.0 } else { 100.0 };
+                format!("{}%", pct.min(cap))
             };
             vec![
                 name(r),
@@ -406,6 +406,25 @@ mod tests {
             format_performance_file(&rows, "2026-12-01", "2026-12-05", false, Some("2026-11-03"));
         assert!(!file.contains("> Misses before"));
         assert!(file.contains("| —"), "{file}");
+    }
+
+    #[test]
+    fn on_time_never_rounds_up_to_100_with_a_miss() {
+        let row = MemberPerformance {
+            name: "Near".into(),
+            expected: 250,
+            on_time: 249,
+            leave_dates: vec![],
+            sick_dates: vec![],
+            missed_todo: vec!["2026-11-05".into()],
+            missed_progress: vec![],
+            tasks: 0,
+            done: 0,
+            blocked_days: 0,
+            github: None,
+        };
+        let file = format_performance_file(&[row], "2026-01-01", "2026-12-31", false, None);
+        assert_eq!(row_cells(&file, "Near")[6], "99%", "{file}");
     }
 
     #[test]
