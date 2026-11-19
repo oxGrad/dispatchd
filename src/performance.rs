@@ -30,7 +30,8 @@ fn strings(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> Result<Vec
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// One row per non-viewer member, alphabetical.
+/// One row per non-viewer member, alphabetical (case-insensitive, then by
+/// id - the same order as `github::report`'s roster).
 pub fn performance(
     conn: &Connection,
     start: &str,
@@ -48,7 +49,10 @@ pub fn performance(
         None => None,
     };
     let members: Vec<(String, String)> = conn
-        .prepare("SELECT discord_user_id, name FROM members WHERE role != 'viewer' ORDER BY name")?
+        .prepare(
+            "SELECT discord_user_id, name FROM members WHERE role != 'viewer'
+             ORDER BY name COLLATE NOCASE, discord_user_id",
+        )?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
 
@@ -381,6 +385,19 @@ mod tests {
             vec!["Alya", "Bima"]
         );
         assert_eq!(rows[0].expected, 2);
+    }
+
+    #[test]
+    fn rows_sort_by_name_ignoring_case_then_id() {
+        let conn = fixture();
+        member(&conn, "8", "andi", "senior", None);
+        member(&conn, "7", "andi", "senior", None);
+        let rows = performance(&conn, "2026-11-01", "2026-11-30", Some(&TimeZone::UTC)).unwrap();
+        let order: Vec<_> = rows
+            .iter()
+            .map(|r| r.github.as_ref().unwrap().discord_user_id.as_str())
+            .collect();
+        assert_eq!(order, ["2", "7", "8", "1"]);
     }
 
     #[test]
