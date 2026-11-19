@@ -371,6 +371,10 @@ async fn maybe_fire_missing_submissions(http: &Arc<Http>, db: &Arc<Mutex<Connect
     };
 
     let Some(message) = missing_submissions_message(&missing) else {
+        let conn = db.lock().expect("db mutex poisoned");
+        if let Err(e) = reminders::mark_sent(&conn, date, "day_summary_missing") {
+            eprintln!("failed to mark day_summary_missing sent: {e}");
+        }
         return;
     };
 
