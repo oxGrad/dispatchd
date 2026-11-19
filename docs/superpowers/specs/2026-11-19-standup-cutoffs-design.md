@@ -330,8 +330,9 @@ Definitions:
 `maintenance` must stop pruning `reminders_sent` rows of type
 `missed_recorded` (one row per day, tiny) - "Expected" depends on them
 for ranges up to a year; today they're deleted after 90 days. Uptime
-spans are pruned on the same 90-day rule as `reminders_sent` (only the
-last 14 days are ever re-derived by the backfill).
+spans are never pruned: there's one row per process start (tiny), and a
+leave change on an old recorded day re-derives that day's waiver from
+them - pruning would make an old day look like downtime.
 
 ### Removing `/missed`
 
