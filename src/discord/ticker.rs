@@ -239,11 +239,12 @@ fn standup_message(mentions: &str, todo_cutoff: Time, progress_cutoff: Time) -> 
          • `/todo` cut-off: {}\n\
          • `/progress` cut-off: {}\n\
          • Anything not submitted by its cut-off is recorded and reflected in your performance review.\n\
-         • On leave or sick? Tell your lead before 11:00.\n\
+         • On leave or sick? Tell your lead before {}.\n\
          • Unfinished from yesterday? Carry it over with `/todo add carryover:`.\n\
          📋 Time for today's standup! Submit your todo with `/todo add`.",
         todo_cutoff.strftime("%H:%M"),
         progress_cutoff.strftime("%H:%M"),
+        todo_cutoff.strftime("%H:%M"),
     )
 }
 
@@ -289,6 +290,31 @@ fn cutoff_alert_message(
     ))
 }
 
+/// The message to post for `kind`'s cut-off on `date`, or `None`. Each kind
+/// reads only its own waiver flag: crossing them would mention people for a
+/// window the bot wasn't up for.
+fn cutoff_alert_for(
+    conn: &Connection,
+    rules: &crate::cutoffs::Rules,
+    date: &str,
+    kind: CutoffKind,
+) -> anyhow::Result<Option<String>> {
+    let day = crate::cutoffs::day_cutoffs(conn, rules, date)?;
+    let (cutoff_time, waived, missing) = match kind {
+        CutoffKind::Todo => (
+            rules.todo_cutoff,
+            day.todo_waived,
+            followups::members_missing_todo(conn, date, &day.todo_cutoff)?,
+        ),
+        CutoffKind::Progress => (
+            rules.progress_cutoff,
+            day.progress_waived,
+            followups::members_missing_update(conn, date, &day.progress_cutoff)?,
+        ),
+    };
+    Ok(cutoff_alert_message(kind, cutoff_time, &missing, waived))
+}
+
 /// Posts the one-per-day cut-off alert once `kind`'s cut-off has passed.
 /// Marked sent even when there's nothing to post, like the day summary's
 /// "no submissions" message, so it isn't re-queried every tick.
@@ -299,9 +325,9 @@ async fn maybe_fire_cutoff_alert(
     kind: CutoffKind,
     rules: &crate::cutoffs::Rules,
 ) {
-    let (sent_kind, cutoff_time) = match kind {
-        CutoffKind::Todo => ("todo_cutoff", rules.todo_cutoff),
-        CutoffKind::Progress => ("progress_cutoff", rules.progress_cutoff),
+    let sent_kind = match kind {
+        CutoffKind::Todo => "todo_cutoff",
+        CutoffKind::Progress => "progress_cutoff",
     };
     match already_sent(db, date, sent_kind) {
         Ok(true) => return,
@@ -314,19 +340,7 @@ async fn maybe_fire_cutoff_alert(
 
     let message = {
         let conn = db.lock().expect("db mutex poisoned");
-        crate::cutoffs::day_cutoffs(&conn, rules, date).and_then(|day| {
-            let (waived, missing) = match kind {
-                CutoffKind::Todo => (
-                    day.todo_waived,
-                    followups::members_missing_todo(&conn, date, &day.todo_cutoff)?,
-                ),
-                CutoffKind::Progress => (
-                    day.progress_waived,
-                    followups::members_missing_update(&conn, date, &day.progress_cutoff)?,
-                ),
-            };
-            Ok(cutoff_alert_message(kind, cutoff_time, &missing, waived))
-        })
+        cutoff_alert_for(&conn, rules, date, kind)
     };
     let message = match message {
         Ok(m) => m,
@@ -1341,5 +1355,81 @@ mod tests {
             cutoff_alert_message(CutoffKind::Todo, jiff::civil::time(11, 0, 0, 0), &[], true),
             None
         );
+    }
+
+    #[test]
+    fn standup_message_uses_the_configured_todo_cutoff_for_the_leave_rule() {
+        let m = standup_message(
+            "<@1>",
+            jiff::civil::time(10, 30, 0, 0),
+            jiff::civil::time(15, 50, 0, 0),
+        );
+        assert!(m.contains("• `/todo` cut-off: 10:30\n"), "{m}");
+        assert!(m.contains("Tell your lead before 10:30."), "{m}");
+        assert!(!m.contains("11:00"), "{m}");
+    }
+
+    const D: &str = "2026-09-29";
+
+    /// UTC rules (09:00/11:00/15:00/15:50), one uptime span `from`..`to` on D.
+    /// Member 1 has an early todo and no report; member 2 has nothing.
+    fn alert_db(from: &str, to: &str) -> (Connection, crate::cutoffs::Rules) {
+        use jiff::civil::time;
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(&dir.keep().join("d.sqlite3")).unwrap();
+        for id in ["1", "2"] {
+            conn.execute(
+                "INSERT INTO members (discord_user_id, name, role, is_lead) VALUES (?1, 'n', 'senior', 0)",
+                [id],
+            )
+            .unwrap();
+        }
+        let todo = entries::insert_todo(&conn, "1", D, "t", None, None).unwrap();
+        conn.execute(
+            "UPDATE entries SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![format!("{D}T08:00:00Z"), todo],
+        )
+        .unwrap();
+        let id =
+            crate::cutoffs::start_span(&conn, format!("{D}T{from}:00Z").parse().unwrap()).unwrap();
+        crate::cutoffs::touch_span(&conn, id, format!("{D}T{to}:00Z").parse().unwrap()).unwrap();
+        let rules = crate::cutoffs::Rules {
+            tz: jiff::tz::TimeZone::UTC,
+            todo_time: time(9, 0, 0, 0),
+            todo_cutoff: time(11, 0, 0, 0),
+            update_time: time(15, 0, 0, 0),
+            progress_cutoff: time(15, 50, 0, 0),
+            tolerance: jiff::SignedDuration::from_secs(120),
+        };
+        (conn, rules)
+    }
+
+    #[test]
+    fn alerts_waive_only_the_window_the_bot_missed_progress_covered() {
+        let (conn, rules) = alert_db("14:00", "16:00");
+        let todo = cutoff_alert_for(&conn, &rules, D, CutoffKind::Todo)
+            .unwrap()
+            .unwrap();
+        assert!(todo.starts_with("⚠️") && !todo.contains("<@"), "{todo}");
+        let prog = cutoff_alert_for(&conn, &rules, D, CutoffKind::Progress)
+            .unwrap()
+            .unwrap();
+        assert!(prog.starts_with("⛔") && prog.contains("<@1>"), "{prog}");
+    }
+
+    #[test]
+    fn alerts_waive_only_the_window_the_bot_missed_todo_covered() {
+        let (conn, rules) = alert_db("08:00", "12:00");
+        let todo = cutoff_alert_for(&conn, &rules, D, CutoffKind::Todo)
+            .unwrap()
+            .unwrap();
+        assert!(
+            todo.starts_with("⛔") && todo.contains("<@2>") && !todo.contains("<@1>"),
+            "{todo}"
+        );
+        let prog = cutoff_alert_for(&conn, &rules, D, CutoffKind::Progress)
+            .unwrap()
+            .unwrap();
+        assert!(prog.starts_with("⚠️") && !prog.contains("<@"), "{prog}");
     }
 }
