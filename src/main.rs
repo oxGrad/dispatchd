@@ -12,6 +12,7 @@ mod leave;
 mod lock;
 mod maintenance;
 mod members;
+mod performance;
 mod recap;
 mod reminders;
 mod service;
