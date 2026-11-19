@@ -8,6 +8,7 @@ mod followups;
 mod github;
 mod github_login;
 mod init;
+mod leave;
 mod lock;
 mod maintenance;
 mod members;
