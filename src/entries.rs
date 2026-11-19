@@ -245,7 +245,7 @@ pub fn carryover_count(
 }
 
 /// A carried-over todo plus its latest progress report and whether it
-/// moved today - the `/team report` "Carried over" view.
+/// moved today - the `/team report` "Not carried over yet" view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CarryoverDetail {
     pub task: String,
@@ -260,7 +260,7 @@ pub struct CarryoverDetail {
     pub updated_today: bool,
 }
 
-/// Per-todo detail for the `/team report` "Carried over" block. Same
+/// Per-todo detail for the `/team report` "Not carried over yet" block. Same
 /// window / user / ordering as `carryover_todos`, but with a deliberately
 /// looser eligibility rule: a todo is included unless it has a `done`
 /// update dated *before today*. So a carried-over todo finished **today**

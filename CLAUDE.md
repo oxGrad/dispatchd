@@ -291,8 +291,8 @@ src/
                  been carried forward yet (no entries.carried_from row
                  points at them), feeding /todo add carryover:
                  autocomplete, /todo list's "Not carried over yet"
-                 section, /team status ("+N carried") and /team report
-                 ("Carried over" block). Carry-over is explicit:
+                 section, /team status ("+N to carry") and /team report
+                 ("Not carried over yet" block). Carry-over is explicit:
                  /progress add only offers today's todos.
                  short_date formats an origin date ("2026-08-27" ->
                  "Aug 27")

@@ -125,7 +125,7 @@ doesn't change or remove that post.
   ```
   Use this when you need an id for `edit`/`delete` below.
   Still-open todos from earlier days appear below this in a read-only
-  **Carried over** section - see "Carrying work over" below.
+  **Not carried over yet** section - see "Carrying work over" below.
 - **`/todo edit id:<...>`** - the `id` field autocompletes over today's
   todos as you type (pick from the suggestions rather than typing a
   number by hand). Opens the same form as `add`, pre-filled with the
@@ -217,9 +217,10 @@ it to `0` to switch this off):
   over first, then report against today's copy.
 - **`/todo list`** shows candidates in a read-only **Not carried over
   yet** block below today's todos. You can't `edit` or `delete` them.
-- The tech lead sees them in **`/team status`** (a `+N carried` marker on
-  your line) and **`/team report`** (a **Carried over** block per
-  person, showing each todo's latest status and whether it moved today).
+- The tech lead sees them in **`/team status`** (a `+N to carry` marker on
+  your line) and **`/team report`** (a **Not carried over yet** block per
+  person, showing each todo's latest status). Once you carry a todo it
+  leaves these lists and counts as one of today's todos.
 
 Carry-over is per-person and only ever looks at your own todos.
 
@@ -232,8 +233,9 @@ with an SOW ref, the unique refs are appended, e.g. `✅ Alice - 3/3
 updated (M1D1, M1D2, M2)` - handy for the tech lead to see which
 milestones/deliverables got touched today without opening `/todo list`
 for each person. If a member has unfinished todos carried over from the
-last few days, their line ends with `+N carried` (or reads `no new todo
-(N carried)` when they haven't posted anything today). Everyone else gets
+last few days that they haven't carried over yet, their line ends with
+`+N to carry` (or reads `❌ ... - no todo posted (N to carry)` when they
+haven't posted anything today - an uncarried todo isn't today's `/todo`). Everyone else gets
 an "restricted to the tech lead" reply if they try it - it's not meant as
 a general team overview. A member with `role = "viewer"` also passes this
 check (see below), so `/team status` and `/team report` aren't strictly
@@ -246,9 +248,9 @@ its notes, SOW ref, and the progress report(s) filed against it, plus any
 unplanned work. Long reports are split across follow-up messages (Discord
 caps a message at 2000 characters). Ephemeral - only you see it.
 
-Any todos carried over from earlier days (still open, no Done report)
-appear in a **Carried over** block at the end of each member's section,
-with the latest status and whether it was updated today.
+Any unfinished todos from earlier days that haven't been carried over yet
+(still open, no Done report) appear in a **Not carried over yet** block at
+the end of each member's section, with their latest status.
 
 ## `/team github` - tech lead only
 
