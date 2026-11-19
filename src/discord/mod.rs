@@ -89,7 +89,17 @@ impl EventHandler for Handler {
                     }
                 }
                 "todo" => match todo::subcommand(&command.data.options) {
-                    Some(("add", _)) => todo::handle_add(&ctx, &command).await,
+                    Some(("add", opts)) => {
+                        todo::handle_add(
+                            &ctx,
+                            &command,
+                            opts,
+                            &self.db,
+                            &self.timezone,
+                            self.carryover_lookback_days,
+                        )
+                        .await
+                    }
                     Some(("edit", opts)) => {
                         todo::handle_edit(&ctx, &command, opts, &self.db, &self.timezone).await
                     }
@@ -206,10 +216,7 @@ impl EventHandler for Handler {
             },
             Interaction::Autocomplete(autocomplete) => match autocomplete.data.name.as_str() {
                 "todo" => {
-                    todo::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone).await
-                }
-                "progress" => {
-                    progress::handle_autocomplete(
+                    todo::handle_autocomplete(
                         &ctx,
                         &autocomplete,
                         &self.db,
@@ -218,11 +225,27 @@ impl EventHandler for Handler {
                     )
                     .await
                 }
+                "progress" => {
+                    progress::handle_autocomplete(&ctx, &autocomplete, &self.db, &self.timezone)
+                        .await
+                }
                 "team" => team::handle_autocomplete(&ctx, &autocomplete, &self.db).await,
                 _ => {}
             },
             Interaction::Modal(modal) if modal.data.custom_id == todo::ADD_MODAL_ID => {
                 todo::handle_modal_submission(&ctx, &modal, &self.db, &self.timezone).await;
+            }
+            Interaction::Modal(modal)
+                if modal.data.custom_id.starts_with(todo::CARRY_MODAL_PREFIX) =>
+            {
+                todo::handle_carry_modal_submission(
+                    &ctx,
+                    &modal,
+                    &self.db,
+                    &self.timezone,
+                    self.carryover_lookback_days,
+                )
+                .await;
             }
             Interaction::Modal(modal)
                 if modal.data.custom_id.starts_with(todo::EDIT_MODAL_PREFIX) =>

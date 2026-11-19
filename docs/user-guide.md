@@ -115,8 +115,8 @@ doesn't change or remove that post.
   - **`task`** - autocompletes over today's todos that don't have a
     progress report yet. Pick one, or ignore the suggestions and type
     something else entirely for unplanned/ad-hoc work that wasn't on your
-    todo list (e.g. "Fixed a prod outage"). Todos carried over from
-    earlier days show up here too, marked `· carried from <date>`.
+    todo list (e.g. "Fixed a prod outage"). Only today's todos are
+    offered - carry an older one over first with `/todo add carryover:`.
   - **`status`** - Done / In Progress / Blocked, pick from the dropdown.
 
   That opens a form with **Progress** (required - what actually happened)
@@ -172,27 +172,25 @@ Example - unplanned work, nothing on your todo list matched:
 
 ## Carrying work over
 
-A todo you don't finish doesn't vanish at midnight. As long as no
-**Done** progress report has been filed against it, a todo from the last
-7 days keeps showing up as "still open" (the tech lead can change the
-window in `config.toml`, or set it to `0` to switch this off):
+A todo you don't finish doesn't vanish at midnight, but it doesn't move
+to the next day by itself either: you carry it over explicitly. A todo
+from the last 7 days with no **Done** report and not yet carried is a
+candidate (the tech lead can change the window in `config.toml`, or set
+it to `0` to switch this off):
 
-- **`/progress add`** lists it in the `task` autocomplete, marked
-  `· carried from <date>`. Picking it attaches your report to the
-  original todo - and its SOW ref - instead of logging it as unplanned
-  work.
-- **`/todo list`** shows it in a read-only **Carried over (still open)**
-  block below today's todos. You can't `edit` or `delete` a carried-over
-  todo - close it out by filing a Done report, or leave it to age past
-  the window.
-- The tech lead sees it in **`/team status`** (a `+N carried` marker on
+- **`/todo add carryover:<...>`** autocompletes over your candidates,
+  marked `· from <date>`. Picking one opens the add form prefilled with
+  its task, notes and SOW ref - edit if you like and submit, and today's
+  todo is created, linked to the original. A todo can be carried over
+  only once; deleting the carried copy makes the original a candidate
+  again.
+- **`/progress add`** lists today's todos only, so carry an older todo
+  over first, then report against today's copy.
+- **`/todo list`** shows candidates in a read-only **Not carried over
+  yet** block below today's todos. You can't `edit` or `delete` them.
+- The tech lead sees them in **`/team status`** (a `+N carried` marker on
   your line) and **`/team report`** (a **Carried over** block per
   person, showing each todo's latest status and whether it moved today).
-
-Note the day-boundary asymmetry: filing an *In Progress* or *Blocked*
-(not Done) report on a todo drops it from `/progress add`'s suggestions
-for the rest of that day, but it comes back as a carried-over item the
-next day and stays there until you file a Done report.
 
 Carry-over is per-person and only ever looks at your own todos.
 

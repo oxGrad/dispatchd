@@ -69,14 +69,20 @@ pub fn insert_update(
     Ok(conn.last_insert_rowid())
 }
 
-/// Fetches a todo's task text, scoped to the owning user (defensive check -
+/// Fetches a todo's task text, scoped to the owning user and date (defensive check -
 /// a submitted modal's custom_id could in principle reference a todo id
 /// that doesn't belong to whoever is submitting it).
-pub fn todo_task(conn: &Connection, todo_id: i64, discord_user_id: &str) -> Result<Option<String>> {
+pub fn todo_task(
+    conn: &Connection,
+    todo_id: i64,
+    discord_user_id: &str,
+    date: &str,
+) -> Result<Option<String>> {
     Ok(conn
         .query_row(
-            "SELECT task FROM entries WHERE id = ?1 AND type = 'todo' AND discord_user_id = ?2",
-            params![todo_id, discord_user_id],
+            "SELECT task FROM entries
+             WHERE id = ?1 AND type = 'todo' AND discord_user_id = ?2 AND date = ?3",
+            params![todo_id, discord_user_id, date],
             |row| row.get(0),
         )
         .optional()?)
@@ -176,6 +182,7 @@ pub fn carryover_todos(
         "SELECT t.id, t.task, t.sow_ref, t.date FROM entries t
          WHERE t.type = 'todo' AND t.discord_user_id = ?1
            AND t.date >= date(?2, ?3) AND t.date < ?2
+           AND NOT EXISTS (SELECT 1 FROM entries c WHERE c.carried_from = t.id)
            AND t.task LIKE '%' || ?4 || '%'
            AND NOT EXISTS (
              -- no need to re-check u.discord_user_id here: todo_id uniquely
@@ -221,6 +228,7 @@ pub fn carryover_count(
         "SELECT COUNT(*) FROM entries t
          WHERE t.type = 'todo' AND t.discord_user_id = ?1
            AND t.date >= date(?2, ?3) AND t.date < ?2
+           AND NOT EXISTS (SELECT 1 FROM entries c WHERE c.carried_from = t.id)
            AND NOT EXISTS (
              SELECT 1 FROM entries u
              WHERE u.type = 'update' AND u.todo_id = t.id AND u.status = 'done'
@@ -270,6 +278,7 @@ pub fn carryover_report(
         "SELECT t.id, t.task, t.sow_ref, t.date FROM entries t
          WHERE t.type = 'todo' AND t.discord_user_id = ?1
            AND t.date >= date(?2, ?3) AND t.date < ?2
+           AND NOT EXISTS (SELECT 1 FROM entries c WHERE c.carried_from = t.id)
            AND NOT EXISTS (
              -- no need to re-check u.discord_user_id here: todo_id uniquely
              -- identifies a todo and entries::todo_task is owner-scoped, so
@@ -331,6 +340,93 @@ pub fn carryover_report(
         });
     }
     Ok(out)
+}
+
+/// The candidate check shared by `carryover_origin` and `carry_over_todo`:
+/// `origin_id` is currently one of this member's carry-over candidates.
+fn origin_candidate(
+    conn: &Connection,
+    discord_user_id: &str,
+    today: &str,
+    lookback_days: i64,
+    origin_id: i64,
+) -> Result<Option<TodoForEdit>> {
+    if lookback_days <= 0 {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT t.task, t.notes, t.sow_ref FROM entries t
+             WHERE t.id = ?1 AND t.type = 'todo' AND t.discord_user_id = ?2
+               AND t.date >= date(?3, ?4) AND t.date < ?3
+               AND NOT EXISTS (SELECT 1 FROM entries c WHERE c.carried_from = t.id)
+               AND NOT EXISTS (
+                 SELECT 1 FROM entries u
+                 WHERE u.type = 'update' AND u.todo_id = t.id AND u.status = 'done'
+               )",
+            params![
+                origin_id,
+                discord_user_id,
+                today,
+                format!("-{lookback_days} days")
+            ],
+            |row| {
+                Ok(TodoForEdit {
+                    task: row.get(0)?,
+                    notes: row.get(1)?,
+                    sow_ref: row.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// The origin todo's fields (to prefill the carry modal), `Some` only when
+/// `origin_id` is currently one of the member's carry-over candidates.
+pub fn carryover_origin(
+    conn: &Connection,
+    discord_user_id: &str,
+    today: &str,
+    lookback_days: i64,
+    origin_id: i64,
+) -> Result<Option<TodoForEdit>> {
+    origin_candidate(conn, discord_user_id, today, lookback_days, origin_id)
+}
+
+/// Carries `origin_id` over: re-checks candidacy and inserts today's todo
+/// with `carried_from = origin_id` in one transaction. `None` when the
+/// origin isn't a candidate (not theirs, finished, too old, already carried).
+#[allow(clippy::too_many_arguments)]
+pub fn carry_over_todo(
+    conn: &Connection,
+    discord_user_id: &str,
+    today: &str,
+    lookback_days: i64,
+    origin_id: i64,
+    task: &str,
+    notes: Option<&str>,
+    sow_ref: Option<&str>,
+) -> Result<Option<i64>> {
+    let tx = conn.unchecked_transaction()?;
+    if origin_candidate(&tx, discord_user_id, today, lookback_days, origin_id)?.is_none() {
+        return Ok(None);
+    }
+    tx.execute(
+        "INSERT INTO entries (discord_user_id, date, type, task, notes, sow_ref, carried_from, created_at)
+         VALUES (?1, ?2, 'todo', ?3, ?4, ?5, ?6, ?7)",
+        params![
+            discord_user_id,
+            today,
+            task,
+            notes,
+            sow_ref,
+            origin_id,
+            Timestamp::now().to_string()
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    tx.commit()?;
+    Ok(Some(id))
 }
 
 /// A todo's current editable fields, scoped to owner+date+type='todo' -
@@ -781,11 +877,11 @@ mod tests {
         let todo_id = insert_todo(&conn, "42", "2026-08-29", "Write tests", None, None).unwrap();
 
         assert_eq!(
-            todo_task(&conn, todo_id, "42").unwrap(),
+            todo_task(&conn, todo_id, "42", "2026-08-29").unwrap(),
             Some("Write tests".to_string())
         );
-        assert_eq!(todo_task(&conn, todo_id, "99").unwrap(), None);
-        assert_eq!(todo_task(&conn, 999_999, "42").unwrap(), None);
+        assert_eq!(todo_task(&conn, todo_id, "99", "2026-08-29").unwrap(), None);
+        assert_eq!(todo_task(&conn, 999_999, "42", "2026-08-29").unwrap(), None);
     }
 
     #[test]
@@ -1538,5 +1634,122 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn carry_over_todo_links_the_origin_and_hides_it_from_candidates() {
+        let conn = open_test_db();
+        let origin = insert_todo(
+            &conn,
+            "1",
+            "2026-08-27",
+            "Fix login",
+            Some("plan"),
+            Some("M1D2"),
+        )
+        .unwrap();
+        let prefill = carryover_origin(&conn, "1", "2026-08-28", 7, origin)
+            .unwrap()
+            .unwrap();
+        assert_eq!(prefill.task, "Fix login");
+        let new_id = carry_over_todo(
+            &conn,
+            "1",
+            "2026-08-28",
+            7,
+            origin,
+            "Fix login",
+            Some("plan"),
+            Some("M1D2"),
+        )
+        .unwrap()
+        .unwrap();
+        let carried: Option<i64> = conn
+            .query_row(
+                "SELECT carried_from FROM entries WHERE id = ?1",
+                [new_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(carried, Some(origin));
+        assert!(
+            carryover_todos(&conn, "1", "2026-08-28", 7, "")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(carryover_count(&conn, "1", "2026-08-28", 7).unwrap(), 0);
+        assert!(
+            carryover_report(&conn, "1", "2026-08-28", 7)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn carry_over_todo_refuses_a_second_carry_of_the_same_origin() {
+        let conn = open_test_db();
+        let origin = insert_todo(&conn, "1", "2026-08-27", "x", None, None).unwrap();
+        assert!(
+            carry_over_todo(&conn, "1", "2026-08-28", 7, origin, "x", None, None)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            carry_over_todo(&conn, "1", "2026-08-28", 7, origin, "x", None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn carry_over_todo_refuses_someone_elses_or_a_finished_todo() {
+        let conn = open_test_db();
+        let theirs = insert_todo(&conn, "2", "2026-08-27", "x", None, None).unwrap();
+        assert_eq!(
+            carry_over_todo(&conn, "1", "2026-08-28", 7, theirs, "x", None, None).unwrap(),
+            None
+        );
+        let done = insert_todo(&conn, "1", "2026-08-27", "y", None, None).unwrap();
+        insert_update(
+            &conn,
+            "1",
+            "2026-08-27",
+            "y",
+            Some(done),
+            "done",
+            "ok",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            carry_over_todo(&conn, "1", "2026-08-28", 7, done, "y", None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn deleting_the_carried_todo_restores_the_origin_as_a_candidate() {
+        let conn = open_test_db();
+        let origin = insert_todo(&conn, "1", "2026-08-27", "x", None, None).unwrap();
+        let new_id = carry_over_todo(&conn, "1", "2026-08-28", 7, origin, "x", None, None)
+            .unwrap()
+            .unwrap();
+        delete_todo(&conn, new_id, "1", "2026-08-28").unwrap();
+        assert_eq!(
+            carryover_todos(&conn, "1", "2026-08-28", 7, "")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn todo_task_is_scoped_to_the_date() {
+        let conn = open_test_db();
+        let id = insert_todo(&conn, "1", "2026-08-27", "x", None, None).unwrap();
+        assert_eq!(
+            todo_task(&conn, id, "1", "2026-08-27").unwrap().as_deref(),
+            Some("x")
+        );
+        assert_eq!(todo_task(&conn, id, "1", "2026-08-28").unwrap(), None);
     }
 }

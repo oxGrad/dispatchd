@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use jiff::tz::TimeZone;
@@ -29,7 +28,7 @@ const LIST_SUMMARY_MAX_LEN: usize = 100;
 
 const PROGRESS_HELP_TEXT: &str = "\
 **/progress subcommands**
-`/progress add task:<...> status:<...>` - report progress against a todo (or type a new task for unplanned work)
+`/progress add task:<...> status:<...>` - report progress against one of today's todos (carry older ones over with `/todo add carryover:` first), or type a new task for unplanned work
 `/progress edit report:<...>` - revise one of today's progress reports; omit `status` to keep it (autocomplete over today's)
 `/progress list` - list today's progress reports with their ids
 `/progress help` - show this message";
@@ -227,43 +226,6 @@ fn cap_choice_label(label: String) -> String {
     }
 }
 
-/// Merges today's open todos with carried-over ones for the `/progress
-/// add` task autocomplete: today's first, then carry-over, deduped by
-/// todo id, capped at Discord's 25-choice limit. Returns
-/// `(label, option_value)` pairs; carry-over labels carry the origin
-/// date. Pure - no serenity types.
-fn merge_task_choices(
-    today: Vec<(i64, String)>,
-    carried: Vec<entries::CarryoverTodo>,
-) -> Vec<(String, String)> {
-    let mut seen: HashSet<i64> = HashSet::new();
-    let mut out: Vec<(String, String)> = Vec::new();
-    for (id, task) in today {
-        if out.len() >= 25 {
-            break;
-        }
-        if seen.insert(id) {
-            out.push((cap_choice_label(task), format!("id:{id}")));
-        }
-    }
-    for c in carried {
-        if out.len() >= 25 {
-            break;
-        }
-        if seen.insert(c.id) {
-            out.push((
-                cap_choice_label(format!(
-                    "{} · carried from {}",
-                    c.task,
-                    entries::short_date(&c.origin_date)
-                )),
-                format!("id:{}", c.id),
-            ));
-        }
-    }
-    out
-}
-
 /// Parses `"progress_modal:<status_code>:<task_encoded>"` into
 /// `(status_code, task_encoded)`. `None` if malformed.
 fn parse_custom_id(custom_id: &str) -> Option<(&str, &str)> {
@@ -302,7 +264,6 @@ pub async fn handle_autocomplete(
     autocomplete: &AutocompleteInteraction,
     db: &Arc<Mutex<Connection>>,
     timezone: &TimeZone,
-    carryover_lookback_days: u32,
 ) {
     let Some((sub, options)) = subcommand(&autocomplete.data.options) else {
         return;
@@ -315,21 +276,15 @@ pub async fn handle_autocomplete(
             let partial = get_option_string(options, "task").unwrap_or_default();
             let result = {
                 let conn = db.lock().expect("db mutex poisoned");
-                let today = entries::list_open_todos(&conn, &discord_user_id, &date, &partial);
-                let carried = entries::carryover_todos(
-                    &conn,
-                    &discord_user_id,
-                    &date,
-                    carryover_lookback_days as i64,
-                    &partial,
-                );
-                today.and_then(|t| carried.map(|c| (t, c)))
+                entries::list_open_todos(&conn, &discord_user_id, &date, &partial)
             };
             match result {
-                Ok((today, carried)) => CreateAutocompleteResponse::new().set_choices(
-                    merge_task_choices(today, carried)
+                Ok(today) => CreateAutocompleteResponse::new().set_choices(
+                    today
                         .into_iter()
-                        .map(|(label, value)| AutocompleteChoice::new(label, value))
+                        .map(|(id, task)| {
+                            AutocompleteChoice::new(cap_choice_label(task), format!("id:{id}"))
+                        })
                         .collect(),
                 ),
                 Err(e) => {
@@ -546,14 +501,14 @@ pub async fn handle_modal_submission(
     let blocker = modal_value(modal, BLOCKER_INPUT_ID).filter(|s| !s.trim().is_empty());
     let date = entries::today_in(timezone);
 
-    let insert_result = {
+    let insert_result: anyhow::Result<Option<String>> = 'db: {
         let conn = db.lock().expect("db mutex poisoned");
 
         let (todo_id, task) = if let Some(id_str) = task_encoded.strip_prefix("id:") {
             match id_str.parse::<i64>() {
-                Ok(id) => match entries::todo_task(&conn, id, &discord_user_id) {
+                Ok(id) => match entries::todo_task(&conn, id, &discord_user_id, &date) {
                     Ok(Some(task)) => (Some(id), task),
-                    Ok(None) => (None, task_encoded.to_string()),
+                    Ok(None) => break 'db Ok(None),
                     Err(e) => {
                         eprintln!("failed to resolve todo task for update: {e}");
                         (None, task_encoded.to_string())
@@ -575,12 +530,16 @@ pub async fn handle_modal_submission(
             &progress,
             blocker.as_deref(),
         )
-        .map(|_| task)
+        .map(|_| Some(task))
     };
 
     let reply_text = match insert_result {
-        Ok(task) => {
+        Ok(Some(task)) => {
             format_confirmation("saved", Some(&task), status, &progress, blocker.as_deref())
+        }
+        Ok(None) => {
+            "⚠️ That todo isn't one of today's. Carry it over first with `/todo add carryover:`."
+                .to_string()
         }
         Err(e) => {
             eprintln!("failed to insert update: {e}");
@@ -658,60 +617,6 @@ pub async fn handle_edit_modal_submission(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn merge_task_choices_puts_today_first_then_carried_labelled() {
-        let today = vec![(1, "Write parser".to_string())];
-        let carried = vec![crate::entries::CarryoverTodo {
-            id: 2,
-            task: "Refactor auth".to_string(),
-            sow_ref: Some("M2".to_string()),
-            origin_date: "2026-08-27".to_string(),
-        }];
-        let got = merge_task_choices(today, carried);
-        assert_eq!(
-            got,
-            vec![
-                ("Write parser".to_string(), "id:1".to_string()),
-                (
-                    "Refactor auth · carried from Aug 27".to_string(),
-                    "id:2".to_string()
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn merge_task_choices_dedups_by_id_and_caps_at_25() {
-        // 24 today entries so the carried entries actually reach the loop:
-        // id:0 is a dup (skipped by dedup), id:24 fills the 25th slot, id:25
-        // is dropped by the cap.
-        let today: Vec<(i64, String)> = (0..24).map(|i| (i, format!("t{i}"))).collect();
-        let carried = vec![
-            crate::entries::CarryoverTodo {
-                id: 0, // already in `today`
-                task: "dup".to_string(),
-                sow_ref: None,
-                origin_date: "2026-08-27".to_string(),
-            },
-            crate::entries::CarryoverTodo {
-                id: 24,
-                task: "c24".to_string(),
-                sow_ref: None,
-                origin_date: "2026-08-27".to_string(),
-            },
-            crate::entries::CarryoverTodo {
-                id: 25,
-                task: "c25".to_string(),
-                sow_ref: None,
-                origin_date: "2026-08-27".to_string(),
-            },
-        ];
-        let got = merge_task_choices(today, carried);
-        assert_eq!(got.len(), 25);
-        assert_eq!(got.iter().filter(|(_, v)| v == "id:0").count(), 1);
-        assert!(got.iter().all(|(_, v)| v != "id:25"));
-    }
 
     #[test]
     fn cap_choice_label_truncates_over_100_chars_and_leaves_short_untouched() {
